@@ -1,9 +1,9 @@
 //! macOS desktop shell: global hotkey → command picker → replace / popup.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use eframe::egui;
@@ -11,10 +11,10 @@ use writing_tools_core::commands::{run_command, CommandKind, WritingCommand};
 use writing_tools_core::config::{AppConfig, LimitsConfig};
 use writing_tools_core::providers::provider_from_config;
 use writing_tools_platform::macos::{
-    accessibility_trusted, activate_pid, frontmost_pid, prompt_accessibility, MacosHotkey,
-    MacosSelection,
+    accessibility_trusted, activate_pid, frontmost_pid, prompt_accessibility, HotkeyAction,
+    MacosHotkey, MacosSelection,
 };
-use writing_tools_platform::{HotkeyService, SelectionService};
+use writing_tools_platform::SelectionService;
 
 #[derive(Debug)]
 enum JobResult {
@@ -40,7 +40,7 @@ struct ServeApp {
     config_path: PathBuf,
     selection: Arc<MacosSelection>,
     hotkey: MacosHotkey,
-    hotkey_fired: Arc<AtomicBool>,
+    config_mtime: Option<SystemTime>,
     phase: UiPhase,
     /// Text captured at hotkey time (before our window steals focus).
     captured_text: String,
@@ -65,22 +65,17 @@ impl ServeApp {
         config_path: PathBuf,
         selection: Arc<MacosSelection>,
     ) -> Result<Self> {
-        let hotkey_fired = Arc::new(AtomicBool::new(false));
         let hotkey = MacosHotkey::new();
-        let flag = hotkey_fired.clone();
         // Wake egui when the hotkey fires so a hidden window still updates.
         let egui_ctx = _cc.egui_ctx.clone();
         hotkey.set_wake(move || {
             egui_ctx.request_repaint();
         });
         // Must register on the main thread (eframe creation runs there).
-        block_on_ready(hotkey.register(
-            &config.hotkey,
-            Box::new(move || {
-                flag.store(true, Ordering::SeqCst);
-            }),
-        ))
-        .with_context(|| format!("register hotkey `{}`", config.hotkey))?;
+        Self::register_hotkeys(&hotkey, &config)?;
+        let config_mtime = std::fs::metadata(&config_path)
+            .and_then(|m| m.modified())
+            .ok();
 
         let (job_tx, job_rx) = mpsc::channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -89,21 +84,12 @@ impl ServeApp {
             .context("tokio runtime")?;
 
         Ok(Self {
-            status_line: format!(
-                "Hotkey: {} · {} commands · Accessibility: {}",
-                config.hotkey,
-                config.commands.len(),
-                if accessibility_trusted() {
-                    "granted"
-                } else {
-                    "MISSING"
-                }
-            ),
+            status_line: Self::status_for(&config),
             config,
             config_path,
             selection,
             hotkey,
-            hotkey_fired,
+            config_mtime,
             phase: UiPhase::Hidden,
             captured_text: String::new(),
             captured_app: None,
@@ -125,6 +111,92 @@ impl ServeApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
                 egui::WindowLevel::AlwaysOnTop,
             ));
+        }
+    }
+
+
+    fn status_for(config: &AppConfig) -> String {
+        let cmd_hk = config
+            .commands
+            .iter()
+            .filter(|c| c.hotkey.as_ref().map(|h| !h.trim().is_empty()).unwrap_or(false))
+            .count();
+        format!(
+            "Hotkey: {} · {} commands ({} shortcuts) · Accessibility: {}",
+            config.hotkey,
+            config.commands.len(),
+            cmd_hk,
+            if accessibility_trusted() {
+                "granted"
+            } else {
+                "MISSING"
+            }
+        )
+    }
+
+    fn register_hotkeys(hotkey: &MacosHotkey, config: &AppConfig) -> Result<()> {
+        let cmd_keys: Vec<(String, String)> = config
+            .commands
+            .iter()
+            .filter_map(|c| {
+                c.hotkey
+                    .as_ref()
+                    .map(|h| h.trim().to_string())
+                    .filter(|h| !h.is_empty())
+                    .map(|h| (c.id.clone(), h))
+            })
+            .collect();
+        hotkey
+            .reregister_all(&config.hotkey, &cmd_keys)
+            .with_context(|| format!("register hotkeys (picker `{}`)", config.hotkey))
+    }
+
+    fn maybe_reload_config(&mut self) {
+        let Ok(meta) = std::fs::metadata(&self.config_path) else {
+            return;
+        };
+        let Ok(mtime) = meta.modified() else {
+            return;
+        };
+        if self.config_mtime == Some(mtime) {
+            return;
+        }
+        match AppConfig::load_or_init(&self.config_path) {
+            Ok(cfg) => {
+                if let Err(e) = Self::register_hotkeys(&self.hotkey, &cfg) {
+                    self.phase = UiPhase::Error {
+                        message: format!("Hotkey reload failed: {e}"),
+                    };
+                    // still keep new config for limits/commands UI in overlay settings
+                }
+                self.config = cfg;
+                self.config_mtime = Some(mtime);
+                self.status_line = Self::status_for(&self.config);
+            }
+            Err(e) => {
+                self.phase = UiPhase::Error {
+                    message: format!("Config reload failed: {e}"),
+                };
+            }
+        }
+    }
+
+    fn capture_selection(&mut self) -> Result<bool, String> {
+        self.target_pid = frontmost_pid();
+        self.soft_warn_acked = false;
+        self.replace_warn_acked = false;
+        match self.runtime.block_on(self.selection.read_selection()) {
+            Ok(Some(snap)) => {
+                self.captured_text = snap.text;
+                self.captured_app = snap.app_name;
+                self.captured_range = snap.range;
+                Ok(true)
+            }
+            Ok(None) => Err(
+                "No text selection found.\nSelect text in another app, then press the hotkey again."
+                    .into(),
+            ),
+            Err(e) => Err(format!("{e}")),
         }
     }
 
@@ -161,34 +233,51 @@ then restart `writing-tools serve`."
             return;
         }
 
-        // Capture focus target + selection BEFORE our window activates.
-        self.target_pid = frontmost_pid();
-        self.soft_warn_acked = false;
-        self.replace_warn_acked = false;
-        match self.runtime.block_on(self.selection.read_selection()) {
-            Ok(Some(snap)) => {
-                self.captured_text = snap.text;
-                self.captured_app = snap.app_name;
-                self.captured_range = snap.range;
-            }
-            Ok(None) => {
-                self.phase = UiPhase::Error {
-                    message: "No text selection found.\nSelect text in another app, then press the hotkey again.\n\nTip: open Settings from the picker after a successful capture, or edit limits anytime from Settings once the window is up.".into(),
-                };
+        match self.capture_selection() {
+            Ok(true) => {
+                self.phase = UiPhase::Picker;
                 self.show_window(ctx, true);
-                return;
             }
-            Err(e) => {
-                self.phase = UiPhase::Error {
-                    message: format!("{e}"),
-                };
+            Ok(false) => {}
+            Err(message) => {
+                self.phase = UiPhase::Error { message };
                 self.show_window(ctx, true);
-                return;
             }
         }
+    }
 
-        self.phase = UiPhase::Picker;
-        self.show_window(ctx, true);
+    fn on_command_hotkey(&mut self, ctx: &egui::Context, command_id: &str) {
+        if !accessibility_trusted() {
+            self.on_hotkey(ctx);
+            return;
+        }
+        let cmd = self
+            .config
+            .commands
+            .iter()
+            .find(|c| c.id == command_id)
+            .cloned();
+        let Some(cmd) = cmd else {
+            self.phase = UiPhase::Error {
+                message: format!("Unknown command id `{command_id}` for hotkey."),
+            };
+            self.show_window(ctx, true);
+            return;
+        };
+        match self.capture_selection() {
+            Ok(true) => {
+                // Direct shortcuts skip soft/replace confirms; hard max still applies.
+                self.soft_warn_acked = true;
+                self.replace_warn_acked = true;
+                self.show_window(ctx, true);
+                self.start_command(cmd);
+            }
+            Ok(false) => {}
+            Err(message) => {
+                self.phase = UiPhase::Error { message };
+                self.show_window(ctx, true);
+            }
+        }
     }
 
     fn hide(&mut self, ctx: &egui::Context) {
@@ -199,17 +288,15 @@ then restart `writing-tools serve`."
     fn save_settings(&mut self) {
         match self.config.save(&self.config_path) {
             Ok(()) => {
-                self.settings_status = format!("Saved · {}", self.config_path.display());
-                self.status_line = format!(
-                    "Hotkey: {} · {} commands · Accessibility: {}",
-                    self.config.hotkey,
-                    self.config.commands.len(),
-                    if accessibility_trusted() {
-                        "granted"
-                    } else {
-                        "MISSING"
-                    }
-                );
+                if let Err(e) = Self::register_hotkeys(&self.hotkey, &self.config) {
+                    self.settings_status = format!("Saved, but hotkey reload failed: {e}");
+                } else {
+                    self.settings_status = format!("Saved · {}", self.config_path.display());
+                }
+                self.config_mtime = std::fs::metadata(&self.config_path)
+                    .and_then(|m| m.modified())
+                    .ok();
+                self.status_line = Self::status_for(&self.config);
             }
             Err(e) => {
                 self.settings_status = format!("Save failed: {e}");
@@ -335,9 +422,13 @@ fn block_on_ready<T>(fut: impl std::future::Future<Output = T>) -> T {
 impl eframe::App for ServeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.hotkey.poll();
+        self.maybe_reload_config();
 
-        if self.hotkey_fired.swap(false, Ordering::SeqCst) {
-            self.on_hotkey(ctx);
+        if let Some(action) = self.hotkey.take_pending() {
+            match action {
+                HotkeyAction::Picker => self.on_hotkey(ctx),
+                HotkeyAction::Command(id) => self.on_command_hotkey(ctx, &id),
+            }
         }
 
         while let Ok(job) = self.job_rx.try_recv() {

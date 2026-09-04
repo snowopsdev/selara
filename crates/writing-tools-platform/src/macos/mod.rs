@@ -3,14 +3,14 @@
 //! Requires Accessibility permission for selection read/replace and synthetic
 //! Cmd+C / Cmd+V fallbacks. Create and register [`MacosHotkey`] on the main
 //! thread (the same thread that runs the UI event loop), then call
-//! [`MacosHotkey::poll`] each frame.
+//! [`MacosHotkey::poll`] each frame (or rely on the event handler + wake).
 
 mod clipboard;
 mod hotkey;
 mod selection;
 
 pub use clipboard::MacosClipboard;
-pub use hotkey::{parse_hotkey, MacosHotkey};
+pub use hotkey::{parse_hotkey, HotkeyAction, MacosHotkey};
 pub use selection::{
     accessibility_trusted, activate_pid, frontmost_pid, prompt_accessibility, MacosSelection,
 };

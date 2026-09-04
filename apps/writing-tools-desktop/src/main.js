@@ -38,7 +38,7 @@ function renderGeneral() {
       <p class="hint">Used so the model can respect your preferred language (e.g. en, es, fr).</p>
       <label for="hotkey">Picker hotkey</label>
       <input id="hotkey" value="${escapeAttr(config.hotkey || "ctrl+shift+space")}" placeholder="ctrl+shift+space" />
-      <p class="hint">Examples: ctrl+shift+space, option+space, cmd+shift+w. Restart or re-open serve to apply in the overlay for now.</p>
+      <p class="hint">Examples: ctrl+shift+space, option+space, cmd+shift+w. With `writing-tools serve` running, changes apply within about a second.</p>
       <div class="actions">
         <button class="btn" id="save-general">Save General</button>
       </div>
@@ -125,7 +125,7 @@ function renderCommands() {
       (c) => `
       <div class="cmd-item" data-id="${escapeAttr(c.id)}">
         <div>
-          <h3>${escapeHtml(c.label)} <span class="badge">${kindLabel(c.kind)}</span></h3>
+          <h3>${escapeHtml(c.label)} <span class="badge">${kindLabel(c.kind)}</span>${c.hotkey ? ` <span class="badge">${escapeHtml(c.hotkey)}</span>` : ""}</h3>
           <p>${escapeHtml(c.prompt)}</p>
         </div>
         <div class="actions">
@@ -161,6 +161,9 @@ function renderCommands() {
       </div>
       <label>Prompt</label>
       <textarea id="cmd-prompt">${escapeHtml(editing?.prompt || "")}</textarea>
+      <label>Command hotkey (optional)</label>
+      <input id="cmd-hotkey" value="${escapeAttr(editing?.hotkey || "")}" placeholder="e.g. ctrl+shift+p" />
+      <p class="hint">Runs this command directly on the current selection (skips the picker). Leave blank for none.</p>
       <div class="actions">
         <button class="btn" id="cmd-save">${editing ? "Update" : "Add command"}</button>
         ${editing ? '<button class="btn secondary" id="cmd-cancel">Cancel</button>' : ""}
@@ -173,6 +176,8 @@ function renderCommands() {
     const label = $("#cmd-label").value.trim();
     const prompt = $("#cmd-prompt").value.trim();
     const kind = $("#cmd-kind").value;
+    const hotkeyRaw = $("#cmd-hotkey").value.trim();
+    const hotkey = hotkeyRaw ? hotkeyRaw : null;
     if (!label || !prompt) {
       setStatus("Label and prompt are required");
       return;
@@ -180,12 +185,12 @@ function renderCommands() {
     if (editingId) {
       const i = config.commands.findIndex((c) => c.id === editingId);
       if (i >= 0) {
-        config.commands[i] = { ...config.commands[i], label, prompt, kind };
+        config.commands[i] = { ...config.commands[i], label, prompt, kind, hotkey };
       }
       editingId = null;
     } else {
       const id = slug(label) + "-" + Math.random().toString(36).slice(2, 7);
-      config.commands.push({ id, label, prompt, kind });
+      config.commands.push({ id, label, prompt, kind, hotkey });
     }
     await saveConfig();
     renderCommands();
@@ -210,6 +215,7 @@ function renderCommands() {
         ...src,
         id: src.id + "-copy-" + Math.random().toString(36).slice(2, 6),
         label: src.label + " copy",
+        hotkey: null,
       });
       await saveConfig();
       renderCommands();

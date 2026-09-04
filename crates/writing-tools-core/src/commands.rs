@@ -17,6 +17,9 @@ pub struct WritingCommand {
     pub kind: CommandKind,
     /// Instruction sent to the model with the selected/input text.
     pub prompt: String,
+    /// Optional global shortcut that runs this command directly (skip picker).
+    #[serde(default)]
+    pub hotkey: Option<String>,
 }
 
 pub fn builtin_commands() -> Vec<WritingCommand> {
@@ -26,48 +29,56 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             label: "Proofread".into(),
             kind: CommandKind::Replace,
             prompt: "Proofread the text. Fix grammar, spelling, and punctuation only. Keep meaning and voice. Return only the corrected text.".into(),
+            hotkey: None,
         },
         WritingCommand {
             id: "rewrite".into(),
             label: "Rewrite".into(),
             kind: CommandKind::Replace,
             prompt: "Rewrite the text for clarity and flow. Keep the original meaning. Return only the rewritten text.".into(),
+            hotkey: None,
         },
         WritingCommand {
             id: "friendly".into(),
             label: "Friendly".into(),
             kind: CommandKind::Replace,
             prompt: "Rewrite the text in a warm, friendly tone. Return only the rewritten text.".into(),
+            hotkey: None,
         },
         WritingCommand {
             id: "professional".into(),
             label: "Professional".into(),
             kind: CommandKind::Replace,
             prompt: "Rewrite the text in a clear, professional tone. Return only the rewritten text.".into(),
+            hotkey: None,
         },
         WritingCommand {
             id: "concise".into(),
             label: "Concise".into(),
             kind: CommandKind::Replace,
             prompt: "Make the text more concise without losing key meaning. Return only the rewritten text.".into(),
+            hotkey: None,
         },
         WritingCommand {
             id: "summary".into(),
             label: "Summary".into(),
             kind: CommandKind::Popup,
             prompt: "Summarize the text clearly in markdown. Use short paragraphs or bullets as needed.".into(),
+            hotkey: None,
         },
         WritingCommand {
             id: "key_points".into(),
             label: "Key Points".into(),
             kind: CommandKind::Popup,
             prompt: "Extract the key points as a markdown bullet list.".into(),
+            hotkey: None,
         },
         WritingCommand {
             id: "table".into(),
             label: "Table".into(),
             kind: CommandKind::Popup,
             prompt: "Convert the useful information in the text into a markdown table.".into(),
+            hotkey: None,
         },
     ]
 }

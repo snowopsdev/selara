@@ -2,7 +2,8 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::HotkeyService;
 
@@ -76,74 +77,143 @@ pub fn parse_hotkey(spec: &str) -> Result<HotKey> {
     Ok(HotKey::new(Some(mods), code))
 }
 
-/// Global hotkey registration. Construct and [`Self::register`] on the **main**
-/// thread. Call [`Self::set_wake`] so a hotkey can revive a hidden egui window.
+/// What a registered global hotkey should do when pressed.
+#[derive(Debug, Clone)]
+pub enum HotkeyAction {
+    /// Open the command picker.
+    Picker,
+    /// Run this command id directly.
+    Command(String),
+}
+
+struct SharedHotkeys {
+    /// hotkey id → action
+    by_id: Mutex<HashMap<u32, HotkeyAction>>,
+    pending: Mutex<Option<HotkeyAction>>,
+    wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl SharedHotkeys {
+    fn handle(&self, event: GlobalHotKeyEvent) {
+        if event.state != HotKeyState::Pressed {
+            return;
+        }
+        let action = self
+            .by_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&event.id)
+            .cloned();
+        let Some(action) = action else {
+            return;
+        };
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(action);
+        if let Some(w) = self.wake.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            w();
+        }
+    }
+}
+
+static SHARED: OnceLock<Arc<SharedHotkeys>> = OnceLock::new();
+
+fn shared() -> Arc<SharedHotkeys> {
+    SHARED
+        .get_or_init(|| {
+            let s = Arc::new(SharedHotkeys {
+                by_id: Mutex::new(HashMap::new()),
+                pending: Mutex::new(None),
+                wake: Mutex::new(None),
+            });
+            let s2 = s.clone();
+            GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+                s2.handle(event);
+            }));
+            s
+        })
+        .clone()
+}
+
+/// Global hotkey hub. Supports picker + many per-command bindings; call
+/// [`MacosHotkey::reregister_all`] when config changes.
 pub struct MacosHotkey {
     manager: Mutex<Option<GlobalHotKeyManager>>,
-    registered: Mutex<Option<HotKey>>,
-    on_fire: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// Wakes the UI loop (egui `request_repaint`) so a hidden window still reacts.
-    wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    shared: Arc<SharedHotkeys>,
 }
 
 impl MacosHotkey {
     pub fn new() -> Self {
         Self {
             manager: Mutex::new(None),
-            registered: Mutex::new(None),
-            on_fire: Mutex::new(None),
-            wake: Mutex::new(None),
+            shared: shared(),
         }
     }
 
-    /// Call before [`HotkeyService::register`]. Pass egui `ctx.request_repaint`
-    /// so hotkeys revive a hidden / idle window.
+    /// Call early so a hidden egui window still wakes on hotkey.
     pub fn set_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
         *self
+            .shared
             .wake
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(wake));
     }
 
-    /// Drain the channel fallback. No-op when `set_event_handler` is active.
-    pub fn poll(&self) {
-        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            Self::dispatch_event(
-                event,
-                &self.registered,
-                &self.on_fire,
-                &self.wake,
-            );
-        }
+    /// Take a pending action (picker or command id), if any.
+    pub fn take_pending(&self) -> Option<HotkeyAction> {
+        self.shared
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
-    fn dispatch_event(
-        event: GlobalHotKeyEvent,
-        registered: &Mutex<Option<HotKey>>,
-        on_fire: &Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-        wake: &Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    ) {
-        if event.state != HotKeyState::Pressed {
-            return;
+    /// Unregister everything and register picker + command hotkeys.
+    /// `command_hotkeys` is `(command_id, hotkey_spec)`.
+    pub fn reregister_all(
+        &self,
+        picker: &str,
+        command_hotkeys: &[(String, String)],
+    ) -> Result<()> {
+        let manager =
+            GlobalHotKeyManager::new().context("create GlobalHotKeyManager (main thread)")?;
+
+        let mut map = HashMap::new();
+
+        let picker_hk =
+            parse_hotkey(picker).with_context(|| format!("parse picker hotkey `{picker}`"))?;
+        manager
+            .register(picker_hk)
+            .with_context(|| format!("register picker hotkey `{picker}`"))?;
+        map.insert(picker_hk.id(), HotkeyAction::Picker);
+
+        for (cmd_id, spec) in command_hotkeys {
+            let spec = spec.trim();
+            if spec.is_empty() {
+                continue;
+            }
+            let hk = parse_hotkey(spec)
+                .with_context(|| format!("parse command hotkey `{spec}` for `{cmd_id}`"))?;
+            if map.contains_key(&hk.id()) {
+                bail!("hotkey `{spec}` collides with another binding");
+            }
+            manager
+                .register(hk)
+                .with_context(|| format!("register command hotkey `{spec}` for `{cmd_id}`"))?;
+            map.insert(hk.id(), HotkeyAction::Command(cmd_id.clone()));
         }
-        let id_ok = registered
+
+        *self
+            .shared
+            .by_id
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|h| h.id() == event.id)
-            .unwrap_or(false);
-        if !id_ok {
-            return;
-        }
-        if let Some(cb) = on_fire
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
-            cb();
-        }
-        if let Some(w) = wake.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-            w();
+            .unwrap_or_else(|e| e.into_inner()) = map;
+        *self.manager.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
+        Ok(())
+    }
+
+    /// Drain channel fallback (handler path is primary).
+    pub fn poll(&self) {
+        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            self.shared.handle(event);
         }
     }
 }
@@ -156,43 +226,8 @@ impl Default for MacosHotkey {
 
 #[async_trait]
 impl HotkeyService for MacosHotkey {
-    async fn register(&self, hotkey: &str, on_fire: Box<dyn Fn() + Send + Sync>) -> Result<()> {
-        let parsed = parse_hotkey(hotkey).with_context(|| format!("parse hotkey `{hotkey}`"))?;
-        let manager =
-            GlobalHotKeyManager::new().context("create GlobalHotKeyManager (main thread)")?;
-        manager
-            .register(parsed)
-            .with_context(|| format!("register hotkey `{hotkey}`"))?;
-
-        let hotkey_id = parsed.id();
-        *self.on_fire.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::from(on_fire));
-        *self.registered.lock().unwrap_or_else(|e| e.into_inner()) = Some(parsed);
-        *self.manager.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
-
-        // Event handler wakes a hidden egui loop. OnceCell: first set wins.
-        let on_fire = self
-            .on_fire
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let wake = self
-            .wake
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-
-        GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-            if event.state != HotKeyState::Pressed || event.id != hotkey_id {
-                return;
-            }
-            if let Some(cb) = on_fire.as_ref() {
-                cb();
-            }
-            if let Some(w) = wake.as_ref() {
-                w();
-            }
-        }));
-
-        Ok(())
+    async fn register(&self, hotkey: &str, _on_fire: Box<dyn Fn() + Send + Sync>) -> Result<()> {
+        // Legacy single-hotkey path: register as picker only.
+        self.reregister_all(hotkey, &[])
     }
 }
