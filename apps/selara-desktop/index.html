@@ -115,7 +115,13 @@ button.btn.danger { background: var(--danger); }
 .control-stack { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .control-inline { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .control-inline select, .control-inline input { flex: 1; min-width: 0; }
-.field-hint { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.35; }
+.field-hint { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.35; max-width: 42em; }
+.section-label-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 16px 0 10px;
+}
+.section-label-row:first-child { margin-top: 0; }
+.section-label-row .section-label { margin: 0; }
 .pill {
   display: inline-flex; align-items: center; flex-shrink: 0;
   font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px;
@@ -392,7 +398,7 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
         ? "<button class=\"btn secondary\" id=\"chatgpt-logout\">Sign out</button>" +
           "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
           "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>"
-        : "<button class=\"btn\" id=\"chatgpt-login\">Sign in with ChatGPT</button>" +
+        : "<button class=\"btn\" id=\"chatgpt-login\" title=\"Opens the Codex browser sign-in flow\">Sign in with ChatGPT</button>" +
           "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
           "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>") +
       "</div>";
@@ -426,17 +432,17 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
       "<option value=\"ollama\">Ollama (local)</option>" +
       "<option value=\"gemini\">Google Gemini</option>" +
       "</select></div>" +
+      "<div class=\"section-label-row\">" +
       "<div class=\"section-label\">Authentication</div>" +
+      "<span class=\"pill\" id=\"auth-experimental-pill\" style=\"display:none\">Experimental</span>" +
+      "</div>" +
       "<div class=\"form-row\">" +
       "<label for=\"provider-auth\">Auth mode</label>" +
       "<div class=\"control-stack\">" +
-      "<div class=\"control-inline\">" +
       "<select id=\"provider-auth\">" +
       "<option value=\"api_key\">API key (BYOK)</option>" +
       "<option value=\"chatgpt\">ChatGPT via Codex CLI</option>" +
       "</select>" +
-      "<span class=\"pill\" id=\"auth-experimental-pill\" style=\"display:none\">Experimental</span>" +
-      "</div>" +
       "<p class=\"field-hint\" id=\"auth-hint\">Tokens live in ~/.codex/auth.json.</p>" +
       "</div></div>" +
       "<div id=\"chatgpt-fields\">" +
@@ -465,7 +471,7 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
         } else if (chatgptStatus && chatgptStatus.logged_in) {
           hint.textContent = "Tokens live in ~/.codex/auth.json. Base URL isn't used in this mode.";
         } else {
-          hint.textContent = "Requires codex on PATH. Sign-in opens the Codex browser flow. Base URL isn't used in this mode.";
+          hint.textContent = "Requires codex on PATH. Base URL isn't used in this mode.";
         }
       }
       if (isCg && chatgptStatus && chatgptStatus.logged_in) {
