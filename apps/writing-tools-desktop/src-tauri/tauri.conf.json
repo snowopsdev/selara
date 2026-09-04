@@ -5,12 +5,11 @@
   "identifier": "dev.snowops.writing-tools",
   "build": {
     "beforeDevCommand": "",
-    "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "",
     "frontendDist": "../dist"
   },
   "app": {
-    "withGlobalTauri": false,
+    "withGlobalTauri": true,
     "macOSPrivateApi": true,
     "windows": [
       {

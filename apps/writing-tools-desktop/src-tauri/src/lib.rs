@@ -69,6 +69,10 @@ pub fn run() {
             let _tray = tray.build(app)?;
 
             if let Some(win) = app.get_webview_window("settings") {
+                #[cfg(debug_assertions)]
+                {
+                    win.open_devtools();
+                }
                 let h = handle.clone();
                 win.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
