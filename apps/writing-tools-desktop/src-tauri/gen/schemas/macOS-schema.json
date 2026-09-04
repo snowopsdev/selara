@@ -387,6 +387,24 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Read config file path",
+          "type": "string",
+          "const": "allow-config-path",
+          "markdownDescription": "Read config file path"
+        },
+        {
+          "description": "Load Writing Tools config",
+          "type": "string",
+          "const": "allow-get-config",
+          "markdownDescription": "Load Writing Tools config"
+        },
+        {
+          "description": "Save Writing Tools config",
+          "type": "string",
+          "const": "allow-save-config",
+          "markdownDescription": "Save Writing Tools config"
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",
