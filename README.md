@@ -11,7 +11,7 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 ```mermaid
 flowchart LR
   Shell["OS shell<br/>hotkey / selection / UI"] --> Core["selara-core<br/>commands + providers + config"]
-  Core --> Providers["OpenAI-compatible / Ollama / Gemini"]
+  Core --> Providers["OpenAI-compatible / Anthropic / OpenRouter"]
   Platform["selara-platform<br/>traits"] --> Shell
 ```
 
@@ -30,11 +30,30 @@ export SELARA_API_KEY=sk-...   # or ollama / whatever your provider needs
 cargo run -p selara -- run proofread --text "Their going to the store tommorow."
 ```
 
-Ollama example — edit `~/.config/selara/config.toml`:
+Providers (`~/.config/selara/config.toml`, or pick one in Settings):
+
+| `kind` | Wire format | Default `base_url` |
+|---|---|---|
+| `open_ai_compatible` | OpenAI `/chat/completions` (OpenAI, Ollama, LM Studio, vLLM, ...) | `https://api.openai.com/v1` |
+| `anthropic` | Anthropic Messages API | `https://api.anthropic.com` |
+| `open_router` | OpenAI-compatible via OpenRouter | `https://openrouter.ai/api/v1` |
+
+Leave `base_url` empty to use the default. Old configs with `kind = "ollama"` still load as `open_ai_compatible`.
+
+Anthropic example:
 
 ```toml
 [provider]
-kind = "ollama"
+kind = "anthropic"
+base_url = ""
+model = "claude-opus-5"
+```
+
+Ollama example:
+
+```toml
+[provider]
+kind = "open_ai_compatible"
 base_url = "http://localhost:11434/v1"
 model = "llama3.1:8b"
 api_key = "ollama"
@@ -129,7 +148,7 @@ Sections: General, Models (BYOK or ChatGPT via Codex), Commands, Limits. Config:
 
 ## Status
 
-**Done:** workspace builds, config, builtin commands, OpenAI-compatible + Gemini providers, CLI `init` / `list-commands` / `run`, macOS `serve` (hotkey + picker + replace/popup), Tauri Settings tray.
+**Done:** workspace builds, config, builtin commands, OpenAI-compatible + Anthropic + OpenRouter providers (with model discovery in Settings), CLI `init` / `list-commands` / `run`, macOS `serve` (hotkey + picker + replace/popup), Tauri Settings tray.
 
 **Next:**
 

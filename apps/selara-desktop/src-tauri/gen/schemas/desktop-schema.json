@@ -423,6 +423,12 @@
           "markdownDescription": "List ChatGPT Codex model slugs (Experimental)"
         },
         {
+          "description": "List models from the configured BYOK provider",
+          "type": "string",
+          "const": "allow-list-provider-models",
+          "markdownDescription": "List models from the configured BYOK provider"
+        },
+        {
           "description": "Save Selara config",
           "type": "string",
           "const": "allow-save-config",

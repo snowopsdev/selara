@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "identifier": "dev.snowops.selara",
   "build": {
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -17,8 +18,13 @@
         "title": "Selara Settings",
         "width": 920,
         "height": 640,
+        "minWidth": 760,
+        "minHeight": 520,
         "resizable": true,
-        "visible": false
+        "visible": false,
+        "transparent": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

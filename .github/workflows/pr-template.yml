@@ -1,0 +1,85 @@
+name: PR template
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  sections:
+    name: Required sections
+    runs-on: ubuntu-latest
+    # release-please generates the "chore(main): release X.Y.Z" PR body from
+    # the changelog, which does not use the template. Skip those.
+    if: >-
+      !startsWith(github.event.pull_request.head.ref, 'release-please--')
+      && !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
+    steps:
+      - name: Check PR body sections
+        env:
+          # Passed through the environment so PR text is never interpolated
+          # into the script.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          REQUIRED = [
+              "What Problem This Solves",
+              "Why This Change Was Made",
+              "User Impact",
+              "Developer Impact",
+              "Evidence",
+          ]
+          MIN_CHARS = 40
+
+          body = os.environ.get("PR_BODY") or ""
+          # Drop template guidance comments so they never count as content.
+          body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+
+          # Split the body into (heading, content) pairs on "## " headings.
+          parts = re.split(r"^##\s+(.+?)\s*$", body, flags=re.M)
+          sections = {}
+          for i in range(1, len(parts), 2):
+              sections[parts[i].strip().lower()] = parts[i + 1].strip()
+
+          problems = []
+          for name in REQUIRED:
+              content = sections.get(name.lower())
+              if content is None:
+                  problems.append(f'missing section "## {name}"')
+              elif len(content) < MIN_CHARS:
+                  problems.append(
+                      f'section "## {name}" needs more detail '
+                      f"({len(content)} chars, minimum {MIN_CHARS})"
+                  )
+
+          # Exactly the five sections, in template order, and nothing else at
+          # level two. Extra detail belongs inside a section (use ### or bullets).
+          headings = [parts[i].strip() for i in range(1, len(parts), 2)]
+          required_lower = [r.lower() for r in REQUIRED]
+          for h in headings:
+              if h.lower() not in required_lower:
+                  problems.append(
+                      f'unexpected section "## {h}"; keep extra detail inside one of the five '
+                      "sections (### subheadings are fine)"
+                  )
+          present = [h.lower() for h in headings if h.lower() in required_lower]
+          expected = [r for r in required_lower if r in present]
+          if present != expected:
+              problems.append("sections are out of order; use the template order")
+
+          if problems:
+              print("PR description does not follow .github/PULL_REQUEST_TEMPLATE.md:\n")
+              for p in problems:
+                  print(f"  - {p}")
+              print(
+                  "\nEdit the PR description so every section is present, in order, "
+                  "and filled in with real context."
+              )
+              sys.exit(1)
+
+          print("All five PR sections are present and filled in.")
+          PY

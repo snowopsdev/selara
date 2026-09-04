@@ -32,3 +32,8 @@ commands.allow = ["chatgpt_logout"]
 identifier = "allow-list-chatgpt-models"
 description = "List ChatGPT Codex model slugs (Experimental)"
 commands.allow = ["list_chatgpt_models_cmd"]
+
+[[permission]]
+identifier = "allow-list-provider-models"
+description = "List models from the configured BYOK provider"
+commands.allow = ["list_provider_models_cmd"]

@@ -7,184 +7,469 @@
   <style>
 :root {
   color-scheme: light dark;
-  --bg: #f5f5f7;
-  --panel: #ffffff;
-  --border: #d2d2d7;
+  --accent: #0a84ff;
+  --accent-press: #0071e3;
+  --on-accent: #ffffff;
   --text: #1d1d1f;
   --muted: #6e6e73;
-  --accent: #0071e3;
-  --danger: #d70015;
-  --radius: 10px;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  --glass: rgba(255, 255, 255, 0.55);
+  --glass-strong: rgba(255, 255, 255, 0.78);
+  --glass-hover: rgba(255, 255, 255, 0.92);
+  --hairline: rgba(0, 0, 0, 0.08);
+  --hairline-strong: rgba(0, 0, 0, 0.14);
+  --specular: rgba(255, 255, 255, 0.7);
+  --content-wash: rgba(245, 245, 247, 0.62);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px rgba(0, 0, 0, 0.07);
+  --danger: #ff3b30;
+  --success: #34c759;
+  --warning: #ff9f0a;
+  --radius-group: 14px;
+  --radius-control: 8px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1c1c1e;
-    --panel: #2c2c2e;
-    --border: #3a3a3c;
-    --text: #f5f5f7;
+    --accent: #3a8dff;
+    --accent-press: #2a7ae8;
+    --text: #f2f2f7;
     --muted: #98989d;
+    --glass: rgba(34, 34, 36, 0.55);
+    --glass-strong: rgba(58, 58, 62, 0.72);
+    --glass-hover: rgba(72, 72, 76, 0.82);
+    --hairline: rgba(255, 255, 255, 0.1);
+    --hairline-strong: rgba(255, 255, 255, 0.18);
+    --specular: rgba(255, 255, 255, 0.12);
+    --content-wash: rgba(24, 24, 26, 0.6);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 30px rgba(0, 0, 0, 0.3);
+    --danger: #ff453a;
+    --success: #30d158;
+    --warning: #ffa50a;
   }
 }
+
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }
-body { background: var(--bg); color: var(--text); }
-#app { display: grid; grid-template-columns: 200px 1fr; min-height: 100%; }
+html, body { background: transparent; }
+body {
+  color: var(--text);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+input, textarea, select { user-select: text; -webkit-user-select: text; }
+
+#app { display: grid; grid-template-columns: 200px 1fr; height: 100%; }
+
+/* Sidebar: transparent so the native vibrancy shows through. */
 .nav {
-  background: var(--panel);
-  border-right: 1px solid var(--border);
-  padding: 16px 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
+  padding: 48px 10px 14px;
+  border-right: 1px solid var(--hairline);
 }
-.brand { font-weight: 650; font-size: 14px; padding: 8px 10px 16px; }
+.brand {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 0 10px 10px;
+  letter-spacing: 0.01em;
+}
 .nav-item {
-  text-align: left; border: 0; background: transparent; color: var(--text);
-  padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; text-align: left;
+  border: 0; background: transparent; color: var(--text);
+  padding: 7px 10px; border-radius: 9px; cursor: default;
+  font: inherit; font-size: 13px; font-weight: 500; line-height: 1;
+  transition: background-color 150ms ease;
 }
-.nav-item:hover { background: rgba(0, 113, 227, 0.12); }
-.nav-item.active { background: rgba(0, 113, 227, 0.18); color: var(--accent); font-weight: 600; }
-.nav-foot { margin-top: auto; font-size: 11px; color: var(--muted); padding: 8px 10px; min-height: 2.5em; }
-.content { padding: 24px 28px; overflow: auto; }
-.section { display: none; max-width: 720px; }
+.nav-item svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--muted); }
+.nav-item:hover { background: var(--glass); }
+.nav-item.active {
+  background: var(--glass-strong);
+  box-shadow: inset 0 1px 0 var(--specular), 0 0 0 1px var(--hairline), 0 1px 2px rgba(0, 0, 0, 0.05);
+  font-weight: 600;
+}
+.nav-item.active svg { color: var(--accent); }
+.nav-foot {
+  margin-top: auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; min-height: 2.5em;
+  font-size: 11.5px; color: var(--muted);
+  min-width: 0;
+}
+.nav-foot #save-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Content column */
+.content {
+  position: relative;
+  padding: 44px 32px 32px;
+  overflow: auto;
+  background: var(--content-wash);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  backdrop-filter: blur(24px) saturate(1.4);
+}
+.drag-strip { position: absolute; top: 0; left: 0; right: 0; height: 36px; }
+.section { display: none; max-width: 640px; }
 .section.active { display: block; }
-h1 { font-size: 22px; margin: 0 0 6px; font-weight: 650; }
-.lead { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
-.card {
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
+h1 {
+  font-size: 22px; font-weight: 650; letter-spacing: -0.01em;
+  margin: 0 0 4px; line-height: 1.2;
 }
-label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
-input, select, textarea {
-  width: 100%; border: 1px solid var(--border); border-radius: 8px;
-  padding: 8px 10px; background: transparent; color: var(--text);
-  font: inherit; margin-bottom: 12px;
-}
-textarea { min-height: 110px; resize: vertical; }
-.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-button.btn {
-  border: 0; border-radius: 8px; padding: 8px 12px; font: inherit;
-  font-size: 13px; cursor: pointer; background: var(--accent); color: white;
-}
-button.btn.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
-button.btn.danger {
-  background: transparent; color: var(--danger); border: 1px solid rgba(215,0,21,0.45);
-}
-button.btn.danger:hover { background: rgba(215,0,21,0.12); }
-.hint { font-size: 12px; color: var(--muted); margin: -6px 0 12px; }
-.cmd-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
-.cmd-item {
-  display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
-  border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--panel);
-}
-.cmd-item h3 { margin: 0; font-size: 14px; font-weight: 600; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.cmd-item p { margin: 4px 0 0; font-size: 12px; color: var(--muted); white-space: pre-wrap; }
-.cmd-item .actions { gap: 6px; margin: 0; }
-.cmd-item .actions .btn { padding: 6px 10px; font-size: 12px; }
-.badge {
-  display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
-  border: 1px solid var(--border); color: var(--muted); font-weight: 500;
-}
-.limits-actions, .models-save, .general-save {
-  display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap;
-}
-.limits-actions .btn.linkish, button.btn.linkish {
-  background: transparent; border: 0; color: var(--muted); padding: 8px 4px;
-}
-button.btn.linkish:hover { color: var(--text); }
-.cmd-editor-title { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
-.soon {
-  border: 1px dashed var(--border); border-radius: 8px; padding: 12px;
-  color: var(--muted); font-size: 13px;
-}
-.error { color: var(--danger); white-space: pre-wrap; }
+.lead { color: var(--muted); margin: 0 0 22px; font-size: 13px; line-height: 1.4; }
 
-
+/* Group heading: sentence case, quiet. */
 .section-label {
-  font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
-  text-transform: uppercase; color: var(--muted);
-  margin: 20px 0 12px;
+  font-size: 13px; font-weight: 600; color: var(--text);
+  margin: 22px 0 8px 2px;
 }
-.section-label:first-of-type { margin-top: 2px; }
-.panel {
-  background: var(--panel); border: 1px solid var(--border);
-  border-radius: 12px; padding: 18px 20px 20px;
+.section-label:first-child, .section-label-row:first-child { margin-top: 0; }
+.section-label-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 22px 0 8px 2px;
 }
+.section-label-row .section-label { margin: 0; }
+
+/* Glass group: the one surface with the specular edge. */
+.panel, .card, .cmd-list, .group {
+  background: var(--glass);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-group);
+  box-shadow: inset 0 1px 0 var(--specular), var(--shadow);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  backdrop-filter: blur(20px) saturate(1.3);
+}
+.panel, .card { padding: 0 16px; }
+.panel .section-label, .panel .section-label-row {
+  margin: 4px 0 2px; padding: 14px 0 8px;
+  border-top: 1px solid var(--hairline);
+}
+.panel > .section-label:first-child, .panel > .section-label-row:first-child {
+  margin-top: 0; border-top: 0;
+}
+.panel .section-label-row .section-label { margin: 0; padding: 0; border: 0; }
+.section-label + .form-row, .section-label-row + .form-row { border-top: 0; }
+.card { padding: 14px 16px; margin-bottom: 14px; }
+
+/* Settings row: label left, control right, hairline between. */
 .form-row {
-  display: grid; grid-template-columns: 110px 1fr; gap: 12px;
-  align-items: center; margin-bottom: 12px;
+  display: grid; grid-template-columns: 160px 1fr; gap: 14px;
+  align-items: center;
+  padding: 11px 0;
+  border-top: 1px solid var(--hairline);
+  min-height: 44px;
 }
+.form-row.top { align-items: start; }
+.form-row.top > label { padding-top: 7px; }
+.form-row:first-child { border-top: 0; }
 .form-row > label {
   margin: 0; font-size: 13px; font-weight: 500; color: var(--text);
 }
-.form-row input, .form-row select {
-  width: 100%; height: 32px; margin: 0;
-  padding: 0 10px; border-radius: 8px;
-  border: 1px solid var(--border); background: rgba(0,0,0,0.15);
-  color: var(--text); font: inherit;
-}
-.control-stack { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+.control-stack { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .control-inline { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .control-inline select, .control-inline input { flex: 1; min-width: 0; }
-.field-hint { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.35; max-width: 42em; }
-.section-label-row {
-  display: flex; align-items: center; gap: 8px;
-  margin: 16px 0 10px;
+.control-inline .btn { flex-shrink: 0; }
+.field-hint, .hint {
+  margin: 0; font-size: 12px; color: var(--muted); line-height: 1.4; max-width: 42em;
 }
-.section-label-row:first-child { margin-top: 0; }
-.section-label-row .section-label { margin: 0; }
+.field-hint code { font: inherit; }
+
+/* Controls */
+input, select, textarea {
+  width: 100%; margin: 0;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-control);
+  background: var(--glass-strong);
+  color: var(--text);
+  font: inherit; font-size: 13px;
+  padding: 0 10px; height: 30px;
+  box-shadow: inset 0 1px 0 var(--specular);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+input[type="number"] { max-width: 180px; }
+textarea {
+  height: auto; min-height: 110px; padding: 8px 10px;
+  resize: vertical; line-height: 1.45;
+}
+select {
+  -webkit-appearance: none; appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M3 4.5l3 3 3-3' fill='none' stroke='%236e6e73' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+select:disabled { opacity: 0.6; cursor: not-allowed; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* Buttons: capsules. */
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+button.btn {
+  border: 1px solid transparent; border-radius: 999px;
+  padding: 0 14px; height: 30px;
+  font: inherit; font-size: 13px; font-weight: 500; line-height: 1;
+  cursor: default; white-space: nowrap;
+  background: var(--accent); color: var(--on-accent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 1px 2px rgba(0, 0, 0, 0.12);
+  transition: background-color 120ms ease, transform 80ms ease, box-shadow 120ms ease;
+}
+button.btn:hover { background: color-mix(in srgb, var(--accent) 92%, white); }
+button.btn:active { background: var(--accent-press); transform: translateY(0.5px); }
+button.btn.secondary {
+  background: var(--glass-strong); color: var(--text);
+  border-color: var(--hairline-strong);
+  box-shadow: inset 0 1px 0 var(--specular), 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+button.btn.secondary:hover { background: var(--glass-hover); }
+button.btn.secondary:active { background: var(--glass); }
+button.btn.danger {
+  background: var(--glass-strong); color: var(--danger);
+  border-color: var(--hairline-strong);
+  box-shadow: inset 0 1px 0 var(--specular), 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+button.btn.danger:hover { background: color-mix(in srgb, var(--danger) 12%, var(--glass-strong)); }
+button.btn.linkish, .limits-actions .btn.linkish {
+  background: transparent; border-color: transparent; box-shadow: none;
+  color: var(--muted); padding: 0 8px;
+}
+button.btn.linkish:hover { color: var(--text); background: var(--glass); }
+button.btn:disabled { opacity: 0.5; }
+
+.save-bar, .limits-actions, .models-save, .general-save {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  margin-top: 18px; flex-wrap: wrap;
+}
+.save-bar .btn, .limits-actions .btn, .models-save .btn, .general-save .btn { min-width: 112px; }
+.save-bar .btn.linkish, .limits-actions .btn.linkish { min-width: 0; margin-right: auto; }
+
+/* Segmented control wrapping a hidden select. */
+.segmented {
+  position: relative;
+  display: inline-flex; align-items: stretch; gap: 2px;
+  align-self: flex-start; width: max-content; max-width: 100%;
+  padding: 2px; height: 30px;
+  border-radius: 999px;
+  background: var(--glass);
+  border: 1px solid var(--hairline);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.04);
+}
+.segmented .seg {
+  border: 0; background: transparent; color: var(--muted);
+  border-radius: 999px; padding: 0 12px;
+  font: inherit; font-size: 12.5px; font-weight: 500; line-height: 1;
+  cursor: default; white-space: nowrap;
+  transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
+}
+.segmented .seg:hover { color: var(--text); }
+.segmented .seg.active {
+  background: var(--glass-strong); color: var(--text); font-weight: 600;
+  box-shadow: inset 0 1px 0 var(--specular), 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+.segmented .seg-select {
+  position: absolute; width: 1px; height: 1px; opacity: 0;
+  pointer-events: none; margin: 0; padding: 0; border: 0;
+}
+
+/* Commands: toolbar, list rows, and the editor sheet. */
+.toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.search {
+  position: relative; flex: 1; min-width: 0;
+}
+.search svg {
+  position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+  width: 13px; height: 13px; color: var(--muted); pointer-events: none;
+}
+.search input { padding-left: 28px; border-radius: 999px; }
+.toolbar .btn svg { width: 12px; height: 12px; margin-right: 5px; }
+.toolbar .btn { display: inline-flex; align-items: center; }
+
+.cmd-list { display: flex; flex-direction: column; padding: 0 6px; }
+.cmd-item {
+  display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;
+  padding: 10px 10px; margin: 0 -6px; border-top: 1px solid var(--hairline);
+  cursor: default; transition: background-color 120ms ease;
+}
+.cmd-item:first-child { border-top: 0; }
+.cmd-item:first-child { border-top-left-radius: var(--radius-group); border-top-right-radius: var(--radius-group); }
+.cmd-item:last-child { border-bottom-left-radius: var(--radius-group); border-bottom-right-radius: var(--radius-group); }
+.cmd-item:hover, .cmd-item:focus-visible { background: var(--glass-strong); outline: none; }
+.cmd-item:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+.cmd-item .cmd-main { min-width: 0; }
+.cmd-item h3 {
+  margin: 0; font-size: 13.5px; font-weight: 600;
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+}
+.cmd-item h3 .cmd-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-item p {
+  margin: 3px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cmd-item .row-actions {
+  display: flex; gap: 4px; opacity: 0; transition: opacity 120ms ease;
+}
+.cmd-item:hover .row-actions, .cmd-item:focus-within .row-actions { opacity: 1; }
+.cmd-item .chevron { width: 12px; height: 12px; color: var(--muted); opacity: 0.7; }
+.cmd-list .empty {
+  padding: 28px 12px; text-align: center; color: var(--muted); font-size: 12.5px;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.cmd-list .empty strong { color: var(--text); font-weight: 600; font-size: 13px; }
+button.icon-btn.danger:hover { color: var(--danger); }
+
+/* Sheet */
+.sheet-backdrop {
+  position: fixed; inset: 0; z-index: 20;
+  background: rgba(0, 0, 0, 0.18);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 64px 24px 24px;
+  animation: sheet-fade 160ms ease-out;
+}
+.sheet {
+  width: 560px; max-width: 100%; max-height: calc(100vh - 88px);
+  overflow: auto;
+  background: var(--glass-strong);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 16px;
+  box-shadow: inset 0 1px 0 var(--specular), 0 24px 60px rgba(0, 0, 0, 0.28);
+  -webkit-backdrop-filter: blur(30px) saturate(1.5); backdrop-filter: blur(30px) saturate(1.5);
+  padding: 18px 20px 16px;
+  animation: sheet-rise 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.sheet h2 { margin: 0 0 2px; font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
+.sheet .sheet-sub { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+.sheet .form-row { grid-template-columns: 120px 1fr; }
+.sheet .form-row:first-of-type { border-top: 0; }
+.sheet textarea { min-height: 140px; }
+.sheet-foot {
+  display: flex; align-items: center; gap: 8px; margin-top: 14px;
+  padding-top: 12px; border-top: 1px solid var(--hairline);
+}
+.sheet-foot .spacer { flex: 1; }
+.sheet-foot .btn.linkish.danger-text { color: var(--danger); }
+.sheet-foot .btn.linkish.danger-text:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.sheet .field-hint kbd {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px;
+  padding: 1px 5px; border-radius: 5px; border: 1px solid var(--hairline-strong);
+  background: var(--glass); color: var(--muted);
+}
+@keyframes sheet-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sheet-rise { from { opacity: 0; transform: translateY(-8px) scale(0.985); } to { opacity: 1; transform: none; } }
+body.sheet-open .content { overflow: hidden; }
+.badge {
+  display: inline-flex; align-items: center; height: 18px;
+  font-size: 11px; padding: 0 7px; border-radius: 999px; font-weight: 500;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+.badge.key {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px;
+  background: var(--glass-strong); color: var(--muted);
+  border: 1px solid var(--hairline-strong);
+  box-shadow: inset 0 1px 0 var(--specular);
+}
 .pill {
-  display: inline-flex; align-items: center; flex-shrink: 0;
-  font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px;
-  border: 1px solid var(--border); color: var(--muted);
-  background: transparent; text-transform: none; letter-spacing: 0;
+  display: inline-flex; align-items: center; flex-shrink: 0; height: 18px;
+  font-size: 11px; font-weight: 600; padding: 0 7px; border-radius: 999px;
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: color-mix(in srgb, var(--warning) 75%, var(--text));
 }
-.status-row {
-  display: flex; align-items: center; gap: 10px; flex-wrap: nowrap;
-  font-size: 13px; margin: 4px 0 12px; color: var(--text);
+.cmd-editor-title { margin: 10px 0 2px; font-size: 13px; font-weight: 600; }
+
+/* Status */
+.status-wrap { display: flex; margin-top: 2px; }
+.key-wrap { margin-top: 2px; }
+.status-chip {
+  display: inline-flex; align-items: center; gap: 8px; flex-wrap: nowrap;
+  height: 28px; padding: 0 6px 0 10px; border-radius: 999px;
+  background: var(--glass-strong); border: 1px solid var(--hairline-strong);
+  box-shadow: inset 0 1px 0 var(--specular);
+  font-size: 12.5px; color: var(--text); min-width: 0; max-width: 100%;
 }
+.status-chip .status-dot { width: 7px; height: 7px; }
+.status-chip > span:not(.status-dot):not(.email-inline) { white-space: nowrap; }
 .status-dot {
   width: 8px; height: 8px; border-radius: 50%;
-  background: var(--muted); flex-shrink: 0;
+  background: var(--muted); flex-shrink: 0; opacity: 0.6;
+  transition: background-color 200ms ease, box-shadow 200ms ease;
 }
-.status-dot.ok { background: #34c759; box-shadow: 0 0 0 3px rgba(52,199,89,0.22); }
-.status-dot.bad { background: var(--danger); box-shadow: 0 0 0 3px rgba(215,0,21,0.18); }
-.status-dot.unknown { background: #ff9f0a; box-shadow: 0 0 0 3px rgba(255,159,10,0.18); }
+.status-dot.ok { background: var(--success); opacity: 1; box-shadow: 0 0 0 2px color-mix(in srgb, var(--success) 25%, transparent); }
+.status-dot.bad { background: var(--danger); opacity: 1; box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 22%, transparent); }
+.status-dot.unknown { background: var(--warning); opacity: 1; box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 25%, transparent); }
+.status-dot.pulse { animation: dot-pulse 600ms ease-out 1; }
+@keyframes dot-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 45%, transparent); }
+  100% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--success) 0%, transparent); }
+}
 .email-inline {
-  display: inline-flex; align-items: center; gap: 8px;
-  color: var(--muted); margin-left: 0; min-width: 0;
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--muted); min-width: 0;
+  padding-left: 8px; border-left: 1px solid var(--hairline-strong);
 }
 .email-inline .email-value {
   color: var(--muted); letter-spacing: 0.02em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 button.icon-btn {
-  border: 1px solid var(--border); background: transparent; color: var(--muted);
-  border-radius: 6px; width: 28px; height: 28px; padding: 0;
-  cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
-  font-size: 14px; line-height: 1;
+  border: 1px solid var(--hairline-strong); background: var(--glass-strong); color: var(--muted);
+  border-radius: 50%; width: 22px; height: 22px; padding: 0;
+  cursor: default; display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: inset 0 1px 0 var(--specular);
+  flex-shrink: 0;
 }
-button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
-.auth-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
-.auth-actions .btn { min-width: 0; flex: 1 1 0; }
-select:disabled { opacity: 0.65; cursor: not-allowed; }
-.models-save { margin-top: 16px; }
-.models-save .btn { min-width: 120px; }
+button.icon-btn svg { width: 13px; height: 13px; }
+button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
+.auth-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0 14px; border-top: 1px solid var(--hairline); }
+.auth-actions .btn:first-child { margin-left: 174px; }
+.auth-actions .btn { min-width: 0; }
+
+.soon {
+  border: 1px dashed var(--hairline-strong); border-radius: var(--radius-control); padding: 12px;
+  color: var(--muted); font-size: 13px;
+}
+.error { color: var(--danger); white-space: pre-wrap; }
+
+/* Focus and motion */
+button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
   </style>
 </head>
 <body>
   <div id="app">
-    <aside class="nav">
-      <div class="brand">Selara</div>
-      <button class="nav-item active" data-section="general">General</button>
-      <button class="nav-item" data-section="models">Models</button>
-      <button class="nav-item" data-section="commands">Commands</button>
-      <button class="nav-item" data-section="limits">Limits</button>
-      <div class="nav-foot" id="save-status">Starting…</div>
+    <aside class="nav" data-tauri-drag-region>
+      <div class="brand" data-tauri-drag-region>Selara</div>
+      <button class="nav-item active" data-section="general">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 4.5h12M2 8h12M2 11.5h12"/><circle cx="5.5" cy="4.5" r="1.6" fill="var(--glass-strong)"/><circle cx="10.5" cy="8" r="1.6" fill="var(--glass-strong)"/><circle cx="6.5" cy="11.5" r="1.6" fill="var(--glass-strong)"/></svg>
+        General
+      </button>
+      <button class="nav-item" data-section="models">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="2"/><rect x="6" y="6" width="4" height="4" rx="1"/><path d="M6 1.5v2M10 1.5v2M6 12.5v2M10 12.5v2M1.5 6h2M1.5 10h2M12.5 6h2M12.5 10h2"/></svg>
+        Models
+      </button>
+      <button class="nav-item" data-section="commands">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2.5"/><path d="M5 6l2.5 2L5 10M8.5 10h3"/></svg>
+        Commands
+      </button>
+      <button class="nav-item" data-section="limits">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 11.5a5.5 5.5 0 1 1 11 0"/><path d="M8 11.5l2.6-3.6"/><circle cx="8" cy="11.5" r="1" fill="currentColor"/></svg>
+        Limits
+      </button>
+      <div class="nav-foot"><span class="status-dot" id="save-dot" aria-hidden="true"></span><span id="save-status">Starting…</span></div>
     </aside>
     <main class="content">
+      <div class="drag-strip" data-tauri-drag-region></div>
       <section id="section-general" class="section active">
         <h1>General</h1>
         <p class="lead">Loading settings…</p>
@@ -200,7 +485,22 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
   let editingId = null;
   const $ = (sel) => document.querySelector(sel);
   const statusEl = () => $("#save-status");
-  function setStatus(msg) { statusEl().textContent = msg || ""; }
+  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded)$/;
+  const BAD_STATUS = /error|failed|required|before saving|not available|could not|enoent/i;
+  function setStatus(msg) {
+    const text = msg || "";
+    statusEl().textContent = text;
+    const dot = $("#save-dot");
+    if (!dot) return;
+    dot.classList.remove("ok", "bad", "pulse");
+    if (OK_STATUS.test(text)) {
+      dot.classList.add("ok");
+      void dot.offsetWidth;
+      dot.classList.add("pulse");
+    } else if (BAD_STATUS.test(text)) {
+      dot.classList.add("bad");
+    }
+  }
   function escapeHtml(s) {
     return String(s ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   }
@@ -213,6 +513,75 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
     return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "command";
   }
   function kindLabel(k) { return k === "popup" ? "Popup" : "Replace"; }
+
+  const PROVIDERS = {
+    open_ai_compatible: {
+      label: "OpenAI-compatible",
+      baseUrl: "https://api.openai.com/v1",
+      keyPlaceholder: "sk-...",
+      modelPlaceholder: "gpt-4o-mini",
+      keyHint: "Works with OpenAI, Ollama, LM Studio, or any /chat/completions endpoint.",
+    },
+    anthropic: {
+      label: "Anthropic",
+      baseUrl: "https://api.anthropic.com",
+      keyPlaceholder: "sk-ant-...",
+      modelPlaceholder: "claude-opus-5",
+      keyHint: "Create a key at console.anthropic.com.",
+    },
+    open_router: {
+      label: "OpenRouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      keyPlaceholder: "sk-or-...",
+      modelPlaceholder: "anthropic/claude-opus-5",
+      keyHint: "Create a key at openrouter.ai/keys. Model ids look like vendor/model.",
+    },
+  };
+  function providerMeta(kind) { return PROVIDERS[kind] || PROVIDERS.open_ai_compatible; }
+
+  const EYE_SVG =
+    "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">" +
+    "<path d=\"M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z\"/><circle cx=\"8\" cy=\"8\" r=\"2\"/></svg>";
+  const EYE_OFF_SVG =
+    "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">" +
+    "<path d=\"M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z\"/><circle cx=\"8\" cy=\"8\" r=\"2\"/><path d=\"M2.5 13.5l11-11\"/></svg>";
+
+  // Segmented control that fronts a real <select> so existing handlers keep working.
+  function segmentedHtml(selectId, options, value) {
+    return (
+      "<div class=\"segmented\" data-for=\"" + escapeAttr(selectId) + "\" role=\"radiogroup\">" +
+      options.map((o) =>
+        "<button type=\"button\" class=\"seg" + (o.value === value ? " active" : "") + "\" role=\"radio\"" +
+        " aria-checked=\"" + (o.value === value ? "true" : "false") + "\" data-value=\"" + escapeAttr(o.value) + "\">" +
+        escapeHtml(o.label) + "</button>"
+      ).join("") +
+      "<select id=\"" + escapeAttr(selectId) + "\" class=\"seg-select\" tabindex=\"-1\" aria-hidden=\"true\">" +
+      options.map((o) => "<option value=\"" + escapeAttr(o.value) + "\">" + escapeHtml(o.label) + "</option>").join("") +
+      "</select></div>"
+    );
+  }
+  function wireSegmented(selectId) {
+    const sel = $("#" + selectId);
+    const wrap = document.querySelector(".segmented[data-for=\"" + selectId + "\"]");
+    if (!sel || !wrap) return;
+    const sync = () => {
+      wrap.querySelectorAll(".seg").forEach((b) => {
+        const on = b.dataset.value === sel.value;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-checked", on ? "true" : "false");
+      });
+    };
+    wrap.querySelectorAll(".seg").forEach((b) => {
+      b.onclick = () => {
+        if (sel.value === b.dataset.value) return;
+        sel.value = b.dataset.value;
+        sync();
+        sel.dispatchEvent(new Event("change"));
+      };
+    });
+    sel.addEventListener("change", sync);
+    sync();
+  }
 
   function getInvoke() {
     const g = window.__TAURI__;
@@ -253,7 +622,7 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
       "<label for=\"language\">Default language</label>" +
       "<div class=\"control-stack\">" +
       "<input id=\"language\" value=\"" + escapeAttr(config.language || "en") + "\" placeholder=\"en\" />" +
-      "<p class=\"field-hint\">Preferred language for the model (e.g. en, es, fr).</p>" +
+      "<p class=\"field-hint\">Preferred language for the model, for example en, es, or fr.</p>" +
       "</div></div>" +
       "<div class=\"section-label\">Shortcut</div>" +
       "<div class=\"form-row\">" +
@@ -263,7 +632,7 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
       "<p class=\"field-hint\">With selara serve running, changes apply within about a second.</p>" +
       "</div></div>" +
       "</div>" +
-      "<div class=\"general-save\"><button class=\"btn\" id=\"save-general\">Save General</button></div>";
+      "<div class=\"general-save\"><button class=\"btn\" id=\"save-general\">Save changes</button></div>";
     $("#save-general").onclick = async () => {
       config.language = $("#language").value.trim() || "en";
       config.hotkey = $("#hotkey").value.trim() || "ctrl+shift+space";
@@ -286,17 +655,12 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
   function statusDotClass(st) {
     if (!st) return "unknown";
     if (st.logged_in) return "ok";
-    // Amber for signed-out (Hut mockup); red only for hard errors.
+    // Amber for signed-out; red only for hard errors.
     const msg = (st.message || "").toLowerCase();
     if (msg && (msg.includes("error") || msg.includes("failed") || msg.includes("not found") || msg.includes("enoent"))) {
       return "bad";
     }
     return "unknown";
-  }
-
-  function statusLabel(st) {
-    if (!st || !st.message) return "Status unknown — click Refresh.";
-    return (st.logged_in ? "Signed in: " : "Not signed in: ") + st.message;
   }
 
   const EMAIL_VISIBLE_KEY = "wt.chatgpt.emailVisible";
@@ -312,26 +676,12 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
     if (at <= 0) return "••••••••";
     const domain = email.slice(at + 1);
     const dot = domain.lastIndexOf(".");
-    // Hut: bullet mask like ••••••••@••••.com (no leading letter — reads truncated otherwise).
+    // Bullet mask like ••••••••@••••.com (no leading letter; reads truncated otherwise).
     const localMask = "•".repeat(8);
     const domMask = dot > 0
       ? ("•".repeat(Math.max(4, Math.min(dot, 6))) + domain.slice(dot))
       : "••••";
     return localMask + "@" + domMask;
-  }
-  function emailRowHtml(st) {
-    if (!st || !st.logged_in || !st.email) return "";
-    const show = isEmailVisible();
-    const shown = show ? st.email : maskEmail(st.email);
-    const label = show ? "Hide email" : "Show email";
-    const icon = show ? "🙈" : "👁";
-    return (
-      "<div class=\"email-row\" id=\"chatgpt-email-row\">" +
-      "<span>Account</span>" +
-      "<span class=\"email-value\" id=\"chatgpt-email-value\">" + escapeHtml(shown) + "</span>" +
-      "<button type=\"button\" class=\"icon-btn\" id=\"chatgpt-email-toggle\" title=\"" + label + "\" aria-label=\"" + label + "\" aria-pressed=\"" + (show ? "true" : "false") + "\">" + icon + "</button>" +
-      "</div>"
-    );
   }
 
   async function loadChatgptModelsIntoSelect(preferred) {
@@ -392,7 +742,7 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
       const show = isEmailVisible();
       const shown = show ? st.email : maskEmail(st.email);
       const label = show ? "Hide email" : "Show email";
-      const icon = show ? "🙈" : "👁";
+      const icon = show ? EYE_OFF_SVG : EYE_SVG;
       return (
         "<span class=\"email-inline\" id=\"chatgpt-email-row\">" +
         "<span class=\"email-value\" id=\"chatgpt-email-value\">" + escapeHtml(shown) + "</span>" +
@@ -400,6 +750,14 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
         "</span>"
       );
     }
+
+    const statusChip =
+      "<div class=\"status-wrap\" id=\"chatgpt-status-wrap\">" +
+      "<div class=\"status-chip\" id=\"chatgpt-status-line\">" +
+      "<span class=\"status-dot " + dot + "\" aria-hidden=\"true\"></span>" +
+      "<span>" + escapeHtml(shortStatus) + "</span>" +
+      (signedIn ? emailInline(st) : "") +
+      "</div></div>";
 
     const modelHint = signedIn
       ? "<p class=\"field-hint\" id=\"chatgpt-models-hint\">Models load from your ChatGPT / Codex account.</p>"
@@ -412,11 +770,6 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
       "<select id=\"model-select\"" + modelSelectAttrs + "><option value=\"\">Sign in to load models</option></select>" +
       modelHint +
       "</div></div>" +
-      "<div class=\"status-row\" id=\"chatgpt-status-line\">" +
-      "<span class=\"status-dot " + dot + "\" aria-hidden=\"true\"></span>" +
-      "<span>" + escapeHtml(shortStatus) + "</span>" +
-      (signedIn ? emailInline(st) : "") +
-      "</div>" +
       "<div class=\"auth-actions\">" +
       (signedIn
         ? "<button class=\"btn secondary\" id=\"chatgpt-logout\">Sign out</button>" +
@@ -430,18 +783,25 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
     const byokInner =
       "<div class=\"form-row\" id=\"model-byok-wrap\">" +
       "<label for=\"model\">Model</label>" +
-      "<input id=\"model\" value=\"" + escapeAttr(p.model || "") + "\" placeholder=\"gpt-4o-mini\" />" +
+      "<div class=\"control-stack\">" +
+      "<div class=\"control-inline\">" +
+      "<input id=\"model\" list=\"model-options\" value=\"" + escapeAttr(p.model || "") + "\" autocomplete=\"off\" spellcheck=\"false\" />" +
+      "<datalist id=\"model-options\"></datalist>" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"load-models\">Load models</button>" +
       "</div>" +
+      "<p class=\"field-hint\" id=\"byok-models-hint\">Type a model id, or load the list from the provider to check the connection.</p>" +
+      "</div></div>" +
       "<div class=\"form-row\" id=\"base-url-field\">" +
       "<label for=\"base_url\">Base URL</label>" +
-      "<input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" />" +
-      "</div>" +
-      "<div class=\"form-row\">" +
-      "<label for=\"api_key\">API key</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" />" +
-      "<p class=\"field-hint\">Stored in ~/.config/selara/config.toml (or SELARA_API_KEY).</p>" +
+      "<input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" autocomplete=\"off\" spellcheck=\"false\" />" +
+      "<p class=\"field-hint\" id=\"base-url-hint\"></p>" +
       "</div></div>";
+
+    const byokKey =
+      "<div class=\"key-wrap\" id=\"byok-key-wrap\">" +
+      "<input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" placeholder=\"API key\" autocomplete=\"off\" aria-label=\"API key\" />" +
+      "</div>";
 
     s.innerHTML =
       "<h1>Models</h1>" +
@@ -451,47 +811,53 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
       "<div class=\"form-row\">" +
       "<label for=\"provider-kind\">Provider</label>" +
       "<select id=\"provider-kind\">" +
-      "<option value=\"open_ai_compatible\">OpenAI-compatible</option>" +
-      "<option value=\"anthropic\">Anthropic</option>" +
-      "<option value=\"ollama\">Ollama (local)</option>" +
-      "<option value=\"gemini\">Google Gemini</option>" +
+      Object.keys(PROVIDERS).map((k) =>
+        "<option value=\"" + k + "\">" + escapeHtml(PROVIDERS[k].label) + "</option>"
+      ).join("") +
       "</select></div>" +
       "<div class=\"section-label-row\">" +
       "<div class=\"section-label\">Authentication</div>" +
       "<span class=\"pill\" id=\"auth-experimental-pill\" style=\"display:none\">Experimental</span>" +
       "</div>" +
       "<div class=\"form-row\">" +
-      "<label for=\"provider-auth\">Auth mode</label>" +
+      "<label for=\"provider-auth\" id=\"auth-row-label\">Auth mode</label>" +
       "<div class=\"control-stack\">" +
-      "<select id=\"provider-auth\">" +
-      "<option value=\"api_key\">API key (BYOK)</option>" +
-      "<option value=\"chatgpt\">ChatGPT via Codex CLI</option>" +
-      "</select>" +
+      segmentedHtml("provider-auth", [
+        { value: "api_key", label: "API key" },
+        { value: "chatgpt", label: "ChatGPT via Codex" },
+      ], auth) +
+      statusChip + byokKey +
       "<p class=\"field-hint\" id=\"auth-hint\">Tokens live in ~/.codex/auth.json.</p>" +
       "</div></div>" +
       "<div id=\"chatgpt-fields\">" +
       "<div class=\"section-label\">Account</div>" + accountInner +
       "</div>" +
       "<div id=\"byok-fields\">" +
-      "<div class=\"section-label\">API key</div>" + byokInner +
+      "<div class=\"section-label\">Connection</div>" + byokInner +
       "</div>" +
       "</div>" +
-      "<div class=\"models-save\"><button class=\"btn\" id=\"save-models\">Save Models</button></div>";
+      "<div class=\"models-save\"><button class=\"btn\" id=\"save-models\">Save changes</button></div>";
 
-    $("#provider-kind").value = p.kind || "open_ai_compatible";
-    $("#provider-auth").value = auth;
+    const initialKind = PROVIDERS[p.kind] ? p.kind : "open_ai_compatible";
+    $("#provider-kind").value = initialKind;
+    $("#provider-auth").value = initialKind === "open_ai_compatible" ? auth : "api_key";
+    wireSegmented("provider-auth");
 
     function syncAuthUi() {
       const a = $("#provider-auth").value;
       const isCg = a === "chatgpt";
       $("#byok-fields").style.display = isCg ? "none" : "block";
       $("#chatgpt-fields").style.display = isCg ? "block" : "none";
+      const statusWrap = $("#chatgpt-status-wrap");
+      if (statusWrap) statusWrap.style.display = isCg ? "flex" : "none";
+      const keyWrap = $("#byok-key-wrap");
+      if (keyWrap) keyWrap.style.display = isCg ? "none" : "block";
       const pill = $("#auth-experimental-pill");
       if (pill) pill.style.display = isCg ? "inline-flex" : "none";
       const hint = $("#auth-hint");
       if (hint) {
         if (!isCg) {
-          hint.textContent = "Use your own API key. Platform model names (e.g. gpt-4o-mini) work here.";
+          hint.textContent = providerMeta($("#provider-kind").value).keyHint + " Stored in ~/.config/selara/config.toml, or set SELARA_API_KEY.";
         } else if (chatgptStatus && chatgptStatus.logged_in) {
           hint.textContent = "Tokens live in ~/.codex/auth.json. Base URL isn't used in this mode.";
         } else {
@@ -502,8 +868,87 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
         loadChatgptModelsIntoSelect(p.model);
       }
     }
+
+    // Per-provider placeholders, hints, and whether the ChatGPT auth mode applies.
+    function syncProviderUi() {
+      const kind = $("#provider-kind").value;
+      const meta = providerMeta(kind);
+      const isOpenAi = kind === "open_ai_compatible";
+      const seg = document.querySelector(".segmented[data-for=\"provider-auth\"]");
+      if (seg) seg.style.display = isOpenAi ? "" : "none";
+      const rowLabel = $("#auth-row-label");
+      if (rowLabel) rowLabel.textContent = isOpenAi ? "Auth mode" : "API key";
+      if (!isOpenAi && $("#provider-auth").value !== "api_key") {
+        $("#provider-auth").value = "api_key";
+        $("#provider-auth").dispatchEvent(new Event("change"));
+      }
+      const key = $("#api_key");
+      if (key) key.placeholder = meta.keyPlaceholder;
+      const model = $("#model");
+      if (model) model.placeholder = meta.modelPlaceholder;
+      const base = $("#base_url");
+      if (base) base.placeholder = meta.baseUrl;
+      const baseHint = $("#base-url-hint");
+      if (baseHint) baseHint.textContent = "Leave blank to use " + meta.baseUrl + ".";
+      const hint = $("#auth-hint");
+      if (hint && $("#provider-auth").value !== "chatgpt") {
+        hint.textContent = meta.keyHint + " Stored in ~/.config/selara/config.toml, or set SELARA_API_KEY.";
+      }
+    }
+
+    let lastKind = initialKind;
+    $("#provider-kind").onchange = () => {
+      const kind = $("#provider-kind").value;
+      const base = $("#base_url");
+      // A base URL that was just the previous provider's default should not carry over.
+      if (base && (base.value.trim() === "" || base.value.trim() === providerMeta(lastKind).baseUrl)) {
+        base.value = "";
+      }
+      const list = $("#model-options");
+      if (list) list.innerHTML = "";
+      // A model id belongs to one provider; keep the saved one only for the saved provider.
+      const model = $("#model");
+      if (model) model.value = kind === p.kind ? (p.model || "") : "";
+      const modelsHint = $("#byok-models-hint");
+      if (modelsHint) modelsHint.textContent = "Type a model id, or load the list from the provider to check the connection.";
+      lastKind = kind;
+      syncProviderUi();
+    };
+
     syncAuthUi();
-    $("#provider-auth").onchange = () => { syncAuthUi(); };
+    syncProviderUi();
+    $("#provider-auth").onchange = () => { syncAuthUi(); syncProviderUi(); };
+
+    const loadBtn = $("#load-models");
+    if (loadBtn) {
+      loadBtn.onclick = async () => {
+        const kind = $("#provider-kind").value;
+        const meta = providerMeta(kind);
+        const modelsHint = $("#byok-models-hint");
+        const list = $("#model-options");
+        loadBtn.disabled = true;
+        if (modelsHint) modelsHint.textContent = "Contacting " + meta.label + "…";
+        setStatus("Loading models…");
+        try {
+          const models = await invoke("list_provider_models_cmd", {
+            kind: kind,
+            baseUrl: $("#base_url").value.trim(),
+            apiKey: $("#api_key").value.trim() || null,
+          });
+          const ids = Array.isArray(models) ? models : [];
+          if (list) {
+            list.innerHTML = ids.map((m) => "<option value=\"" + escapeAttr(m) + "\"></option>").join("");
+          }
+          if (modelsHint) modelsHint.textContent = ids.length + " models available from " + meta.label + ". Pick one from the list or keep typing.";
+          setStatus("Models loaded");
+        } catch (e) {
+          if (modelsHint) modelsHint.textContent = String(e);
+          setStatus(String(e));
+        } finally {
+          loadBtn.disabled = false;
+        }
+      };
+    }
 
     const emailToggle = $("#chatgpt-email-toggle");
     if (emailToggle) {
@@ -515,7 +960,7 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
         emailToggle.title = show ? "Hide email" : "Show email";
         emailToggle.setAttribute("aria-label", emailToggle.title);
         emailToggle.setAttribute("aria-pressed", show ? "true" : "false");
-        emailToggle.textContent = show ? "🙈" : "👁";
+        emailToggle.innerHTML = show ? EYE_OFF_SVG : EYE_SVG;
       };
     }
 
@@ -529,7 +974,7 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
       config.provider = {
         kind: $("#provider-kind").value,
         model: model,
-        base_url: ($("#base_url") && $("#base_url").value.trim()) || (p.base_url || ""),
+        base_url: $("#base_url") ? $("#base_url").value.trim() : "",
         api_key: ($("#api_key") && $("#api_key").value.trim()) || null,
         auth: a,
       };
@@ -581,100 +1026,234 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
     }
   }
 
+  const SEARCH_SVG =
+    "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" aria-hidden=\"true\"><circle cx=\"7\" cy=\"7\" r=\"4.5\"/><path d=\"M10.5 10.5L14 14\"/></svg>";
+  const PLUS_SVG =
+    "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" aria-hidden=\"true\"><path d=\"M8 3v10M3 8h10\"/></svg>";
+  const CHEVRON_SVG =
+    "<svg class=\"chevron\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M6 3.5L10.5 8 6 12.5\"/></svg>";
+  const COPY_SVG =
+    "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><rect x=\"5.5\" y=\"5.5\" width=\"8\" height=\"8\" rx=\"1.6\"/><path d=\"M10.5 5.5V4a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5\"/></svg>";
+  const TRASH_SVG =
+    "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8\"/></svg>";
+
+  // Display-only: ctrl+shift+p -> ⌃⇧P. The stored chord is unchanged.
+  function prettyHotkey(chord) {
+    const map = { ctrl: "⌃", control: "⌃", shift: "⇧", alt: "⌥", option: "⌥", cmd: "⌘", command: "⌘", super: "⌘", meta: "⌘" };
+    return String(chord || "").split("+").map((part) => {
+      const k = part.trim().toLowerCase();
+      if (map[k]) return map[k];
+      if (k === "space") return "Space";
+      return k.length === 1 ? k.toUpperCase() : part.trim();
+    }).join("");
+  }
+
+  let commandFilter = "";
+
+  function commandMatches(c, q) {
+    if (!q) return true;
+    const hay = [c.label, c.prompt, c.hotkey || "", kindLabel(c.kind)].join(" ").toLowerCase();
+    return hay.includes(q);
+  }
+
   function renderCommands() {
     const s = $("#section-commands");
-    const list = (config.commands || []).map((c) => {
+    const all = config.commands || [];
+    const q = commandFilter.trim().toLowerCase();
+    const shown = all.filter((c) => commandMatches(c, q));
+    const rows = shown.map((c) => {
       const badges =
         "<span class=\"badge\">" + escapeHtml(kindLabel(c.kind)) + "</span>" +
-        (c.hotkey ? " <span class=\"badge\">" + escapeHtml(c.hotkey) + "</span>" : "");
+        (c.hotkey ? "<span class=\"badge key\" title=\"" + escapeAttr(c.hotkey) + "\">" + escapeHtml(prettyHotkey(c.hotkey)) + "</span>" : "");
       return (
-        "<div class=\"cmd-item\" data-id=\"" + escapeAttr(c.id) + "\">" +
-        "<div><h3>" + escapeHtml(c.label) + " " + badges + "</h3>" +
+        "<div class=\"cmd-item\" data-id=\"" + escapeAttr(c.id) + "\" role=\"button\" tabindex=\"0\" aria-label=\"Edit " + escapeAttr(c.label) + "\">" +
+        "<div class=\"cmd-main\"><h3><span class=\"cmd-name\">" + escapeHtml(c.label) + "</span>" + badges + "</h3>" +
         "<p>" + escapeHtml(c.prompt) + "</p></div>" +
-        "<div class=\"actions\">" +
-        "<button class=\"btn secondary\" data-act=\"edit\">Edit</button>" +
-        "<button class=\"btn secondary\" data-act=\"dup\">Duplicate</button>" +
-        "<button class=\"btn danger\" data-act=\"del\">Delete</button>" +
-        "</div></div>"
+        "<div class=\"row-actions\">" +
+        "<button type=\"button\" class=\"icon-btn\" data-act=\"dup\" title=\"Duplicate\" aria-label=\"Duplicate " + escapeAttr(c.label) + "\">" + COPY_SVG + "</button>" +
+        "<button type=\"button\" class=\"icon-btn danger\" data-act=\"del\" title=\"Delete\" aria-label=\"Delete " + escapeAttr(c.label) + "\">" + TRASH_SVG + "</button>" +
+        "</div>" +
+        CHEVRON_SVG +
+        "</div>"
       );
     }).join("");
-    const editing = editingId ? (config.commands || []).find((c) => c.id === editingId) : null;
-    const editorTitle = editing ? "Edit command" : "New command";
-    const sectionEditor = editing ? "Edit" : "New command";
+
+    let listInner = rows;
+    if (!all.length) {
+      listInner =
+        "<div class=\"empty\"><strong>No commands yet</strong>" +
+        "<span>Each command is a prompt that runs on your selection.</span>" +
+        "<button type=\"button\" class=\"btn\" id=\"cmd-new-empty\">Create your first command</button></div>";
+    } else if (!shown.length) {
+      listInner = "<div class=\"empty\"><strong>No matches</strong><span>Nothing matches “" + escapeHtml(commandFilter.trim()) + "”.</span></div>";
+    }
+
     s.innerHTML =
       "<h1>Commands</h1>" +
-      "<p class=\"lead\">Each command is a prompt. Duplicate to make variations.</p>" +
-      "<div class=\"panel\">" +
-      "<div class=\"section-label\">" + sectionEditor + "</div>" +
-      "<p class=\"cmd-editor-title\">" + escapeHtml(editorTitle) + "</p>" +
+      "<p class=\"lead\">Each command is a prompt. Click one to edit it, or duplicate it to make a variation.</p>" +
+      "<div class=\"toolbar\">" +
+      "<div class=\"search\">" + SEARCH_SVG +
+      "<input id=\"cmd-search\" type=\"search\" placeholder=\"Search commands\" value=\"" + escapeAttr(commandFilter) + "\" autocomplete=\"off\" spellcheck=\"false\" aria-label=\"Search commands\" />" +
+      "</div>" +
+      "<button type=\"button\" class=\"btn\" id=\"cmd-new\">" + PLUS_SVG + "New command</button>" +
+      "</div>" +
+      "<div class=\"cmd-list\">" + listInner + "</div>";
+
+    const search = $("#cmd-search");
+    search.oninput = () => {
+      const pos = search.selectionStart;
+      commandFilter = search.value;
+      renderCommands();
+      const again = $("#cmd-search");
+      again.focus();
+      try { again.setSelectionRange(pos, pos); } catch (_) {}
+    };
+    $("#cmd-new").onclick = () => openCommandSheet(null);
+    const emptyBtn = $("#cmd-new-empty");
+    if (emptyBtn) emptyBtn.onclick = () => openCommandSheet(null);
+
+    s.querySelectorAll(".cmd-item").forEach((el) => {
+      const id = el.dataset.id;
+      el.onclick = () => openCommandSheet(id);
+      el.onkeydown = (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openCommandSheet(id); }
+      };
+      el.querySelector('[data-act="dup"]').onclick = async (ev) => {
+        ev.stopPropagation();
+        await duplicateCommand(id);
+      };
+      el.querySelector('[data-act="del"]').onclick = async (ev) => {
+        ev.stopPropagation();
+        await deleteCommand(id);
+      };
+    });
+  }
+
+  async function duplicateCommand(id) {
+    const src = config.commands.find((c) => c.id === id);
+    if (!src) return;
+    config.commands.push(Object.assign({}, src, {
+      id: src.id + "-copy-" + Math.random().toString(36).slice(2, 6),
+      label: src.label + " copy",
+      hotkey: null,
+    }));
+    await saveConfig();
+    renderCommands();
+  }
+
+  async function deleteCommand(id) {
+    const c = config.commands.find((x) => x.id === id);
+    if (!confirm("Delete “" + (c ? c.label : id) + "”?")) return false;
+    config.commands = config.commands.filter((x) => x.id !== id);
+    if (editingId === id) editingId = null;
+    await saveConfig();
+    renderCommands();
+    return true;
+  }
+
+  function closeCommandSheet() {
+    const root = $("#sheet-root");
+    if (root) root.remove();
+    document.body.classList.remove("sheet-open");
+    document.removeEventListener("keydown", sheetKeyHandler, true);
+    editingId = null;
+  }
+
+  function sheetKeyHandler(ev) {
+    if (ev.key === "Escape") { ev.preventDefault(); closeCommandSheet(); return; }
+    if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
+      ev.preventDefault();
+      const save = $("#cmd-save");
+      if (save) save.click();
+    }
+  }
+
+  function openCommandSheet(id) {
+    closeCommandSheet();
+    editingId = id;
+    const editing = id ? (config.commands || []).find((c) => c.id === id) : null;
+    const root = document.createElement("div");
+    root.id = "sheet-root";
+    root.className = "sheet-backdrop";
+    root.innerHTML =
+      "<div class=\"sheet\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"sheet-title\">" +
+      "<h2 id=\"sheet-title\">" + (editing ? "Edit command" : "New command") + "</h2>" +
+      "<p class=\"sheet-sub\">" + (editing ? "Changes apply the next time you run it." : "Write the instruction the model should follow for the selected text.") + "</p>" +
       "<div class=\"form-row\">" +
       "<label for=\"cmd-label\">Label</label>" +
-      "<input id=\"cmd-label\" value=\"" + escapeAttr(editing && editing.label || "") + "\" />" +
+      "<input id=\"cmd-label\" value=\"" + escapeAttr(editing && editing.label || "") + "\" placeholder=\"Proofread\" autocomplete=\"off\" />" +
       "</div>" +
       "<div class=\"form-row\">" +
-      "<label for=\"cmd-kind\">Kind</label>" +
-      "<select id=\"cmd-kind\"><option value=\"replace\">Replace selection</option><option value=\"popup\">Popup result</option></select>" +
-      "</div>" +
-      "<div class=\"form-row\" style=\"align-items:start\">" +
-      "<label for=\"cmd-prompt\">Prompt</label>" +
-      "<textarea id=\"cmd-prompt\" style=\"min-height:110px;margin:0;width:100%\">" + escapeHtml(editing && editing.prompt || "") + "</textarea>" +
-      "</div>" +
-      "<div class=\"form-row\">" +
-      "<label for=\"cmd-hotkey\">Command hotkey</label>" +
+      "<label for=\"cmd-kind\">Result</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"cmd-hotkey\" value=\"" + escapeAttr((editing && editing.hotkey) || "") + "\" placeholder=\"e.g. ctrl+shift+p\" />" +
-      "<p class=\"field-hint\">Runs this command on the current selection (skips picker).</p>" +
+      segmentedHtml("cmd-kind", [
+        { value: "replace", label: "Replace selection" },
+        { value: "popup", label: "Show in popup" },
+      ], (editing && editing.kind) || "replace") +
+      "<p class=\"field-hint\" id=\"cmd-kind-hint\"></p>" +
       "</div></div>" +
-      "<div class=\"actions\" style=\"margin-top:8px\">" +
-      "<button class=\"btn\" id=\"cmd-save\">" + (editing ? "Update" : "Add command") + "</button>" +
-      (editing ? "<button class=\"btn secondary\" id=\"cmd-cancel\">Cancel</button>" : "") +
+      "<div class=\"form-row top\">" +
+      "<label for=\"cmd-prompt\">Prompt</label>" +
+      "<textarea id=\"cmd-prompt\" placeholder=\"Fix spelling and grammar. Keep the original tone.\">" + escapeHtml(editing && editing.prompt || "") + "</textarea>" +
       "</div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"cmd-hotkey\">Hotkey</label>" +
+      "<div class=\"control-stack\">" +
+      "<input id=\"cmd-hotkey\" value=\"" + escapeAttr((editing && editing.hotkey) || "") + "\" placeholder=\"Optional, e.g. ctrl+shift+p\" autocomplete=\"off\" spellcheck=\"false\" />" +
+      "<p class=\"field-hint\">Runs this command on the selection and skips the picker.</p>" +
+      "</div></div>" +
+      "<div class=\"sheet-foot\">" +
+      (editing ? "<button type=\"button\" class=\"btn linkish danger-text\" id=\"cmd-delete\">Delete command</button>" : "") +
+      "<span class=\"spacer\"></span>" +
+      "<span class=\"field-hint\" style=\"margin-right:4px\"><kbd>⌘</kbd><kbd>↩</kbd> to save</span>" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"cmd-cancel\">Cancel</button>" +
+      "<button type=\"button\" class=\"btn\" id=\"cmd-save\">" + (editing ? "Save changes" : "Add command") + "</button>" +
       "</div>" +
-      "<div class=\"section-label\">Commands list</div>" +
-      "<div class=\"cmd-list\">" + (list || "<p class=\"field-hint\">No commands yet.</p>") + "</div>";
+      "</div>";
+    document.body.appendChild(root);
+    document.body.classList.add("sheet-open");
+    document.addEventListener("keydown", sheetKeyHandler, true);
+
     if (editing) $("#cmd-kind").value = editing.kind;
+    wireSegmented("cmd-kind");
+    const kindHint = $("#cmd-kind-hint");
+    const syncKindHint = () => {
+      kindHint.textContent = $("#cmd-kind").value === "popup"
+        ? "Shows the result in a window and leaves the selection alone."
+        : "Replaces the selected text with the result.";
+    };
+    syncKindHint();
+    $("#cmd-kind").addEventListener("change", syncKindHint);
+
+    root.onclick = (ev) => { if (ev.target === root) closeCommandSheet(); };
+    $("#cmd-cancel").onclick = closeCommandSheet;
+    const del = $("#cmd-delete");
+    if (del) del.onclick = async () => { if (await deleteCommand(id)) closeCommandSheet(); };
+
     $("#cmd-save").onclick = async () => {
       const label = $("#cmd-label").value.trim();
       const prompt = $("#cmd-prompt").value.trim();
       const kind = $("#cmd-kind").value;
       const hotkeyRaw = $("#cmd-hotkey").value.trim();
       const hotkey = hotkeyRaw ? hotkeyRaw : null;
-      if (!label || !prompt) { setStatus("Label and prompt are required"); return; }
+      if (!label || !prompt) {
+        setStatus("Label and prompt are required");
+        (!label ? $("#cmd-label") : $("#cmd-prompt")).focus();
+        return;
+      }
       if (editingId) {
         const i = config.commands.findIndex((c) => c.id === editingId);
         if (i >= 0) config.commands[i] = Object.assign({}, config.commands[i], { label, prompt, kind, hotkey });
-        editingId = null;
       } else {
-        const id = slug(label) + "-" + Math.random().toString(36).slice(2, 7);
-        config.commands.push({ id, label, prompt, kind, hotkey });
+        const newId = slug(label) + "-" + Math.random().toString(36).slice(2, 7);
+        config.commands.push({ id: newId, label, prompt, kind, hotkey });
       }
       await saveConfig();
+      closeCommandSheet();
       renderCommands();
     };
-    const cancel = $("#cmd-cancel");
-    if (cancel) cancel.onclick = () => { editingId = null; renderCommands(); };
-    s.querySelectorAll(".cmd-item").forEach((el) => {
-      const id = el.dataset.id;
-      el.querySelector('[data-act="edit"]').onclick = () => { editingId = id; renderCommands(); };
-      el.querySelector('[data-act="dup"]').onclick = async () => {
-        const src = config.commands.find((c) => c.id === id);
-        if (!src) return;
-        config.commands.push(Object.assign({}, src, {
-          id: src.id + "-copy-" + Math.random().toString(36).slice(2, 6),
-          label: src.label + " copy",
-          hotkey: null,
-        }));
-        await saveConfig();
-        renderCommands();
-      };
-      el.querySelector('[data-act="del"]').onclick = async () => {
-        if (!confirm("Delete “" + id + "”?")) return;
-        config.commands = config.commands.filter((c) => c.id !== id);
-        if (editingId === id) editingId = null;
-        await saveConfig();
-        renderCommands();
-      };
-    });
+
+    setTimeout(() => { const first = $("#cmd-label"); if (first) first.focus(); }, 0);
   }
 
   function renderLimits() {
@@ -682,31 +1261,31 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
     const s = $("#section-limits");
     s.innerHTML =
       "<h1>Limits</h1>" +
-      "<p class=\"lead\">Gentle rails. Set any value to 0 for unlimited.</p>" +
+      "<p class=\"lead\">Gentle rails for large selections. Set any value to 0 for unlimited.</p>" +
       "<div class=\"panel\">" +
       "<div class=\"section-label\">Thresholds</div>" +
       "<div class=\"form-row\">" +
       "<label for=\"soft_warn\">Soft warn (chars)</label>" +
       "<div class=\"control-stack\">" +
       "<input id=\"soft_warn\" type=\"number\" min=\"0\" value=\"" + (L.soft_warn_chars ?? 8000) + "\" />" +
-      "<p class=\"field-hint\">Warn before sending large selections</p>" +
+      "<p class=\"field-hint\">Warn before sending large selections.</p>" +
       "</div></div>" +
       "<div class=\"form-row\">" +
       "<label for=\"hard_max\">Hard max (chars)</label>" +
       "<div class=\"control-stack\">" +
       "<input id=\"hard_max\" type=\"number\" min=\"0\" value=\"" + (L.hard_max_chars ?? 100000) + "\" />" +
-      "<p class=\"field-hint\">Block past this size</p>" +
+      "<p class=\"field-hint\">Block anything past this size.</p>" +
       "</div></div>" +
       "<div class=\"form-row\">" +
       "<label for=\"replace_warn\">Replace caution (chars)</label>" +
       "<div class=\"control-stack\">" +
       "<input id=\"replace_warn\" type=\"number\" min=\"0\" value=\"" + (L.replace_warn_chars ?? 4000) + "\" />" +
-      "<p class=\"field-hint\">Extra confirm when replacing a large selection</p>" +
+      "<p class=\"field-hint\">Ask again before replacing a selection larger than this.</p>" +
       "</div></div>" +
       "</div>" +
       "<div class=\"limits-actions\">" +
-      "<button class=\"btn\" id=\"save-limits\">Save Limits</button>" +
-      "<button class=\"btn linkish\" id=\"reset-limits\">Reset defaults</button>" +
+      "<button class=\"btn linkish\" id=\"reset-limits\">Reset to defaults</button>" +
+      "<button class=\"btn\" id=\"save-limits\">Save changes</button>" +
       "</div>";
     $("#save-limits").onclick = async () => {
       config.limits = {

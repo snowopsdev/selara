@@ -1,6 +1,6 @@
 use selara_core::codex_cli::{self, CodexLoginStatus};
 use selara_core::config::AppConfig;
-use selara_core::providers::list_chatgpt_models;
+use selara_core::providers::{list_chatgpt_models, list_provider_models, ProviderKind};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -45,6 +45,28 @@ async fn list_chatgpt_models_cmd() -> Result<Vec<String>, String> {
     list_chatgpt_models().await.map_err(|e| e.to_string())
 }
 
+/// List models for a BYOK provider. Falls back to the env API key when the
+/// Settings form has no key typed in yet.
+#[tauri::command]
+async fn list_provider_models_cmd(
+    kind: ProviderKind,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<Vec<String>, String> {
+    let key = api_key
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| {
+            ["SELARA_API_KEY", "WRITING_TOOLS_API_KEY"]
+                .iter()
+                .find_map(|var| std::env::var(var).ok())
+                .filter(|k| !k.trim().is_empty())
+        })
+        .unwrap_or_default();
+    list_provider_models(kind, &base_url, key.trim())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn show_settings<R: Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
@@ -63,7 +85,8 @@ pub fn run() {
             chatgpt_auth_status,
             chatgpt_login,
             chatgpt_logout,
-            list_chatgpt_models_cmd
+            list_chatgpt_models_cmd,
+            list_provider_models_cmd
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -100,6 +123,11 @@ pub fn run() {
             let _tray = tray.build(app)?;
 
             if let Some(win) = app.get_webview_window("settings") {
+                #[cfg(target_os = "macos")]
+                {
+                    use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+                    let _ = apply_vibrancy(&win, NSVisualEffectMaterial::Sidebar, None, None);
+                }
                 #[cfg(debug_assertions)]
                 {
                     win.open_devtools();

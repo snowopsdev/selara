@@ -1,6 +1,6 @@
 [package]
 name = "selara-desktop"
-version = "0.1.0"
+version.workspace = true
 description = "Selara macOS tray + Settings (Tauri)"
 authors = ["Aj Nieves"]
 edition = "2021"
@@ -20,3 +20,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 selara-core = { path = "../../../crates/selara-core" }
 anyhow = { workspace = true }
+window-vibrancy = "0.8.0"
