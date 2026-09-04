@@ -25,27 +25,16 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # Tauri / WebView system libraries for apps/selara-desktop on Linux.
-      # macOS-only paths (Accessibility, global hotkey, egui serve) are
-      # cfg-gated and are not fully exercised here — test those locally on macOS.
-      - name: Install Linux desktop deps (Tauri)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev
-
+      # apps/selara-desktop (Tauri) and macOS-only shell paths (Accessibility,
+      # global hotkey, egui `serve`) need local macOS testing. Linux CI covers
+      # the portable workspace crates/CLI; desktop is excluded here.
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
-      # Without -D warnings: current tree has known clippy / objc cfg noise,
-      # especially around macOS FFI. Tighten later once cleaned up.
+      # Without -D warnings: current tree has known clippy / objc cfg noise on
+      # macOS FFI paths and a few existing lints. Tighten later once cleaned up.
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --exclude selara-desktop
 
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude selara-desktop

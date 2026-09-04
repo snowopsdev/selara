@@ -18,7 +18,7 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
-CI on GitHub Actions runs the same checks on Linux (`ubuntu-latest`). Clippy is currently **not** run with `-D warnings` because of known noise (including `objc`-related `cfg` warnings on macOS code paths and a few existing lints). Prefer leaving the tree warning-clean when you can.
+CI on GitHub Actions runs fmt/clippy/test on Linux (`ubuntu-latest`), excluding the Tauri `selara-desktop` package. Clippy is currently **not** run with `-D warnings` because of known noise (including `objc`-related `cfg` warnings on macOS code paths and a few existing lints). Prefer leaving the tree warning-clean when you can.
 
 ### Platform notes
 
@@ -29,7 +29,7 @@ CI on GitHub Actions runs the same checks on Linux (`ubuntu-latest`). Clippy is 
 | macOS Accessibility / hotkey / clipboard backends | Compile stubs / cfg-gated; no real AX coverage | Needs local testing |
 | `selara` CLI | Covered | Covered |
 | `selara` `serve` (egui picker) | Not exercised on Linux | Needs local macOS testing |
-| `selara-desktop` (Tauri) | Rust side may build with Linux WebKit deps; UI still needs local checks | Needs local macOS testing |
+| `selara-desktop` (Tauri) | Excluded from Linux CI | Needs local macOS testing |
 
 If you change hotkeys, selection replace, Accessibility behavior, or the Settings UI, please verify on macOS locally and attach screenshots when UI changes.
 
