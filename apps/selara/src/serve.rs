@@ -120,13 +120,30 @@ impl ServeApp {
             .iter()
             .filter(|c| c.hotkey.as_ref().map(|h| !h.trim().is_empty()).unwrap_or(false))
             .count();
+        let shortcut_hint = config
+            .commands
+            .iter()
+            .find_map(|c| {
+                c.hotkey
+                    .as_ref()
+                    .map(|h| h.trim())
+                    .filter(|h| !h.is_empty())
+                    .map(|h| format!("{}={}", c.label, h))
+            })
+            .unwrap_or_else(|| "no cmd shortcuts".into());
         format!(
-            "Hotkey: {} · {} commands ({} shortcuts) · Accessibility: {}",
+            "Picker: {} · {} cmds · {} · Access: {}",
             config.hotkey,
             config.commands.len(),
-            cmd_hk,
+            if cmd_hk == 0 {
+                shortcut_hint
+            } else if cmd_hk == 1 {
+                shortcut_hint
+            } else {
+                format!("{cmd_hk} shortcuts incl. {shortcut_hint}")
+            },
             if accessibility_trusted() {
-                "granted"
+                "ok"
             } else {
                 "MISSING"
             }
@@ -145,9 +162,18 @@ impl ServeApp {
                     .map(|h| (c.id.clone(), h))
             })
             .collect();
+        eprintln!(
+            "selara: registering picker `{}` + {} command shortcut(s)",
+            config.hotkey,
+            cmd_keys.len()
+        );
+        for (id, spec) in &cmd_keys {
+            eprintln!("selara:   command `{id}` → `{spec}`");
+        }
         hotkey
             .reregister_all(&config.hotkey, &cmd_keys)
-            .with_context(|| format!("register hotkeys (picker `{}`)", config.hotkey))
+            .with_context(|| format!("register hotkeys (picker `{}`)", config.hotkey))?;
+        Ok(())
     }
 
     fn maybe_reload_config(&mut self) {
@@ -269,9 +295,20 @@ then restart `selara serve`."
                 self.soft_warn_acked = true;
                 self.replace_warn_acked = true;
                 self.show_window(ctx, true);
+                eprintln!("selara: command hotkey `{}` → running", cmd.id);
                 self.start_command(cmd);
             }
-            Ok(false) => {}
+            Ok(false) => {
+                self.phase = UiPhase::Error {
+                    message: format!(
+                        "No text selection for `{}`.
+
+Select text in another app, then press its shortcut again.",
+                        cmd.label
+                    ),
+                };
+                self.show_window(ctx, true);
+            }
             Err(message) => {
                 self.phase = UiPhase::Error { message };
                 self.show_window(ctx, true);
@@ -316,10 +353,21 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
             return;
         }
         if self.needs_soft_warn() {
-            // Picker UI should have blocked this; belt-and-suspenders.
+            self.phase = UiPhase::Error {
+                message: format!(
+                    "Large selection ({} chars) — confirm via the picker, or raise soft warn in Settings.",
+                    self.selection_chars()
+                ),
+            };
             return;
         }
         if matches!(cmd.kind, CommandKind::Replace) && self.needs_replace_warn() {
+            self.phase = UiPhase::Error {
+                message: format!(
+                    "Large replace ({} chars) — confirm via the picker, or raise replace warn in Settings.",
+                    self.selection_chars()
+                ),
+            };
             return;
         }
 
@@ -670,6 +718,22 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     let config = AppConfig::load_or_init(&config_path)?;
     println!("config: {}", config_path.display());
     println!("hotkey: {}", config.hotkey);
+    let cmd_shortcuts: Vec<String> = config
+        .commands
+        .iter()
+        .filter_map(|c| {
+            c.hotkey
+                .as_ref()
+                .map(|h| h.trim())
+                .filter(|h| !h.is_empty())
+                .map(|h| format!("{} ({})", c.label, h))
+        })
+        .collect();
+    if cmd_shortcuts.is_empty() {
+        println!("command shortcuts: (none)");
+    } else {
+        println!("command shortcuts: {}", cmd_shortcuts.join(", "));
+    }
     println!(
         "limits: soft_warn={} hard_max={} replace_warn={}",
         config.limits.soft_warn_chars,
