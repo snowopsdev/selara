@@ -17,6 +17,46 @@ jobs:
       !startsWith(github.event.pull_request.head.ref, 'release-please--')
       && !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
     steps:
+      # Squash merging uses the PR title as the commit subject on main, and
+      # release-please reads that subject to pick the next version.
+      - name: Check PR title follows conventional commits
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          TYPES = "feat|fix|ref|perf|docs|test|build|ci|chore|style|meta|license"
+          PATTERN = re.compile(
+              rf"^({TYPES})(\([a-z0-9][a-z0-9._/-]*\))?!?: [A-Z][^\n]*$"
+          )
+          MAX_LEN = 70
+
+          title = (os.environ.get("PR_TITLE") or "").strip()
+          problems = []
+          if not PATTERN.match(title):
+              problems.append(
+                  "title must look like `type(scope): Subject` with a lowercase type "
+                  f"from [{TYPES}], an optional lowercase scope, and a capitalized subject"
+              )
+          if title.endswith("."):
+              problems.append("subject must not end with a period")
+          if len(title) > MAX_LEN:
+              problems.append(f"title is {len(title)} characters, maximum {MAX_LEN}")
+
+          if problems:
+              print(f'PR title "{title}" is not a valid conventional commit subject:\n')
+              for p in problems:
+                  print(f"  - {p}")
+              print(
+                  "\nThe title becomes the squash commit on main and drives semantic "
+                  "versioning (feat = minor, fix = patch, `!` = breaking)."
+              )
+              sys.exit(1)
+
+          print(f'PR title "{title}" is a valid conventional commit subject.')
+          PY
+
       - name: Check PR body sections
         env:
           # Passed through the environment so PR text is never interpolated
