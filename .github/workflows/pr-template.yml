@@ -11,6 +11,11 @@ jobs:
   sections:
     name: Required sections
     runs-on: ubuntu-latest
+    # release-please generates the "chore(main): release X.Y.Z" PR body from
+    # the changelog, which does not use the template. Skip those.
+    if: >-
+      !startsWith(github.event.pull_request.head.ref, 'release-please--')
+      && !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
     steps:
       - name: Check PR body sections
         env:
@@ -51,11 +56,19 @@ jobs:
                       f"({len(content)} chars, minimum {MIN_CHARS})"
                   )
 
-          # Enforce the template order for the sections that are present.
-          found = [h for h in (parts[i].strip().lower() for i in range(1, len(parts), 2))
-                   if h in [r.lower() for r in REQUIRED]]
-          expected = [r.lower() for r in REQUIRED if r.lower() in found]
-          if found != expected:
+          # Exactly the five sections, in template order, and nothing else at
+          # level two. Extra detail belongs inside a section (use ### or bullets).
+          headings = [parts[i].strip() for i in range(1, len(parts), 2)]
+          required_lower = [r.lower() for r in REQUIRED]
+          for h in headings:
+              if h.lower() not in required_lower:
+                  problems.append(
+                      f'unexpected section "## {h}"; keep extra detail inside one of the five '
+                      "sections (### subheadings are fine)"
+                  )
+          present = [h.lower() for h in headings if h.lower() in required_lower]
+          expected = [r for r in required_lower if r in present]
+          if present != expected:
               problems.append("sections are out of order; use the template order")
 
           if problems:
