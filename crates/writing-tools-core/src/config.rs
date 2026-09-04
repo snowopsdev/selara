@@ -12,6 +12,9 @@ pub struct AppConfig {
     pub hotkey: String,
     #[serde(default)]
     pub commands: Vec<WritingCommand>,
+    /// Selection / request size rails. Editable in the Settings UI; 0 disables a knob.
+    #[serde(default)]
+    pub limits: LimitsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,8 +28,45 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
 }
 
+/// Gentle defaults — accident protection, not rationing. Users with fat API budgets
+/// can raise these or set a knob to `0` (unlimited) from Settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LimitsConfig {
+    /// Soft warn in the picker above this many characters. `0` = never warn.
+    #[serde(default = "default_soft_warn_chars")]
+    pub soft_warn_chars: u64,
+    /// Hard refuse above this many characters. `0` = no hard limit.
+    #[serde(default = "default_hard_max_chars")]
+    pub hard_max_chars: u64,
+    /// Extra caution before Replace above this size. `0` = never.
+    #[serde(default = "default_replace_warn_chars")]
+    pub replace_warn_chars: u64,
+}
+
 fn default_hotkey() -> String {
     "ctrl+shift+space".into()
+}
+
+fn default_soft_warn_chars() -> u64 {
+    8_000
+}
+
+fn default_hard_max_chars() -> u64 {
+    100_000
+}
+
+fn default_replace_warn_chars() -> u64 {
+    4_000
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            soft_warn_chars: default_soft_warn_chars(),
+            hard_max_chars: default_hard_max_chars(),
+            replace_warn_chars: default_replace_warn_chars(),
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -40,6 +80,7 @@ impl Default for AppConfig {
             },
             hotkey: default_hotkey(),
             commands: builtin_commands(),
+            limits: LimitsConfig::default(),
         }
     }
 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use eframe::egui;
 use writing_tools_core::commands::{run_command, CommandKind, WritingCommand};
-use writing_tools_core::config::AppConfig;
+use writing_tools_core::config::{AppConfig, LimitsConfig};
 use writing_tools_core::providers::provider_from_config;
 use writing_tools_platform::macos::{
     accessibility_trusted, activate_pid, frontmost_pid, prompt_accessibility, MacosHotkey,
@@ -29,6 +29,7 @@ enum JobResult {
 enum UiPhase {
     Hidden,
     Picker,
+    Settings,
     Working { label: String },
     Popup { title: String, body: String },
     Error { message: String },
@@ -36,6 +37,7 @@ enum UiPhase {
 
 struct ServeApp {
     config: AppConfig,
+    config_path: PathBuf,
     selection: Arc<MacosSelection>,
     hotkey: MacosHotkey,
     hotkey_fired: Arc<AtomicBool>,
@@ -45,6 +47,11 @@ struct ServeApp {
     captured_app: Option<String>,
     captured_range: Option<(i64, i64)>,
     target_pid: Option<i32>,
+    /// Soft-warn acknowledged for the current selection.
+    soft_warn_acked: bool,
+    /// Replace-size warn acknowledged for the current selection.
+    replace_warn_acked: bool,
+    settings_status: String,
     job_rx: Receiver<JobResult>,
     job_tx: Sender<JobResult>,
     runtime: tokio::runtime::Runtime,
@@ -55,6 +62,7 @@ impl ServeApp {
     fn new(
         _cc: &eframe::CreationContext<'_>,
         config: AppConfig,
+        config_path: PathBuf,
         selection: Arc<MacosSelection>,
     ) -> Result<Self> {
         let hotkey_fired = Arc::new(AtomicBool::new(false));
@@ -92,6 +100,7 @@ impl ServeApp {
                 }
             ),
             config,
+            config_path,
             selection,
             hotkey,
             hotkey_fired,
@@ -100,6 +109,9 @@ impl ServeApp {
             captured_app: None,
             captured_range: None,
             target_pid: None,
+            soft_warn_acked: false,
+            replace_warn_acked: false,
+            settings_status: String::new(),
             job_rx,
             job_tx,
             runtime,
@@ -114,6 +126,25 @@ impl ServeApp {
                 egui::WindowLevel::AlwaysOnTop,
             ));
         }
+    }
+
+    fn selection_chars(&self) -> u64 {
+        self.captured_text.chars().count() as u64
+    }
+
+    fn over_hard_max(&self) -> bool {
+        let max = self.config.limits.hard_max_chars;
+        max > 0 && self.selection_chars() > max
+    }
+
+    fn needs_soft_warn(&self) -> bool {
+        let soft = self.config.limits.soft_warn_chars;
+        soft > 0 && self.selection_chars() > soft && !self.soft_warn_acked
+    }
+
+    fn needs_replace_warn(&self) -> bool {
+        let warn = self.config.limits.replace_warn_chars;
+        warn > 0 && self.selection_chars() > warn && !self.replace_warn_acked
     }
 
     fn on_hotkey(&mut self, ctx: &egui::Context) {
@@ -132,6 +163,8 @@ then restart `writing-tools serve`."
 
         // Capture focus target + selection BEFORE our window activates.
         self.target_pid = frontmost_pid();
+        self.soft_warn_acked = false;
+        self.replace_warn_acked = false;
         match self.runtime.block_on(self.selection.read_selection()) {
             Ok(Some(snap)) => {
                 self.captured_text = snap.text;
@@ -140,7 +173,7 @@ then restart `writing-tools serve`."
             }
             Ok(None) => {
                 self.phase = UiPhase::Error {
-                    message: "No text selection found.\nSelect text in another app, then press the hotkey again.".into(),
+                    message: "No text selection found.\nSelect text in another app, then press the hotkey again.\n\nTip: open Settings from the picker after a successful capture, or edit limits anytime from Settings once the window is up.".into(),
                 };
                 self.show_window(ctx, true);
                 return;
@@ -163,7 +196,47 @@ then restart `writing-tools serve`."
         self.show_window(ctx, false);
     }
 
+    fn save_settings(&mut self) {
+        match self.config.save(&self.config_path) {
+            Ok(()) => {
+                self.settings_status = format!("Saved · {}", self.config_path.display());
+                self.status_line = format!(
+                    "Hotkey: {} · {} commands · Accessibility: {}",
+                    self.config.hotkey,
+                    self.config.commands.len(),
+                    if accessibility_trusted() {
+                        "granted"
+                    } else {
+                        "MISSING"
+                    }
+                );
+            }
+            Err(e) => {
+                self.settings_status = format!("Save failed: {e}");
+            }
+        }
+    }
+
     fn start_command(&mut self, cmd: WritingCommand) {
+        if self.over_hard_max() {
+            let max = self.config.limits.hard_max_chars;
+            self.phase = UiPhase::Error {
+                message: format!(
+                    "Selection is {} characters — over your hard limit of {max}.\n\n\
+Shrink the selection, or raise / disable the limit in Settings (0 = unlimited).",
+                    self.selection_chars()
+                ),
+            };
+            return;
+        }
+        if self.needs_soft_warn() {
+            // Picker UI should have blocked this; belt-and-suspenders.
+            return;
+        }
+        if matches!(cmd.kind, CommandKind::Replace) && self.needs_replace_warn() {
+            return;
+        }
+
         let input = self.captured_text.clone();
         let cfg = self.config.clone();
         let tx = self.job_tx.clone();
@@ -283,13 +356,27 @@ impl eframe::App for ServeApp {
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.hide(ctx);
+            if matches!(self.phase, UiPhase::Settings) {
+                self.phase = UiPhase::Picker;
+            } else {
+                self.hide(ctx);
+            }
             return;
         }
 
         // Collect click target without holding a borrow across mutation.
         let mut clicked: Option<WritingCommand> = None;
         let mut dismiss = false;
+        let mut open_settings = false;
+        let mut back_to_picker = false;
+        let mut save_settings = false;
+        let mut reset_limits = false;
+        let mut ack_soft = false;
+        let mut ack_replace = false;
+
+        let soft_blocked = matches!(self.phase, UiPhase::Picker) && self.needs_soft_warn();
+        let hard_blocked = matches!(self.phase, UiPhase::Picker) && self.over_hard_max();
+        let replace_caution = matches!(self.phase, UiPhase::Picker) && self.needs_replace_warn();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -298,44 +385,143 @@ impl eframe::App for ServeApp {
                     if ui.button("Close").clicked() {
                         dismiss = true;
                     }
+                    if !matches!(self.phase, UiPhase::Settings | UiPhase::Working { .. })
+                        && ui.button("Settings").clicked()
+                    {
+                        open_settings = true;
+                    }
+                    if matches!(self.phase, UiPhase::Settings) && ui.button("Back").clicked() {
+                        back_to_picker = true;
+                    }
                 });
             });
             ui.label(&self.status_line);
             if let Some(app) = &self.captured_app {
-                ui.label(format!("From: {app}"));
+                if !matches!(self.phase, UiPhase::Settings) {
+                    ui.label(format!("From: {app}"));
+                }
             }
             ui.separator();
 
             match &self.phase {
                 UiPhase::Picker => {
-                    ui.label(format!(
-                        "Selection ({} chars)",
-                        self.captured_text.chars().count()
-                    ));
+                    let chars = self.selection_chars();
+                    ui.label(format!("Selection ({chars} chars)"));
                     let preview: String = self.captured_text.chars().take(220).collect();
                     ui.small(if self.captured_text.chars().count() > 220 {
                         format!("{preview}…")
                     } else {
                         preview
                     });
+
+                    if hard_blocked {
+                        ui.add_space(6.0);
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 80, 80),
+                            format!(
+                                "Over hard limit ({}). Shrink selection or raise the limit in Settings (0 = unlimited).",
+                                self.config.limits.hard_max_chars
+                            ),
+                        );
+                    } else if soft_blocked {
+                        ui.add_space(6.0);
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 150, 40),
+                            format!(
+                                "Large selection (soft warn at {} chars). May be slower / cost more on your API key.",
+                                self.config.limits.soft_warn_chars
+                            ),
+                        );
+                        if ui.button("Continue anyway").clicked() {
+                            ack_soft = true;
+                        }
+                    } else if replace_caution {
+                        ui.add_space(6.0);
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 150, 40),
+                            format!(
+                                "Replace caution ({}+ chars): paste-back can be flaky in some apps. Popup commands are safer.",
+                                self.config.limits.replace_warn_chars
+                            ),
+                        );
+                        if ui.button("I understand — allow Replace").clicked() {
+                            ack_replace = true;
+                        }
+                    }
+
                     ui.add_space(8.0);
                     ui.label("Choose a command:");
 
-                    for cmd in &self.config.commands {
+                    let commands = self.config.commands.clone();
+                    for cmd in commands {
                         let kind_tag = match cmd.kind {
                             CommandKind::Replace => "replace",
                             CommandKind::Popup => "popup",
                         };
-                        if ui
-                            .add_sized(
-                                [ui.available_width(), 28.0],
-                                egui::Button::new(format!("{}  ({kind_tag})", cmd.label)),
-                            )
-                            .clicked()
-                        {
-                            clicked = Some(cmd.clone());
+                        let replace_locked = matches!(cmd.kind, CommandKind::Replace)
+                            && replace_caution
+                            && !hard_blocked
+                            && !soft_blocked;
+                        let enabled = !hard_blocked && !soft_blocked && !replace_locked;
+                        let resp = ui.add_enabled(
+                            enabled,
+                            egui::Button::new(format!("{}  ({kind_tag})", cmd.label))
+                                .min_size(egui::vec2(ui.available_width(), 28.0)),
+                        );
+                        if resp.clicked() {
+                            clicked = Some(cmd);
                         }
                     }
+                }
+                UiPhase::Settings => {
+                    ui.label("Limits");
+                    ui.small("Defaults protect against huge accidental pastes. Set any value to 0 to disable that rail. Saved to your config — no TOML editing required.");
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Soft warn (chars)");
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.limits.soft_warn_chars)
+                                .speed(100)
+                                .range(0..=2_000_000),
+                        );
+                    });
+                    ui.small("Show a confirm step above this size.");
+
+                    ui.horizontal(|ui| {
+                        ui.label("Hard max (chars)");
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.limits.hard_max_chars)
+                                .speed(500)
+                                .range(0..=5_000_000),
+                        );
+                    });
+                    ui.small("Refuse to send above this size. 0 = unlimited.");
+
+                    ui.horizontal(|ui| {
+                        ui.label("Replace caution (chars)");
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.limits.replace_warn_chars)
+                                .speed(100)
+                                .range(0..=2_000_000),
+                        );
+                    });
+                    ui.small("Extra confirm before Replace on large selections.");
+
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            save_settings = true;
+                        }
+                        if ui.button("Reset defaults").clicked() {
+                            reset_limits = true;
+                        }
+                    });
+                    if !self.settings_status.is_empty() {
+                        ui.small(&self.settings_status);
+                    }
+                    ui.add_space(8.0);
+                    ui.small(format!("Config file: {}", self.config_path.display()));
                 }
                 UiPhase::Working { label } => {
                     ui.label(format!("Running {label}…"));
@@ -354,14 +540,39 @@ impl eframe::App for ServeApp {
                 UiPhase::Error { message } => {
                     ui.colored_label(egui::Color32::from_rgb(200, 80, 80), "Error");
                     ui.label(message);
-                    if ui.button("Dismiss").clicked() {
-                        dismiss = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Dismiss").clicked() {
+                            dismiss = true;
+                        }
+                        if ui.button("Settings").clicked() {
+                            open_settings = true;
+                        }
+                    });
                 }
                 UiPhase::Hidden => {}
             }
         });
 
+        if ack_soft {
+            self.soft_warn_acked = true;
+        }
+        if ack_replace {
+            self.replace_warn_acked = true;
+        }
+        if open_settings {
+            self.settings_status.clear();
+            self.phase = UiPhase::Settings;
+        }
+        if back_to_picker {
+            self.phase = UiPhase::Picker;
+        }
+        if reset_limits {
+            self.config.limits = LimitsConfig::default();
+            self.settings_status = "Defaults restored (not saved yet)".into();
+        }
+        if save_settings {
+            self.save_settings();
+        }
         if dismiss {
             self.hide(ctx);
         }
@@ -376,6 +587,12 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     println!("config: {}", config_path.display());
     println!("hotkey: {}", config.hotkey);
     println!(
+        "limits: soft_warn={} hard_max={} replace_warn={}",
+        config.limits.soft_warn_chars,
+        config.limits.hard_max_chars,
+        config.limits.replace_warn_chars
+    );
+    println!(
         "accessibility: {}",
         if accessibility_trusted() {
             "granted"
@@ -388,11 +605,12 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     }
 
     let selection = Arc::new(MacosSelection::new()?);
+    let config_path_for_app = config_path.clone();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([360.0, 480.0])
-            .with_min_inner_size([300.0, 360.0])
+            .with_inner_size([400.0, 520.0])
+            .with_min_inner_size([320.0, 400.0])
             .with_resizable(true)
             .with_always_on_top()
             .with_visible(false)
@@ -404,7 +622,12 @@ pub fn run(config_path: PathBuf) -> Result<()> {
         "Writing Tools",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(ServeApp::new(cc, config, selection)?) as Box<dyn eframe::App>)
+            Ok(Box::new(ServeApp::new(
+                cc,
+                config,
+                config_path_for_app,
+                selection,
+            )?) as Box<dyn eframe::App>)
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;
