@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::chatgpt_auth::ChatGptAuth;
 use crate::commands::{builtin_commands, WritingCommand};
 use crate::error::CoreError;
-use crate::providers::{
-    provider_from_config, ChatGptCodexProvider, LlmProvider, ProviderKind,
-};
+use crate::providers::{provider_from_config, ChatGptCodexProvider, LlmProvider, ProviderKind};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -205,7 +203,10 @@ fn dirs_path() -> PathBuf {
 }
 
 fn legacy_config_path() -> PathBuf {
-    home_dir().join(".config").join("writing-tools").join("config.toml")
+    home_dir()
+        .join(".config")
+        .join("writing-tools")
+        .join("config.toml")
 }
 
 /// If `path` is missing but a pre-rename Writing Tools config exists, copy it once.
@@ -258,13 +259,16 @@ model = "gpt-4o-mini"
         let back: AppConfig = toml::from_str(&raw).unwrap();
         assert_eq!(back.provider.auth, ProviderAuth::ChatGpt);
         // UI spelling without rename would fail; alias also accepts chat_gpt
-        let alt: AppConfig = toml::from_str(r#"
+        let alt: AppConfig = toml::from_str(
+            r#"
 [provider]
 kind = "open_ai_compatible"
 base_url = "https://api.openai.com/v1"
 model = "gpt-5.4-mini"
 auth = "chatgpt"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert_eq!(alt.provider.auth, ProviderAuth::ChatGpt);
     }
 
@@ -274,10 +278,7 @@ auth = "chatgpt"
         static LOCK: Mutex<()> = Mutex::new(());
         let _guard = LOCK.lock().unwrap();
 
-        let tmp = std::env::temp_dir().join(format!(
-            "selara-migrate-test-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("selara-migrate-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let home = tmp.join("home");
         let legacy_dir = home.join(".config").join("writing-tools");
@@ -297,7 +298,11 @@ auth = "chatgpt"
         let dest = AppConfig::default_path();
         assert!(!dest.exists());
         let loaded = AppConfig::load_or_init(&dest).unwrap();
-        assert!(dest.exists(), "expected migrated config at {}", dest.display());
+        assert!(
+            dest.exists(),
+            "expected migrated config at {}",
+            dest.display()
+        );
         assert_eq!(loaded.hotkey, "option+space");
 
         match prev_home {

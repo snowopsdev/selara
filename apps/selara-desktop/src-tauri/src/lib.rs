@@ -1,11 +1,11 @@
+use selara_core::codex_cli::{self, CodexLoginStatus};
+use selara_core::config::AppConfig;
+use selara_core::providers::list_chatgpt_models;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, Runtime, WindowEvent,
 };
-use selara_core::codex_cli::{self, CodexLoginStatus};
-use selara_core::config::AppConfig;
-use selara_core::providers::list_chatgpt_models;
 
 #[tauri::command]
 fn get_config() -> Result<AppConfig, String> {

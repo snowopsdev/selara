@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # apps/selara-desktop (Tauri) and macOS-only shell paths (Accessibility,
+      # global hotkey, egui `serve`) need local macOS testing. Linux CI covers
+      # the portable workspace crates/CLI; desktop is excluded here.
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # Without -D warnings: current tree has known clippy / objc cfg noise on
+      # macOS FFI paths and a few existing lints. Tighten later once cleaned up.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --exclude selara-desktop
+
+      - name: cargo test
+        run: cargo test --workspace --exclude selara-desktop
