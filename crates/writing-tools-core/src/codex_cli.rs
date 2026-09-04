@@ -5,6 +5,7 @@ use std::process::Command;
 
 use serde::Serialize;
 
+use crate::chatgpt_auth::ChatGptAuth;
 use crate::error::CoreError;
 
 #[derive(Debug, Clone, Serialize)]
@@ -14,10 +15,17 @@ pub struct CodexLoginStatus {
     pub message: String,
     /// True when status text indicates ChatGPT (vs API key) login.
     pub via_chatgpt: bool,
+    /// Account email from Codex JWT claims, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 fn codex_bin() -> String {
     std::env::var("CODEX_BIN").unwrap_or_else(|_| "codex".into())
+}
+
+fn account_email_from_auth_store() -> Option<String> {
+    ChatGptAuth::load().ok().and_then(|a| a.account_email())
 }
 
 /// `codex login status` — exit 0 when logged in.
@@ -39,10 +47,16 @@ pub fn login_status() -> Result<CodexLoginStatus, CoreError> {
     };
     let logged_in = output.status.success();
     let via_chatgpt = message.to_lowercase().contains("chatgpt");
+    let email = if logged_in {
+        account_email_from_auth_store()
+    } else {
+        None
+    };
     Ok(CodexLoginStatus {
         logged_in,
         message,
         via_chatgpt,
+        email,
     })
 }
 
@@ -96,9 +110,11 @@ mod tests {
             logged_in: true,
             message: "Logged in using ChatGPT".into(),
             via_chatgpt: true,
+            email: Some("user@example.com".into()),
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["logged_in"], true);
         assert_eq!(v["via_chatgpt"], true);
+        assert_eq!(v["email"], "user@example.com");
     }
 }

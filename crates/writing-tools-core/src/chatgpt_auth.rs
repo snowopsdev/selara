@@ -98,6 +98,10 @@ impl ChatGptAuth {
         self.account_id.as_deref().filter(|s| !s.trim().is_empty())
     }
 
+    pub fn account_email(&self) -> Option<String> {
+        jwt_email(self.id_token.as_deref(), &self.access_token)
+    }
+
     /// Refresh tokens via OpenAI OAuth and write back to auth.json (mode 0600).
     pub async fn refresh(&mut self) -> Result<(), CoreError> {
         let client = reqwest::Client::new();
@@ -199,13 +203,54 @@ pub fn access_token_needs_refresh(access_token: &str) -> bool {
     now + REFRESH_SKEW.as_secs() >= exp
 }
 
-fn jwt_exp(token: &str) -> Option<u64> {
+
+/// Best-effort email from id_token / access_token JWT claims (no verify).
+pub fn jwt_email(id_token: Option<&str>, access_token: &str) -> Option<String> {
+    for tok in id_token.into_iter().chain(std::iter::once(access_token)) {
+        if tok.trim().is_empty() {
+            continue;
+        }
+        let Some(value) = jwt_payload(tok) else {
+            continue;
+        };
+        if let Some(email) = value.get("email").and_then(|v| v.as_str()) {
+            let email = email.trim();
+            if !email.is_empty() {
+                return Some(email.to_string());
+            }
+        }
+        if let Some(email) = value
+            .pointer("/https:~1~1api.openai.com~1profile/email")
+            .and_then(|v| v.as_str())
+        {
+            let email = email.trim();
+            if !email.is_empty() {
+                return Some(email.to_string());
+            }
+        }
+        // Serde_json pointer uses ~1 for / — also try nested object by key.
+        if let Some(profile) = value.get("https://api.openai.com/profile") {
+            if let Some(email) = profile.get("email").and_then(|v| v.as_str()) {
+                let email = email.trim();
+                if !email.is_empty() {
+                    return Some(email.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn jwt_payload(token: &str) -> Option<serde_json::Value> {
     let mut parts = token.split('.');
     let _header = parts.next()?;
     let payload_b64 = parts.next()?;
     let json_bytes = b64url_decode(payload_b64)?;
-    let value: serde_json::Value = serde_json::from_slice(&json_bytes).ok()?;
-    value.get("exp")?.as_u64()
+    serde_json::from_slice(&json_bytes).ok()
+}
+
+fn jwt_exp(token: &str) -> Option<u64> {
+    jwt_payload(token)?.get("exp")?.as_u64()
 }
 
 fn b64url_decode(input: &str) -> Option<Vec<u8>> {
@@ -287,6 +332,15 @@ mod tests {
         let past = 1_700_000_000u64;
         let expired = fake_jwt(past);
         assert!(access_token_needs_refresh(&expired));
+    }
+
+
+    #[test]
+    fn jwt_email_from_id_token() {
+        // {"email":"user@example.com","exp":4000000000}
+        let payload = b64url_encode(br#"{"email":"user@example.com","exp":4000000000}"#);
+        let token = format!("eyJhbGciOiJub25lIn0.{payload}.sig");
+        assert_eq!(jwt_email(Some(&token), "x.y.z").as_deref(), Some("user@example.com"));
     }
 
     #[test]

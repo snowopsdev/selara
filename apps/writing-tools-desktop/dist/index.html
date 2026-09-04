@@ -101,6 +101,23 @@ button.btn.danger { background: var(--danger); }
 .status-dot.bad { background: var(--danger); box-shadow: 0 0 0 3px rgba(215,0,21,0.2); }
 .status-dot.unknown { background: #ff9f0a; box-shadow: 0 0 0 3px rgba(255,159,10,0.2); }
 #model-chatgpt-wrap, #model-byok-wrap { margin-bottom: 0; }
+
+.email-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 6px 0 0; font-size: 13px; color: var(--muted);
+}
+.email-row .email-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+button.icon-btn {
+  border: 1px solid var(--border); background: transparent; color: var(--muted);
+  border-radius: 6px; width: 28px; height: 28px; padding: 0;
+  cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; line-height: 1;
+}
+button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
   </style>
 </head>
 <body>
@@ -214,6 +231,41 @@ button.btn.danger { background: var(--danger); }
     return (st.logged_in ? "Signed in: " : "Not signed in: ") + st.message;
   }
 
+  const EMAIL_VISIBLE_KEY = "wt.chatgpt.emailVisible";
+  function isEmailVisible() {
+    try { return localStorage.getItem(EMAIL_VISIBLE_KEY) === "1"; } catch (_) { return false; }
+  }
+  function setEmailVisible(v) {
+    try { localStorage.setItem(EMAIL_VISIBLE_KEY, v ? "1" : "0"); } catch (_) {}
+  }
+  function maskEmail(email) {
+    if (!email) return "";
+    const at = email.indexOf("@");
+    if (at <= 0) return "••••••••";
+    const local = email.slice(0, at);
+    const domain = email.slice(at + 1);
+    const localMask = local[0] + "•".repeat(Math.max(2, Math.min(local.length - 1, 8)));
+    const dot = domain.lastIndexOf(".");
+    const domMask = dot > 0
+      ? ("•".repeat(Math.max(2, Math.min(dot, 6))) + domain.slice(dot))
+      : "••••";
+    return localMask + "@" + domMask;
+  }
+  function emailRowHtml(st) {
+    if (!st || !st.logged_in || !st.email) return "";
+    const show = isEmailVisible();
+    const shown = show ? st.email : maskEmail(st.email);
+    const label = show ? "Hide email" : "Show email";
+    const icon = show ? "🙈" : "👁";
+    return (
+      "<div class=\"email-row\" id=\"chatgpt-email-row\">" +
+      "<span>Account</span>" +
+      "<span class=\"email-value\" id=\"chatgpt-email-value\">" + escapeHtml(shown) + "</span>" +
+      "<button type=\"button\" class=\"icon-btn\" id=\"chatgpt-email-toggle\" title=\"" + label + "\" aria-label=\"" + label + "\" aria-pressed=\"" + (show ? "true" : "false") + "\">" + icon + "</button>" +
+      "</div>"
+    );
+  }
+
   async function loadChatgptModelsIntoSelect(preferred) {
     const sel = $("#model-select");
     const hint = $("#chatgpt-models-hint");
@@ -300,6 +352,7 @@ button.btn.danger { background: var(--danger); }
       "<div class=\"status-row\" id=\"chatgpt-status-line\">" +
       "<span class=\"status-dot " + dot + "\" aria-hidden=\"true\"></span>" +
       "<span>" + escapeHtml(statusLine) + "</span></div>" +
+      emailRowHtml(st) +
       "<div class=\"actions\" style=\"margin-top:10px\">" +
       "<button class=\"btn\" id=\"chatgpt-login\">Sign in with ChatGPT</button>" +
       "<button class=\"btn secondary\" id=\"chatgpt-logout\">Sign out</button>" +
@@ -328,6 +381,20 @@ button.btn.danger { background: var(--danger); }
     $("#provider-auth").onchange = () => {
       syncAuthUi();
     };
+    const emailToggle = $("#chatgpt-email-toggle");
+    if (emailToggle) {
+      emailToggle.onclick = () => {
+        setEmailVisible(!isEmailVisible());
+        const show = isEmailVisible();
+        const val = $("#chatgpt-email-value");
+        if (val && st.email) val.textContent = show ? st.email : maskEmail(st.email);
+        emailToggle.title = show ? "Hide email" : "Show email";
+        emailToggle.setAttribute("aria-label", emailToggle.title);
+        emailToggle.setAttribute("aria-pressed", show ? "true" : "false");
+        emailToggle.textContent = show ? "🙈" : "👁";
+      };
+    }
+
     $("#save-models").onclick = async () => {
       const model = currentModelValue();
       if (!model) {
