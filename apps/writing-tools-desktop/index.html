@@ -212,9 +212,9 @@ button.btn.danger { background: var(--danger); }
       "<option value=\"api_key\">API key (BYOK)</option>" +
       "<option value=\"chatgpt\">ChatGPT via Codex CLI (Experimental)</option>" +
       "</select>" +
-      "<p class=\"hint\">ChatGPT mode only applies when Provider is OpenAI-compatible. Tokens stay in ~/.codex/auth.json — never in config.toml.</p>" +
+      "<p class=\"hint\">ChatGPT mode only applies when Provider is OpenAI-compatible. Use Codex model slugs (e.g. gpt-5.6-luna), not Platform names (gpt-4o). Tokens stay in ~/.codex/auth.json — never in config.toml. Base URL is ignored in ChatGPT mode.</p>" +
       "<div class=\"row\"><div><label for=\"model\">Model</label>" +
-      "<input id=\"model\" value=\"" + escapeAttr(p.model || "") + "\" placeholder=\"gpt-5.4-mini\" /></div>" +
+      "<input id=\"model\" value=\"" + escapeAttr(p.model || "") + "\" placeholder=\"gpt-5.6-luna\" /></div>" +
       "<div><label for=\"base_url\">Base URL</label>" +
       "<input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" /></div></div>" +
       "<div id=\"byok-fields\">" +
@@ -242,6 +242,11 @@ button.btn.danger { background: var(--danger); }
       const a = $("#provider-auth").value;
       $("#byok-fields").style.display = a === "api_key" ? "block" : "none";
       $("#chatgpt-fields").style.display = a === "chatgpt" ? "block" : "none";
+      const base = $("#base_url");
+      if (base) {
+        base.disabled = a === "chatgpt";
+        base.title = a === "chatgpt" ? "Ignored in ChatGPT / Codex mode" : "";
+      }
     }
     syncAuthUi();
     $("#provider-auth").onchange = syncAuthUi;
@@ -286,8 +291,17 @@ button.btn.danger { background: var(--danger); }
         setStatus("Listing Codex models…");
         try {
           const models = await invoke("list_chatgpt_models_cmd");
-          $("#chatgpt-models-hint").textContent = "Models: " + models.join(", ");
-          setStatus("Models loaded");
+          const hint = $("#chatgpt-models-hint");
+          hint.innerHTML = "Click a slug to use it: " + models.map((m) => {
+            return "<button type=\"button\" class=\"btn secondary\" data-model=\"" + escapeAttr(m) + "\" style=\"margin:4px 4px 0 0;padding:4px 8px;font-size:12px\">" + escapeHtml(m) + "</button>";
+          }).join("");
+          hint.querySelectorAll("[data-model]").forEach((btn) => {
+            btn.onclick = () => {
+              $("#model").value = btn.getAttribute("data-model");
+              setStatus("Model set to " + btn.getAttribute("data-model") + " — click Save Models");
+            };
+          });
+          setStatus("Models loaded — click one, then Save");
         } catch (e) {
           $("#chatgpt-models-hint").textContent = String(e);
           setStatus(String(e));
