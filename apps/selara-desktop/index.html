@@ -69,19 +69,32 @@ button.btn {
   font-size: 13px; cursor: pointer; background: var(--accent); color: white;
 }
 button.btn.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
-button.btn.danger { background: var(--danger); }
+button.btn.danger {
+  background: transparent; color: var(--danger); border: 1px solid rgba(215,0,21,0.45);
+}
+button.btn.danger:hover { background: rgba(215,0,21,0.12); }
 .hint { font-size: 12px; color: var(--muted); margin: -6px 0 12px; }
-.cmd-list { display: flex; flex-direction: column; gap: 8px; }
+.cmd-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
 .cmd-item {
-  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start;
-  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--panel);
+  display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
+  border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--panel);
 }
-.cmd-item h3 { margin: 0; font-size: 14px; }
+.cmd-item h3 { margin: 0; font-size: 14px; font-weight: 600; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .cmd-item p { margin: 4px 0 0; font-size: 12px; color: var(--muted); white-space: pre-wrap; }
+.cmd-item .actions { gap: 6px; margin: 0; }
+.cmd-item .actions .btn { padding: 6px 10px; font-size: 12px; }
 .badge {
-  display: inline-block; font-size: 11px; padding: 2px 6px; border-radius: 999px;
-  border: 1px solid var(--border); margin-left: 6px; color: var(--muted);
+  display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted); font-weight: 500;
 }
+.limits-actions, .models-save, .general-save {
+  display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap;
+}
+.limits-actions .btn.linkish, button.btn.linkish {
+  background: transparent; border: 0; color: var(--muted); padding: 8px 4px;
+}
+button.btn.linkish:hover { color: var(--text); }
+.cmd-editor-title { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
 .soon {
   border: 1px dashed var(--border); border-radius: 8px; padding: 12px;
   color: var(--muted); font-size: 13px;
@@ -199,7 +212,7 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
   function slug(s) {
     return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "command";
   }
-  function kindLabel(k) { return k === "popup" ? "popup" : "replace"; }
+  function kindLabel(k) { return k === "popup" ? "Popup" : "Replace"; }
 
   function getInvoke() {
     const g = window.__TAURI__;
@@ -234,15 +247,23 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
     s.innerHTML =
       "<h1>General</h1>" +
       "<p class=\"lead\">Language and the global shortcut for the writing picker.</p>" +
-      "<div class=\"card\">" +
+      "<div class=\"panel\">" +
+      "<div class=\"section-label\">Language</div>" +
+      "<div class=\"form-row\">" +
       "<label for=\"language\">Default language</label>" +
+      "<div class=\"control-stack\">" +
       "<input id=\"language\" value=\"" + escapeAttr(config.language || "en") + "\" placeholder=\"en\" />" +
-      "<p class=\"hint\">Preferred language for the model (e.g. en, es, fr).</p>" +
+      "<p class=\"field-hint\">Preferred language for the model (e.g. en, es, fr).</p>" +
+      "</div></div>" +
+      "<div class=\"section-label\">Shortcut</div>" +
+      "<div class=\"form-row\">" +
       "<label for=\"hotkey\">Picker hotkey</label>" +
+      "<div class=\"control-stack\">" +
       "<input id=\"hotkey\" value=\"" + escapeAttr(config.hotkey || "ctrl+shift+space") + "\" />" +
-      "<p class=\"hint\">With selara serve running, changes apply within about a second.</p>" +
-      "<div class=\"actions\"><button class=\"btn\" id=\"save-general\">Save General</button></div>" +
-      "</div>";
+      "<p class=\"field-hint\">With selara serve running, changes apply within about a second.</p>" +
+      "</div></div>" +
+      "</div>" +
+      "<div class=\"general-save\"><button class=\"btn\" id=\"save-general\">Save General</button></div>";
     $("#save-general").onclick = async () => {
       config.language = $("#language").value.trim() || "en";
       config.hotkey = $("#hotkey").value.trim() || "ctrl+shift+space";
@@ -563,10 +584,12 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
   function renderCommands() {
     const s = $("#section-commands");
     const list = (config.commands || []).map((c) => {
-      const hk = c.hotkey ? " <span class=\"badge\">" + escapeHtml(c.hotkey) + "</span>" : "";
+      const badges =
+        "<span class=\"badge\">" + escapeHtml(kindLabel(c.kind)) + "</span>" +
+        (c.hotkey ? " <span class=\"badge\">" + escapeHtml(c.hotkey) + "</span>" : "");
       return (
         "<div class=\"cmd-item\" data-id=\"" + escapeAttr(c.id) + "\">" +
-        "<div><h3>" + escapeHtml(c.label) + " <span class=\"badge\">" + kindLabel(c.kind) + "</span>" + hk + "</h3>" +
+        "<div><h3>" + escapeHtml(c.label) + " " + badges + "</h3>" +
         "<p>" + escapeHtml(c.prompt) + "</p></div>" +
         "<div class=\"actions\">" +
         "<button class=\"btn secondary\" data-act=\"edit\">Edit</button>" +
@@ -576,20 +599,39 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
       );
     }).join("");
     const editing = editingId ? (config.commands || []).find((c) => c.id === editingId) : null;
+    const editorTitle = editing ? "Edit command" : "New command";
+    const sectionEditor = editing ? "Edit" : "New command";
     s.innerHTML =
       "<h1>Commands</h1>" +
       "<p class=\"lead\">Each command is a prompt. Duplicate to make variations.</p>" +
-      "<div class=\"card\">" +
-      "<h3 style=\"margin-top:0\">" + (editing ? "Edit command" : "New command") + "</h3>" +
-      "<div class=\"row\"><div><label>Label</label><input id=\"cmd-label\" value=\"" + escapeAttr(editing && editing.label || "") + "\" /></div>" +
-      "<div><label>Kind</label><select id=\"cmd-kind\"><option value=\"replace\">Replace selection</option><option value=\"popup\">Popup result</option></select></div></div>" +
-      "<label>Prompt</label><textarea id=\"cmd-prompt\">" + escapeHtml(editing && editing.prompt || "") + "</textarea>" +
-      "<label>Command hotkey (optional)</label>" +
+      "<div class=\"panel\">" +
+      "<div class=\"section-label\">" + sectionEditor + "</div>" +
+      "<p class=\"cmd-editor-title\">" + escapeHtml(editorTitle) + "</p>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"cmd-label\">Label</label>" +
+      "<input id=\"cmd-label\" value=\"" + escapeAttr(editing && editing.label || "") + "\" />" +
+      "</div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"cmd-kind\">Kind</label>" +
+      "<select id=\"cmd-kind\"><option value=\"replace\">Replace selection</option><option value=\"popup\">Popup result</option></select>" +
+      "</div>" +
+      "<div class=\"form-row\" style=\"align-items:start\">" +
+      "<label for=\"cmd-prompt\">Prompt</label>" +
+      "<textarea id=\"cmd-prompt\" style=\"min-height:110px;margin:0;width:100%\">" + escapeHtml(editing && editing.prompt || "") + "</textarea>" +
+      "</div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"cmd-hotkey\">Command hotkey</label>" +
+      "<div class=\"control-stack\">" +
       "<input id=\"cmd-hotkey\" value=\"" + escapeAttr((editing && editing.hotkey) || "") + "\" placeholder=\"e.g. ctrl+shift+p\" />" +
-      "<p class=\"hint\">Runs this command on the current selection (skips picker).</p>" +
-      "<div class=\"actions\"><button class=\"btn\" id=\"cmd-save\">" + (editing ? "Update" : "Add command") + "</button>" +
+      "<p class=\"field-hint\">Runs this command on the current selection (skips picker).</p>" +
+      "</div></div>" +
+      "<div class=\"actions\" style=\"margin-top:8px\">" +
+      "<button class=\"btn\" id=\"cmd-save\">" + (editing ? "Update" : "Add command") + "</button>" +
       (editing ? "<button class=\"btn secondary\" id=\"cmd-cancel\">Cancel</button>" : "") +
-      "</div></div><div class=\"cmd-list\">" + (list || "<p class=\"hint\">No commands yet.</p>") + "</div>";
+      "</div>" +
+      "</div>" +
+      "<div class=\"section-label\">Commands list</div>" +
+      "<div class=\"cmd-list\">" + (list || "<p class=\"field-hint\">No commands yet.</p>") + "</div>";
     if (editing) $("#cmd-kind").value = editing.kind;
     $("#cmd-save").onclick = async () => {
       const label = $("#cmd-label").value.trim();
@@ -641,13 +683,31 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
     s.innerHTML =
       "<h1>Limits</h1>" +
       "<p class=\"lead\">Gentle rails. Set any value to 0 for unlimited.</p>" +
-      "<div class=\"card\">" +
-      "<label>Soft warn (chars)</label><input id=\"soft_warn\" type=\"number\" min=\"0\" value=\"" + (L.soft_warn_chars ?? 8000) + "\" />" +
-      "<label>Hard max (chars)</label><input id=\"hard_max\" type=\"number\" min=\"0\" value=\"" + (L.hard_max_chars ?? 100000) + "\" />" +
-      "<label>Replace caution (chars)</label><input id=\"replace_warn\" type=\"number\" min=\"0\" value=\"" + (L.replace_warn_chars ?? 4000) + "\" />" +
-      "<div class=\"actions\">" +
+      "<div class=\"panel\">" +
+      "<div class=\"section-label\">Thresholds</div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"soft_warn\">Soft warn (chars)</label>" +
+      "<div class=\"control-stack\">" +
+      "<input id=\"soft_warn\" type=\"number\" min=\"0\" value=\"" + (L.soft_warn_chars ?? 8000) + "\" />" +
+      "<p class=\"field-hint\">Warn before sending large selections</p>" +
+      "</div></div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"hard_max\">Hard max (chars)</label>" +
+      "<div class=\"control-stack\">" +
+      "<input id=\"hard_max\" type=\"number\" min=\"0\" value=\"" + (L.hard_max_chars ?? 100000) + "\" />" +
+      "<p class=\"field-hint\">Block past this size</p>" +
+      "</div></div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"replace_warn\">Replace caution (chars)</label>" +
+      "<div class=\"control-stack\">" +
+      "<input id=\"replace_warn\" type=\"number\" min=\"0\" value=\"" + (L.replace_warn_chars ?? 4000) + "\" />" +
+      "<p class=\"field-hint\">Extra confirm when replacing a large selection</p>" +
+      "</div></div>" +
+      "</div>" +
+      "<div class=\"limits-actions\">" +
       "<button class=\"btn\" id=\"save-limits\">Save Limits</button>" +
-      "<button class=\"btn secondary\" id=\"reset-limits\">Reset defaults</button></div></div>";
+      "<button class=\"btn linkish\" id=\"reset-limits\">Reset defaults</button>" +
+      "</div>";
     $("#save-limits").onclick = async () => {
       config.limits = {
         soft_warn_chars: num($("#soft_warn").value),
