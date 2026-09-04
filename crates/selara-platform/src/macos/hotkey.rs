@@ -150,7 +150,11 @@ impl MacosHotkey {
 
     /// Call early so a hidden egui window still wakes on hotkey.
     pub fn set_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
-        *self.shared.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(wake));
+        *self
+            .shared
+            .wake
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(wake));
     }
 
     /// Take a pending action (picker or command id), if any.
@@ -164,7 +168,11 @@ impl MacosHotkey {
 
     /// Unregister everything and register picker + command hotkeys.
     /// `command_hotkeys` is `(command_id, hotkey_spec)`.
-    pub fn reregister_all(&self, picker: &str, command_hotkeys: &[(String, String)]) -> Result<()> {
+    pub fn reregister_all(
+        &self,
+        picker: &str,
+        command_hotkeys: &[(String, String)],
+    ) -> Result<()> {
         let manager =
             GlobalHotKeyManager::new().context("create GlobalHotKeyManager (main thread)")?;
 
@@ -193,7 +201,11 @@ impl MacosHotkey {
             map.insert(hk.id(), HotkeyAction::Command(cmd_id.clone()));
         }
 
-        *self.shared.by_id.lock().unwrap_or_else(|e| e.into_inner()) = map;
+        *self
+            .shared
+            .by_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = map;
         *self.manager.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
         Ok(())
     }

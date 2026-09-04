@@ -76,18 +76,13 @@ fn read_ax_selected_text(element: &AXUIElement) -> Result<String> {
 
 fn set_ax_selected_text(element: &AXUIElement, text: &str) -> Result<()> {
     element
-        .set_attribute(
-            &attr_typed::<CFString>("AXSelectedText"),
-            CFString::new(text),
-        )
+        .set_attribute(&attr_typed::<CFString>("AXSelectedText"), CFString::new(text))
         .map_err(|e| anyhow!("set AXSelectedText: {e}"))
 }
 
 fn read_ax_selected_range(element: &AXUIElement) -> Option<(i64, i64)> {
     let value: core_foundation::base::CFType = element
-        .attribute(&attr_typed::<core_foundation::base::CFType>(
-            "AXSelectedTextRange",
-        ))
+        .attribute(&attr_typed::<core_foundation::base::CFType>("AXSelectedTextRange"))
         .ok()?;
     let ax_ref = value.as_CFTypeRef() as accessibility_sys::AXValueRef;
     if ax_ref.is_null() {
@@ -151,11 +146,7 @@ fn frontmost_app_name() -> Option<String> {
         if utf8.is_null() {
             return None;
         }
-        Some(
-            std::ffi::CStr::from_ptr(utf8)
-                .to_string_lossy()
-                .into_owned(),
-        )
+        Some(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned())
     }
 }
 

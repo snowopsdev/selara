@@ -2,6 +2,12 @@
 
 Thanks for your interest in contributing. This document covers how to build, test, and open pull requests.
 
+## Start here
+
+1. **Clone** — `git clone https://github.com/snowopsdev/selara.git && cd selara`
+2. **Test** — `cargo test --workspace` (on macOS also: `cargo run -p selara-desktop` for Settings)
+3. **PR** — branch from `main`, open a PR with the template, wait for CI
+
 ## Prerequisites
 
 - Rust stable (edition 2021 workspace)
@@ -17,6 +23,14 @@ cargo fmt
 cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
+
+macOS Settings tray (one-liner):
+
+```bash
+cargo run -p selara-desktop
+```
+
+(`serve` / hotkeys still need a separate `cargo run -p selara -- serve`.)
 
 CI on GitHub Actions runs fmt/clippy/test on Linux (`ubuntu-latest`), excluding the Tauri `selara-desktop` package. Clippy is currently **not** run with `-D warnings` because of known noise (including `objc`-related `cfg` warnings on macOS code paths and a few existing lints). Prefer leaving the tree warning-clean when you can.
 
@@ -39,7 +53,7 @@ If you change hotkeys, selection replace, Accessibility behavior, or the Setting
 2. Make focused commits; keep secrets out of the diff
 3. Open a PR against `main` (use the PR template)
 4. Wait for CI to go green
-5. Request a **Codex review** (human or bot workflow as used by maintainers)
+5. **Codex review** — maintainers request this on PRs (GitHub Codex connector). External contributors do **not** need to run Codex themselves; it is not a blocker on your side.
 6. Address feedback, then merge when approved
 
 ## No secrets

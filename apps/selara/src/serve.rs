@@ -113,16 +113,12 @@ impl ServeApp {
         }
     }
 
+
     fn status_for(config: &AppConfig) -> String {
         let cmd_hk = config
             .commands
             .iter()
-            .filter(|c| {
-                c.hotkey
-                    .as_ref()
-                    .map(|h| !h.trim().is_empty())
-                    .unwrap_or(false)
-            })
+            .filter(|c| c.hotkey.as_ref().map(|h| !h.trim().is_empty()).unwrap_or(false))
             .count();
         let shortcut_hint = config
             .commands
@@ -774,10 +770,12 @@ pub fn run(config_path: PathBuf) -> Result<()> {
         "Selara",
         options,
         Box::new(move |cc| {
-            Ok(
-                Box::new(ServeApp::new(cc, config, config_path_for_app, selection)?)
-                    as Box<dyn eframe::App>,
-            )
+            Ok(Box::new(ServeApp::new(
+                cc,
+                config,
+                config_path_for_app,
+                selection,
+            )?) as Box<dyn eframe::App>)
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;

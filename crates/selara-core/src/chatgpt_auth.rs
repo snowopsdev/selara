@@ -76,8 +76,9 @@ impl ChatGptAuth {
             )));
         }
         let raw = fs::read_to_string(path)?;
-        let file: ChatGptAuthFile = serde_json::from_str(&raw)
-            .map_err(|e| CoreError::Config(format!("invalid {}: {e}", path.display())))?;
+        let file: ChatGptAuthFile = serde_json::from_str(&raw).map_err(|e| {
+            CoreError::Config(format!("invalid {}: {e}", path.display()))
+        })?;
         if file.tokens.access_token.trim().is_empty() {
             return Err(CoreError::Config(
                 "ChatGPT auth.json has empty access_token".into(),
@@ -157,8 +158,8 @@ impl ChatGptAuth {
             },
             last_refresh: self.last_refresh.clone(),
         };
-        let raw =
-            serde_json::to_string_pretty(&file).map_err(|e| CoreError::Config(e.to_string()))?;
+        let raw = serde_json::to_string_pretty(&file)
+            .map_err(|e| CoreError::Config(e.to_string()))?;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -201,6 +202,7 @@ pub fn access_token_needs_refresh(access_token: &str) -> bool {
         .unwrap_or(0);
     now + REFRESH_SKEW.as_secs() >= exp
 }
+
 
 /// Best-effort email from id_token / access_token JWT claims (no verify).
 pub fn jwt_email(id_token: Option<&str>, access_token: &str) -> Option<String> {
@@ -261,7 +263,8 @@ fn b64url_decode(input: &str) -> Option<Vec<u8>> {
 
 fn base64_decode(input: &str) -> Option<Vec<u8>> {
     // Minimal base64 decoder for JWT payloads (no extra crate).
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = Vec::new();
     let mut buf: u32 = 0;
     let mut bits: i32 = 0;
@@ -294,7 +297,8 @@ mod tests {
     }
 
     fn b64url_encode(data: &[u8]) -> String {
-        const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const TABLE: &[u8] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::new();
         for chunk in data.chunks(3) {
             let mut n = 0u32;
@@ -330,15 +334,13 @@ mod tests {
         assert!(access_token_needs_refresh(&expired));
     }
 
+
     #[test]
     fn jwt_email_from_id_token() {
         // {"email":"user@example.com","exp":4000000000}
         let payload = b64url_encode(br#"{"email":"user@example.com","exp":4000000000}"#);
         let token = format!("eyJhbGciOiJub25lIn0.{payload}.sig");
-        assert_eq!(
-            jwt_email(Some(&token), "x.y.z").as_deref(),
-            Some("user@example.com")
-        );
+        assert_eq!(jwt_email(Some(&token), "x.y.z").as_deref(), Some("user@example.com"));
     }
 
     #[test]

@@ -120,18 +120,12 @@ Supported tokens: `ctrl`/`control`, `shift`, `alt`/`option`, `cmd`/`command`/`su
 Menu-bar app for Settings — no text selection required. The egui `serve` overlay still owns the hotkey picker for now.
 
 ```bash
-cd apps/selara-desktop
-# install JS deps with your package manager, then:
-npx vite --port 1420 --strictPort
-# other terminal:
 cargo run -p selara-desktop
 ```
 
 Tray: Open Settings (or left-click the icon). Close hides Settings; Quit exits.
 
-Sections: General (language + hotkey), Models (API keys), Commands (CRUD + duplicate), Limits.
-
-Config path: `~/.config/selara/config.toml`.
+Sections: General, Models (BYOK or ChatGPT via Codex), Commands, Limits. Config: `~/.config/selara/config.toml`.
 
 ## Status
 
@@ -144,9 +138,12 @@ Config path: `~/.config/selara/config.toml`.
 
 ## Contributing / security / license
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) — build, test, PR flow (CI + Codex review)
-- [SECURITY.md](SECURITY.md) — report vulnerabilities via GitHub Security Advisories
+- [CONTRIBUTING.md](CONTRIBUTING.md) — start here: clone → test → PR
+- [SECURITY.md](SECURITY.md) — how we handle security
+- [Report a vulnerability](https://github.com/snowopsdev/selara/security/advisories/new) — private GitHub Security Advisory (preferred)
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
 - [LICENSE](LICENSE) — MIT
 
 CI runs on Linux. macOS Accessibility, global hotkeys, `serve`, and Tauri UI still need local macOS testing when those areas change.
+
+Quick Settings UI on macOS: `cargo run -p selara-desktop`.

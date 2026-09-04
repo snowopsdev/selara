@@ -39,7 +39,10 @@ pub struct OpenAiCompatibleProvider {
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
         let client = reqwest::Client::new();
         let body = json!({
             "model": self.model,
@@ -59,7 +62,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let status = resp.status();
         let value: serde_json::Value = resp.json().await?;
         if !status.is_success() {
-            return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+            return Err(CoreError::Provider(format!(
+                "HTTP {status}: {value}"
+            )));
         }
 
         value
@@ -92,7 +97,9 @@ impl LlmProvider for GeminiProvider {
         let status = resp.status();
         let value: serde_json::Value = resp.json().await?;
         if !status.is_success() {
-            return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+            return Err(CoreError::Provider(format!(
+                "HTTP {status}: {value}"
+            )));
         }
         value
             .pointer("/candidates/0/content/parts/0/text")
@@ -148,9 +155,7 @@ impl LlmProvider for AnthropicProvider {
                 }
             }
         }
-        Err(CoreError::Provider(format!(
-            "unexpected Anthropic response: {value}"
-        )))
+        Err(CoreError::Provider(format!("unexpected Anthropic response: {value}")))
     }
 }
 
@@ -311,7 +316,11 @@ pub async fn list_chatgpt_models() -> Result<Vec<String>, CoreError> {
     if let Some(arr) = items {
         for item in arr {
             // Skip Codex-internal hidden entries (e.g. gpt-reserve).
-            if item.get("visibility").and_then(|v| v.as_str()) == Some("hide") {
+            if item
+                .get("visibility")
+                .and_then(|v| v.as_str())
+                == Some("hide")
+            {
                 continue;
             }
             if let Some(id) = item
@@ -365,7 +374,10 @@ mod tests {
     fn sse_parser_extracts_output_text_delta() {
         let block = "event: response.output_text.delta\n\
 data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n";
-        assert_eq!(parse_sse_output_text_delta(block).as_deref(), Some("Hello"));
+        assert_eq!(
+            parse_sse_output_text_delta(block).as_deref(),
+            Some("Hello")
+        );
     }
 
     #[test]
@@ -378,7 +390,10 @@ data: {\"type\":\"response.created\",\"id\":\"r1\"}\n";
     #[test]
     fn sse_parser_type_field_without_event_line() {
         let block = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n";
-        assert_eq!(parse_sse_output_text_delta(block).as_deref(), Some("world"));
+        assert_eq!(
+            parse_sse_output_text_delta(block).as_deref(),
+            Some("world")
+        );
     }
 
     #[test]
