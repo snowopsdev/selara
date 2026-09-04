@@ -146,4 +146,4 @@ Sections: General, Models (BYOK or ChatGPT via Codex), Commands, Limits. Config:
 
 CI runs on Linux. macOS Accessibility, global hotkeys, `serve`, and Tauri UI still need local macOS testing when those areas change.
 
-Quick Settings UI on macOS: `cargo run -p selara-desktop`.
+Open Settings UI on macOS: `cargo run -p selara-desktop`.
