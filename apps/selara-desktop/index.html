@@ -88,9 +88,39 @@ button.btn.danger { background: var(--danger); }
 }
 .error { color: var(--danger); white-space: pre-wrap; }
 
+.section-label {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  text-transform: uppercase; color: var(--muted);
+  margin: 16px 0 10px;
+}
+.section-label:first-of-type { margin-top: 0; }
+.panel {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 18px 18px 16px;
+}
+.field { margin-bottom: 14px; }
+.field:last-child { margin-bottom: 0; }
+.field label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 600; margin-bottom: 8px;
+}
+.field input, .field select {
+  width: 100%; height: 32px; margin-bottom: 0;
+  padding: 0 10px; border-radius: 8px;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--text); font: inherit;
+}
+.field .hint { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+.pill {
+  display: inline-flex; align-items: center;
+  font-size: 10px; font-weight: 650; letter-spacing: 0.02em;
+  text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
+  background: rgba(0,113,227,0.14); color: var(--accent);
+  border: 0;
+}
 .status-row {
   display: flex; align-items: center; gap: 8px;
-  margin: 10px 0 0; font-size: 13px;
+  font-size: 13px; margin: 0 0 10px;
 }
 .status-dot {
   width: 9px; height: 9px; border-radius: 50%;
@@ -100,16 +130,13 @@ button.btn.danger { background: var(--danger); }
 .status-dot.ok { background: #34c759; box-shadow: 0 0 0 3px rgba(52,199,89,0.25); }
 .status-dot.bad { background: var(--danger); box-shadow: 0 0 0 3px rgba(215,0,21,0.2); }
 .status-dot.unknown { background: #ff9f0a; box-shadow: 0 0 0 3px rgba(255,159,10,0.2); }
-#model-chatgpt-wrap, #model-byok-wrap { margin-bottom: 0; }
-
 .email-row {
   display: flex; align-items: center; gap: 8px;
-  margin: 6px 0 0; font-size: 13px; color: var(--muted);
+  margin: 0 0 12px; font-size: 13px; color: var(--muted);
 }
 .email-row .email-value {
   font-variant-numeric: tabular-nums;
-  color: var(--text);
-  letter-spacing: 0.01em;
+  color: var(--text); letter-spacing: 0.01em;
 }
 button.icon-btn {
   border: 1px solid var(--border); background: transparent; color: var(--muted);
@@ -118,6 +145,19 @@ button.icon-btn {
   font-size: 14px; line-height: 1;
 }
 button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
+button.btn.ghost {
+  background: transparent; color: var(--muted); border: 0; padding: 8px 10px;
+}
+button.btn.ghost:hover { color: var(--text); background: rgba(127,127,127,0.12); }
+.panel-footer {
+  display: flex; justify-content: flex-end; margin-top: 16px;
+  padding-top: 14px; border-top: 1px solid var(--border);
+}
+.auth-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.muted-note {
+  font-size: 12px; color: var(--muted); padding: 10px 12px;
+  background: rgba(127,127,127,0.08); border-radius: 8px; margin: 0 0 14px;
+}
   </style>
 </head>
 <body>
@@ -313,74 +353,101 @@ button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
     const auth = p.auth || "api_key";
     const s = $("#section-models");
     const st = chatgptStatus || {};
+    const signedIn = !!(st && st.logged_in);
     const dot = statusDotClass(st);
     const statusLine = statusLabel(st);
+
+    const accountBlock = "" +
+      "<div class=\"section-label\">Account <span class=\"pill\">Experimental</span></div>" +
+      "<div class=\"field\" id=\"model-chatgpt-wrap\">" +
+      "<label for=\"model-select\">Model</label>" +
+      "<select id=\"model-select\"><option value=\"\">Sign in to load models…</option></select>" +
+      "<p class=\"hint\" id=\"chatgpt-models-hint\">Models load from your ChatGPT / Codex account.</p>" +
+      "</div>" +
+      "<div class=\"status-row\" id=\"chatgpt-status-line\">" +
+      "<span class=\"status-dot " + dot + "\" aria-hidden=\"true\"></span>" +
+      "<span>" + escapeHtml(statusLine) + "</span></div>" +
+      emailRowHtml(st) +
+      "<div class=\"auth-actions\" id=\"chatgpt-actions\">" +
+      (signedIn
+        ? ""
+        : "<button class=\"btn\" id=\"chatgpt-login\">Sign in with ChatGPT</button>") +
+      (signedIn
+        ? "<button class=\"btn secondary\" id=\"chatgpt-logout\">Sign out</button>" +
+          "<button class=\"btn ghost\" id=\"chatgpt-refresh\">Refresh status</button>" +
+          "<button class=\"btn ghost\" id=\"chatgpt-models\">Refresh models</button>"
+        : "<button class=\"btn ghost\" id=\"chatgpt-refresh\">Refresh status</button>") +
+      "</div>";
+
+    const byokBlock = "" +
+      "<div class=\"section-label\">API key</div>" +
+      "<div class=\"field\" id=\"model-byok-wrap\">" +
+      "<label for=\"model\">Model</label>" +
+      "<input id=\"model\" value=\"" + escapeAttr(p.model || "") + "\" placeholder=\"gpt-4o-mini\" />" +
+      "</div>" +
+      "<div class=\"field\" id=\"base-url-field\">" +
+      "<label for=\"base_url\">Base URL</label>" +
+      "<input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" />" +
+      "</div>" +
+      "<div class=\"field\">" +
+      "<label for=\"api_key\">API key</label>" +
+      "<input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" />" +
+      "<p class=\"hint\">Stored in ~/.config/selara/config.toml (or set SELARA_API_KEY).</p>" +
+      "</div>";
+
     s.innerHTML =
       "<h1>Models</h1>" +
-      "<p class=\"lead\">BYOK API keys, or Experimental ChatGPT sign-in via the Codex CLI.</p>" +
-      "<div class=\"card\">" +
+      "<p class=\"lead\">Connect an API key, or sign in with ChatGPT via Codex.</p>" +
+      "<div class=\"panel\">" +
+      "<div class=\"section-label\">Provider</div>" +
+      "<div class=\"field\">" +
       "<label for=\"provider-kind\">Provider</label>" +
       "<select id=\"provider-kind\">" +
       "<option value=\"open_ai_compatible\">OpenAI-compatible</option>" +
       "<option value=\"anthropic\">Anthropic</option>" +
       "<option value=\"ollama\">Ollama (local)</option>" +
       "<option value=\"gemini\">Google Gemini</option>" +
-      "</select>" +
-      "<label for=\"provider-auth\">Auth mode</label>" +
+      "</select></div>" +
+      "<div class=\"section-label\">Authentication</div>" +
+      "<div class=\"field\">" +
+      "<label for=\"provider-auth\">Auth mode <span class=\"pill\" id=\"auth-experimental-pill\" style=\"display:none\">Experimental</span></label>" +
       "<select id=\"provider-auth\">" +
       "<option value=\"api_key\">API key (BYOK)</option>" +
-      "<option value=\"chatgpt\">ChatGPT via Codex CLI (Experimental)</option>" +
+      "<option value=\"chatgpt\">ChatGPT via Codex CLI</option>" +
       "</select>" +
-      "<p class=\"hint\">ChatGPT mode only applies when Provider is OpenAI-compatible. Codex model slugs come from your account (not Platform names like gpt-4o). Tokens stay in ~/.codex/auth.json — never in config.toml. Base URL is ignored in ChatGPT mode.</p>" +
-      "<div class=\"row\">" +
-      "<div id=\"model-byok-wrap\"><label for=\"model\">Model</label>" +
-      "<input id=\"model\" value=\"" + escapeAttr(p.model || "") + "\" placeholder=\"gpt-4o-mini\" /></div>" +
-      "<div id=\"model-chatgpt-wrap\" style=\"display:none\"><label for=\"model-select\">Model</label>" +
-      "<select id=\"model-select\"><option value=\"\">Sign in to load models…</option></select>" +
-      "<p class=\"hint\" id=\"chatgpt-models-hint\" style=\"margin-top:4px\">Models load from your ChatGPT / Codex account.</p></div>" +
-      "<div><label for=\"base_url\">Base URL</label>" +
-      "<input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" /></div></div>" +
-      "<div id=\"byok-fields\">" +
-      "<label for=\"api_key\">API key</label>" +
-      "<input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" />" +
-      "<p class=\"hint\">Stored in ~/.config/selara/config.toml (or set SELARA_API_KEY).</p>" +
+      "<p class=\"hint\" id=\"auth-hint\">ChatGPT mode needs Provider = OpenAI-compatible. Tokens stay in ~/.codex/auth.json.</p>" +
       "</div>" +
-      "<div id=\"chatgpt-fields\" style=\"display:none\">" +
-      "<div class=\"soon\" style=\"border-style:solid\">" +
-      "<strong>Experimental — ChatGPT (Codex CLI)</strong>" +
-      "<p class=\"hint\" style=\"margin:8px 0 0\">Requires <code>codex</code> on PATH. Sign-in opens the Codex browser flow.</p>" +
-      "<div class=\"status-row\" id=\"chatgpt-status-line\">" +
-      "<span class=\"status-dot " + dot + "\" aria-hidden=\"true\"></span>" +
-      "<span>" + escapeHtml(statusLine) + "</span></div>" +
-      emailRowHtml(st) +
-      "<div class=\"actions\" style=\"margin-top:10px\">" +
-      "<button class=\"btn\" id=\"chatgpt-login\">Sign in with ChatGPT</button>" +
-      "<button class=\"btn secondary\" id=\"chatgpt-logout\">Sign out</button>" +
-      "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
-      "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>" +
-      "</div></div></div>" +
-      "<div class=\"actions\"><button class=\"btn\" id=\"save-models\">Save Models</button></div></div>";
+      "<div id=\"chatgpt-fields\">" + accountBlock + "</div>" +
+      "<div id=\"byok-fields\">" + byokBlock + "</div>" +
+      "<p class=\"muted-note\" id=\"base-url-note\" style=\"display:none\">Base URL isn't used with ChatGPT sign-in.</p>" +
+      "<div class=\"panel-footer\"><button class=\"btn\" id=\"save-models\">Save Models</button></div>" +
+      "</div>";
+
     $("#provider-kind").value = p.kind || "open_ai_compatible";
     $("#provider-auth").value = auth;
+
     function syncAuthUi() {
       const a = $("#provider-auth").value;
-      $("#byok-fields").style.display = a === "api_key" ? "block" : "none";
-      $("#chatgpt-fields").style.display = a === "chatgpt" ? "block" : "none";
-      $("#model-byok-wrap").style.display = a === "api_key" ? "block" : "none";
-      $("#model-chatgpt-wrap").style.display = a === "chatgpt" ? "block" : "none";
-      const base = $("#base_url");
-      if (base) {
-        base.disabled = a === "chatgpt";
-        base.title = a === "chatgpt" ? "Ignored in ChatGPT / Codex mode" : "";
+      const isCg = a === "chatgpt";
+      $("#byok-fields").style.display = isCg ? "none" : "block";
+      $("#chatgpt-fields").style.display = isCg ? "block" : "none";
+      const pill = $("#auth-experimental-pill");
+      if (pill) pill.style.display = isCg ? "inline-flex" : "none";
+      const note = $("#base-url-note");
+      if (note) note.style.display = isCg ? "block" : "none";
+      const hint = $("#auth-hint");
+      if (hint) {
+        hint.textContent = isCg
+          ? "Requires codex on PATH. Sign-in opens the Codex browser flow. Codex model slugs come from your account."
+          : "Use your own API key. Platform model names (e.g. gpt-4o-mini) work here.";
       }
-      if (a === "chatgpt" && (chatgptStatus && chatgptStatus.logged_in)) {
+      if (isCg && chatgptStatus && chatgptStatus.logged_in) {
         loadChatgptModelsIntoSelect(p.model);
       }
     }
     syncAuthUi();
-    $("#provider-auth").onchange = () => {
-      syncAuthUi();
-    };
+    $("#provider-auth").onchange = () => { syncAuthUi(); };
+
     const emailToggle = $("#chatgpt-email-toggle");
     if (emailToggle) {
       emailToggle.onclick = () => {
@@ -401,15 +468,17 @@ button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
         setStatus("Pick a model before saving");
         return;
       }
+      const a = $("#provider-auth").value || "api_key";
       config.provider = {
         kind: $("#provider-kind").value,
         model: model,
-        base_url: $("#base_url").value.trim(),
-        api_key: $("#api_key").value.trim() || null,
-        auth: $("#provider-auth").value || "api_key",
+        base_url: ($("#base_url") && $("#base_url").value.trim()) || (p.base_url || ""),
+        api_key: ($("#api_key") && $("#api_key").value.trim()) || null,
+        auth: a,
       };
       await saveConfig();
     };
+
     const loginBtn = $("#chatgpt-login");
     if (loginBtn) {
       loginBtn.onclick = async () => {
@@ -422,7 +491,10 @@ button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
           setStatus(String(e));
         }
       };
-      $("#chatgpt-logout").onclick = async () => {
+    }
+    const logoutBtn = $("#chatgpt-logout");
+    if (logoutBtn) {
+      logoutBtn.onclick = async () => {
         setStatus("Signing out…");
         try {
           chatgptStatus = await invoke("chatgpt_logout");
@@ -433,12 +505,18 @@ button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
           setStatus(String(e));
         }
       };
-      $("#chatgpt-refresh").onclick = async () => {
+    }
+    const refreshBtn = $("#chatgpt-refresh");
+    if (refreshBtn) {
+      refreshBtn.onclick = async () => {
         await refreshChatgptStatus();
         renderModels();
         setStatus("Status refreshed");
       };
-      $("#chatgpt-models").onclick = async () => {
+    }
+    const modelsBtn = $("#chatgpt-models");
+    if (modelsBtn) {
+      modelsBtn.onclick = async () => {
         setStatus("Refreshing Codex models…");
         await loadChatgptModelsIntoSelect(currentModelValue() || (config.provider && config.provider.model));
         setStatus("Models refreshed");
