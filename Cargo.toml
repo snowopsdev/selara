@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/writing-tools-core",
-  "crates/writing-tools-platform",
-  "apps/writing-tools",
-  "apps/writing-tools-desktop/src-tauri",
+  "crates/selara-core",
+  "crates/selara-platform",
+  "apps/selara",
+  "apps/selara-desktop/src-tauri",
 ]
-default-members = ["apps/writing-tools"]
+default-members = ["apps/selara"]
 
 [workspace.package]
 version = "0.1.0"

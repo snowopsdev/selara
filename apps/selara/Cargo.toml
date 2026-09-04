@@ -1,0 +1,24 @@
+[package]
+name = "selara"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI / desktop shell for Selara"
+
+[[bin]]
+name = "selara"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+dirs.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+selara-core = { path = "../../crates/selara-core" }
+selara-platform = { path = "../../crates/selara-platform" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+eframe = "0.32"
+egui = "0.32"

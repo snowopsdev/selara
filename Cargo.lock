@@ -4712,6 +4712,69 @@ dependencies = [
 ]
 
 [[package]]
+name = "selara"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dirs",
+ "eframe",
+ "egui",
+ "selara-core",
+ "selara-platform",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "selara-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures-util",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml 0.8.2",
+ "tracing",
+]
+
+[[package]]
+name = "selara-desktop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "selara-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-shell",
+]
+
+[[package]]
+name = "selara-platform"
+version = "0.1.0"
+dependencies = [
+ "accessibility",
+ "accessibility-sys",
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "cocoa",
+ "core-foundation 0.10.1",
+ "core-graphics 0.25.0",
+ "global-hotkey",
+ "objc",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "selectors"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7325,69 +7388,6 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
-
-[[package]]
-name = "writing-tools"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "dirs",
- "eframe",
- "egui",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "writing-tools-core",
- "writing-tools-platform",
-]
-
-[[package]]
-name = "writing-tools-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures-util",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "toml 0.8.2",
- "tracing",
-]
-
-[[package]]
-name = "writing-tools-desktop"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-shell",
- "writing-tools-core",
-]
-
-[[package]]
-name = "writing-tools-platform"
-version = "0.1.0"
-dependencies = [
- "accessibility",
- "accessibility-sys",
- "anyhow",
- "arboard",
- "async-trait",
- "cocoa",
- "core-foundation 0.10.1",
- "core-graphics 0.25.0",
- "global-hotkey",
- "objc",
- "thiserror 2.0.20",
- "tracing",
-]
 
 [[package]]
 name = "wry"

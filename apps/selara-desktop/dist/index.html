@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Selara Settings</title>
+  <style>
+:root {
+  color-scheme: light dark;
+  --bg: #f5f5f7;
+  --panel: #ffffff;
+  --border: #d2d2d7;
+  --text: #1d1d1f;
+  --muted: #6e6e73;
+  --accent: #0071e3;
+  --danger: #d70015;
+  --radius: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1e;
+    --panel: #2c2c2e;
+    --border: #3a3a3c;
+    --text: #f5f5f7;
+    --muted: #98989d;
+  }
+}
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); }
+#app { display: grid; grid-template-columns: 200px 1fr; min-height: 100%; }
+.nav {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.brand { font-weight: 650; font-size: 14px; padding: 8px 10px 16px; }
+.nav-item {
+  text-align: left; border: 0; background: transparent; color: var(--text);
+  padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px;
+}
+.nav-item:hover { background: rgba(0, 113, 227, 0.12); }
+.nav-item.active { background: rgba(0, 113, 227, 0.18); color: var(--accent); font-weight: 600; }
+.nav-foot { margin-top: auto; font-size: 11px; color: var(--muted); padding: 8px 10px; min-height: 2.5em; }
+.content { padding: 24px 28px; overflow: auto; }
+.section { display: none; max-width: 720px; }
+.section.active { display: block; }
+h1 { font-size: 22px; margin: 0 0 6px; font-weight: 650; }
+.lead { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+.card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
+}
+label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+input, select, textarea {
+  width: 100%; border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; background: transparent; color: var(--text);
+  font: inherit; margin-bottom: 12px;
+}
+textarea { min-height: 110px; resize: vertical; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+button.btn {
+  border: 0; border-radius: 8px; padding: 8px 12px; font: inherit;
+  font-size: 13px; cursor: pointer; background: var(--accent); color: white;
+}
+button.btn.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+button.btn.danger { background: var(--danger); }
+.hint { font-size: 12px; color: var(--muted); margin: -6px 0 12px; }
+.cmd-list { display: flex; flex-direction: column; gap: 8px; }
+.cmd-item {
+  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start;
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--panel);
+}
+.cmd-item h3 { margin: 0; font-size: 14px; }
+.cmd-item p { margin: 4px 0 0; font-size: 12px; color: var(--muted); white-space: pre-wrap; }
+.badge {
+  display: inline-block; font-size: 11px; padding: 2px 6px; border-radius: 999px;
+  border: 1px solid var(--border); margin-left: 6px; color: var(--muted);
+}
+.soon {
+  border: 1px dashed var(--border); border-radius: 8px; padding: 12px;
+  color: var(--muted); font-size: 13px;
+}
+.error { color: var(--danger); white-space: pre-wrap; }
+
+.status-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 10px 0 0; font-size: 13px;
+}
+.status-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--muted); flex-shrink: 0;
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.08);
+}
+.status-dot.ok { background: #34c759; box-shadow: 0 0 0 3px rgba(52,199,89,0.25); }
+.status-dot.bad { background: var(--danger); box-shadow: 0 0 0 3px rgba(215,0,21,0.2); }
+.status-dot.unknown { background: #ff9f0a; box-shadow: 0 0 0 3px rgba(255,159,10,0.2); }
+#model-chatgpt-wrap, #model-byok-wrap { margin-bottom: 0; }
+
+.email-row {
+  display: flex; align-items: center; gap: 8px;
+  margin: 6px 0 0; font-size: 13px; color: var(--muted);
+}
+.email-row .email-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+button.icon-btn {
+  border: 1px solid var(--border); background: transparent; color: var(--muted);
+  border-radius: 6px; width: 28px; height: 28px; padding: 0;
+  cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; line-height: 1;
+}
+button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside class="nav">
+      <div class="brand">Selara</div>
+      <button class="nav-item active" data-section="general">General</button>
+      <button class="nav-item" data-section="models">Models</button>
+      <button class="nav-item" data-section="commands">Commands</button>
+      <button class="nav-item" data-section="limits">Limits</button>
+      <div class="nav-foot" id="save-status">Starting…</div>
+    </aside>
+    <main class="content">
+      <section id="section-general" class="section active">
+        <h1>General</h1>
+        <p class="lead">Loading settings…</p>
+      </section>
+      <section id="section-models" class="section"></section>
+      <section id="section-commands" class="section"></section>
+      <section id="section-limits" class="section"></section>
+    </main>
+  </div>
+  <script>
+(function () {
+  let config = null;
+  let editingId = null;
+  const $ = (sel) => document.querySelector(sel);
+  const statusEl = () => $("#save-status");
+  function setStatus(msg) { statusEl().textContent = msg || ""; }
+  function escapeHtml(s) {
+    return String(s ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  }
+  function escapeAttr(s) { return escapeHtml(s).replaceAll('"', "&quot;"); }
+  function num(v) {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+  }
+  function slug(s) {
+    return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "command";
+  }
+  function kindLabel(k) { return k === "popup" ? "popup" : "replace"; }
+
+  function getInvoke() {
+    const g = window.__TAURI__;
+    if (g && g.core && typeof g.core.invoke === "function") return g.core.invoke.bind(g.core);
+    if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === "function") {
+      return window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
+    }
+    return null;
+  }
+
+  async function invoke(cmd, args) {
+    const fn = getInvoke();
+    if (!fn) throw new Error("Tauri API not available (is withGlobalTauri enabled?)");
+    return fn(cmd, args);
+  }
+
+  function showSection(id) {
+    document.querySelectorAll(".nav-item").forEach((b) => {
+      b.classList.toggle("active", b.dataset.section === id);
+    });
+    document.querySelectorAll(".section").forEach((s) => {
+      s.classList.toggle("active", s.id === "section-" + id);
+    });
+  }
+
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.addEventListener("click", () => showSection(btn.dataset.section));
+  });
+
+  function renderGeneral() {
+    const s = $("#section-general");
+    s.innerHTML =
+      "<h1>General</h1>" +
+      "<p class=\"lead\">Language and the global shortcut for the writing picker.</p>" +
+      "<div class=\"card\">" +
+      "<label for=\"language\">Default language</label>" +
+      "<input id=\"language\" value=\"" + escapeAttr(config.language || "en") + "\" placeholder=\"en\" />" +
+      "<p class=\"hint\">Preferred language for the model (e.g. en, es, fr).</p>" +
+      "<label for=\"hotkey\">Picker hotkey</label>" +
+      "<input id=\"hotkey\" value=\"" + escapeAttr(config.hotkey || "ctrl+shift+space") + "\" />" +
+      "<p class=\"hint\">With selara serve running, changes apply within about a second.</p>" +
+      "<div class=\"actions\"><button class=\"btn\" id=\"save-general\">Save General</button></div>" +
+      "</div>";
+    $("#save-general").onclick = async () => {
+      config.language = $("#language").value.trim() || "en";
+      config.hotkey = $("#hotkey").value.trim() || "ctrl+shift+space";
+      await saveConfig();
+    };
+  }
+
+  let chatgptStatus = null;
+
+  async function refreshChatgptStatus() {
+    try {
+      chatgptStatus = await invoke("chatgpt_auth_status");
+    } catch (e) {
+      chatgptStatus = { logged_in: false, message: String(e), via_chatgpt: false };
+    }
+  }
+
+  let chatgptModels = null;
+
+  function statusDotClass(st) {
+    if (!st || !st.message) return "unknown";
+    return st.logged_in ? "ok" : "bad";
+  }
+
+  function statusLabel(st) {
+    if (!st || !st.message) return "Status unknown — click Refresh.";
+    return (st.logged_in ? "Signed in: " : "Not signed in: ") + st.message;
+  }
+
+  const EMAIL_VISIBLE_KEY = "wt.chatgpt.emailVisible";
+  function isEmailVisible() {
+    try { return localStorage.getItem(EMAIL_VISIBLE_KEY) === "1"; } catch (_) { return false; }
+  }
+  function setEmailVisible(v) {
+    try { localStorage.setItem(EMAIL_VISIBLE_KEY, v ? "1" : "0"); } catch (_) {}
+  }
+  function maskEmail(email) {
+    if (!email) return "";
+    const at = email.indexOf("@");
+    if (at <= 0) return "••••••••";
+    const local = email.slice(0, at);
+    const domain = email.slice(at + 1);
+    const localMask = local[0] + "•".repeat(Math.max(2, Math.min(local.length - 1, 8)));
+    const dot = domain.lastIndexOf(".");
+    const domMask = dot > 0
+      ? ("•".repeat(Math.max(2, Math.min(dot, 6))) + domain.slice(dot))
+      : "••••";
+    return localMask + "@" + domMask;
+  }
+  function emailRowHtml(st) {
+    if (!st || !st.logged_in || !st.email) return "";
+    const show = isEmailVisible();
+    const shown = show ? st.email : maskEmail(st.email);
+    const label = show ? "Hide email" : "Show email";
+    const icon = show ? "🙈" : "👁";
+    return (
+      "<div class=\"email-row\" id=\"chatgpt-email-row\">" +
+      "<span>Account</span>" +
+      "<span class=\"email-value\" id=\"chatgpt-email-value\">" + escapeHtml(shown) + "</span>" +
+      "<button type=\"button\" class=\"icon-btn\" id=\"chatgpt-email-toggle\" title=\"" + label + "\" aria-label=\"" + label + "\" aria-pressed=\"" + (show ? "true" : "false") + "\">" + icon + "</button>" +
+      "</div>"
+    );
+  }
+
+  async function loadChatgptModelsIntoSelect(preferred) {
+    const sel = $("#model-select");
+    const hint = $("#chatgpt-models-hint");
+    if (!sel) return;
+    sel.innerHTML = "<option value=\"\">Loading models…</option>";
+    sel.disabled = true;
+    try {
+      chatgptModels = await invoke("list_chatgpt_models_cmd");
+      const models = Array.isArray(chatgptModels) ? chatgptModels : [];
+      if (!models.length) {
+        sel.innerHTML = "<option value=\"\">No models returned</option>";
+        if (hint) hint.textContent = "No Codex models for this account.";
+        return;
+      }
+      const pref = preferred || (config.provider && config.provider.model) || "";
+      let opts = models.map((m) => {
+        const selected = m === pref ? " selected" : "";
+        return "<option value=\"" + escapeAttr(m) + "\"" + selected + ">" + escapeHtml(m) + "</option>";
+      }).join("");
+      if (pref && !models.includes(pref)) {
+        opts = "<option value=\"" + escapeAttr(pref) + "\" selected>" + escapeHtml(pref) + " (saved)</option>" + opts;
+      }
+      sel.innerHTML = opts;
+      sel.disabled = false;
+      if (hint) hint.textContent = models.length + " models from your ChatGPT / Codex account.";
+    } catch (e) {
+      sel.innerHTML = "<option value=\"\">Failed to load models</option>";
+      if (hint) hint.textContent = String(e);
+      setStatus(String(e));
+    }
+  }
+
+  function currentModelValue() {
+    const auth = $("#provider-auth").value;
+    if (auth === "chatgpt") {
+      const sel = $("#model-select");
+      return sel ? sel.value.trim() : "";
+    }
+    const input = $("#model");
+    return input ? input.value.trim() : "";
+  }
+
+  function renderModels() {
+    const p = config.provider || {};
+    const auth = p.auth || "api_key";
+    const s = $("#section-models");
+    const st = chatgptStatus || {};
+    const dot = statusDotClass(st);
+    const statusLine = statusLabel(st);
+    s.innerHTML =
+      "<h1>Models</h1>" +
+      "<p class=\"lead\">BYOK API keys, or Experimental ChatGPT sign-in via the Codex CLI.</p>" +
+      "<div class=\"card\">" +
+      "<label for=\"provider-kind\">Provider</label>" +
+      "<select id=\"provider-kind\">" +
+      "<option value=\"open_ai_compatible\">OpenAI-compatible</option>" +
+      "<option value=\"anthropic\">Anthropic</option>" +
+      "<option value=\"ollama\">Ollama (local)</option>" +
+      "<option value=\"gemini\">Google Gemini</option>" +
+      "</select>" +
+      "<label for=\"provider-auth\">Auth mode</label>" +
+      "<select id=\"provider-auth\">" +
+      "<option value=\"api_key\">API key (BYOK)</option>" +
+      "<option value=\"chatgpt\">ChatGPT via Codex CLI (Experimental)</option>" +
+      "</select>" +
+      "<p class=\"hint\">ChatGPT mode only applies when Provider is OpenAI-compatible. Codex model slugs come from your account (not Platform names like gpt-4o). Tokens stay in ~/.codex/auth.json — never in config.toml. Base URL is ignored in ChatGPT mode.</p>" +
+      "<div class=\"row\">" +
+      "<div id=\"model-byok-wrap\"><label for=\"model\">Model</label>" +
+      "<input id=\"model\" value=\"" + escapeAttr(p.model || "") + "\" placeholder=\"gpt-4o-mini\" /></div>" +
+      "<div id=\"model-chatgpt-wrap\" style=\"display:none\"><label for=\"model-select\">Model</label>" +
+      "<select id=\"model-select\"><option value=\"\">Sign in to load models…</option></select>" +
+      "<p class=\"hint\" id=\"chatgpt-models-hint\" style=\"margin-top:4px\">Models load from your ChatGPT / Codex account.</p></div>" +
+      "<div><label for=\"base_url\">Base URL</label>" +
+      "<input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" /></div></div>" +
+      "<div id=\"byok-fields\">" +
+      "<label for=\"api_key\">API key</label>" +
+      "<input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" />" +
+      "<p class=\"hint\">Stored in ~/.config/selara/config.toml (or set SELARA_API_KEY).</p>" +
+      "</div>" +
+      "<div id=\"chatgpt-fields\" style=\"display:none\">" +
+      "<div class=\"soon\" style=\"border-style:solid\">" +
+      "<strong>Experimental — ChatGPT (Codex CLI)</strong>" +
+      "<p class=\"hint\" style=\"margin:8px 0 0\">Requires <code>codex</code> on PATH. Sign-in opens the Codex browser flow.</p>" +
+      "<div class=\"status-row\" id=\"chatgpt-status-line\">" +
+      "<span class=\"status-dot " + dot + "\" aria-hidden=\"true\"></span>" +
+      "<span>" + escapeHtml(statusLine) + "</span></div>" +
+      emailRowHtml(st) +
+      "<div class=\"actions\" style=\"margin-top:10px\">" +
+      "<button class=\"btn\" id=\"chatgpt-login\">Sign in with ChatGPT</button>" +
+      "<button class=\"btn secondary\" id=\"chatgpt-logout\">Sign out</button>" +
+      "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
+      "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>" +
+      "</div></div></div>" +
+      "<div class=\"actions\"><button class=\"btn\" id=\"save-models\">Save Models</button></div></div>";
+    $("#provider-kind").value = p.kind || "open_ai_compatible";
+    $("#provider-auth").value = auth;
+    function syncAuthUi() {
+      const a = $("#provider-auth").value;
+      $("#byok-fields").style.display = a === "api_key" ? "block" : "none";
+      $("#chatgpt-fields").style.display = a === "chatgpt" ? "block" : "none";
+      $("#model-byok-wrap").style.display = a === "api_key" ? "block" : "none";
+      $("#model-chatgpt-wrap").style.display = a === "chatgpt" ? "block" : "none";
+      const base = $("#base_url");
+      if (base) {
+        base.disabled = a === "chatgpt";
+        base.title = a === "chatgpt" ? "Ignored in ChatGPT / Codex mode" : "";
+      }
+      if (a === "chatgpt" && (chatgptStatus && chatgptStatus.logged_in)) {
+        loadChatgptModelsIntoSelect(p.model);
+      }
+    }
+    syncAuthUi();
+    $("#provider-auth").onchange = () => {
+      syncAuthUi();
+    };
+    const emailToggle = $("#chatgpt-email-toggle");
+    if (emailToggle) {
+      emailToggle.onclick = () => {
+        setEmailVisible(!isEmailVisible());
+        const show = isEmailVisible();
+        const val = $("#chatgpt-email-value");
+        if (val && st.email) val.textContent = show ? st.email : maskEmail(st.email);
+        emailToggle.title = show ? "Hide email" : "Show email";
+        emailToggle.setAttribute("aria-label", emailToggle.title);
+        emailToggle.setAttribute("aria-pressed", show ? "true" : "false");
+        emailToggle.textContent = show ? "🙈" : "👁";
+      };
+    }
+
+    $("#save-models").onclick = async () => {
+      const model = currentModelValue();
+      if (!model) {
+        setStatus("Pick a model before saving");
+        return;
+      }
+      config.provider = {
+        kind: $("#provider-kind").value,
+        model: model,
+        base_url: $("#base_url").value.trim(),
+        api_key: $("#api_key").value.trim() || null,
+        auth: $("#provider-auth").value || "api_key",
+      };
+      await saveConfig();
+    };
+    const loginBtn = $("#chatgpt-login");
+    if (loginBtn) {
+      loginBtn.onclick = async () => {
+        setStatus("Opening Codex login…");
+        try {
+          chatgptStatus = await invoke("chatgpt_login");
+          setStatus(chatgptStatus.logged_in ? "ChatGPT signed in" : chatgptStatus.message);
+          renderModels();
+        } catch (e) {
+          setStatus(String(e));
+        }
+      };
+      $("#chatgpt-logout").onclick = async () => {
+        setStatus("Signing out…");
+        try {
+          chatgptStatus = await invoke("chatgpt_logout");
+          setStatus("Signed out");
+          chatgptModels = null;
+          renderModels();
+        } catch (e) {
+          setStatus(String(e));
+        }
+      };
+      $("#chatgpt-refresh").onclick = async () => {
+        await refreshChatgptStatus();
+        renderModels();
+        setStatus("Status refreshed");
+      };
+      $("#chatgpt-models").onclick = async () => {
+        setStatus("Refreshing Codex models…");
+        await loadChatgptModelsIntoSelect(currentModelValue() || (config.provider && config.provider.model));
+        setStatus("Models refreshed");
+      };
+    }
+  }
+
+  function renderCommands() {
+    const s = $("#section-commands");
+    const list = (config.commands || []).map((c) => {
+      const hk = c.hotkey ? " <span class=\"badge\">" + escapeHtml(c.hotkey) + "</span>" : "";
+      return (
+        "<div class=\"cmd-item\" data-id=\"" + escapeAttr(c.id) + "\">" +
+        "<div><h3>" + escapeHtml(c.label) + " <span class=\"badge\">" + kindLabel(c.kind) + "</span>" + hk + "</h3>" +
+        "<p>" + escapeHtml(c.prompt) + "</p></div>" +
+        "<div class=\"actions\">" +
+        "<button class=\"btn secondary\" data-act=\"edit\">Edit</button>" +
+        "<button class=\"btn secondary\" data-act=\"dup\">Duplicate</button>" +
+        "<button class=\"btn danger\" data-act=\"del\">Delete</button>" +
+        "</div></div>"
+      );
+    }).join("");
+    const editing = editingId ? (config.commands || []).find((c) => c.id === editingId) : null;
+    s.innerHTML =
+      "<h1>Commands</h1>" +
+      "<p class=\"lead\">Each command is a prompt. Duplicate to make variations.</p>" +
+      "<div class=\"card\">" +
+      "<h3 style=\"margin-top:0\">" + (editing ? "Edit command" : "New command") + "</h3>" +
+      "<div class=\"row\"><div><label>Label</label><input id=\"cmd-label\" value=\"" + escapeAttr(editing && editing.label || "") + "\" /></div>" +
+      "<div><label>Kind</label><select id=\"cmd-kind\"><option value=\"replace\">Replace selection</option><option value=\"popup\">Popup result</option></select></div></div>" +
+      "<label>Prompt</label><textarea id=\"cmd-prompt\">" + escapeHtml(editing && editing.prompt || "") + "</textarea>" +
+      "<label>Command hotkey (optional)</label>" +
+      "<input id=\"cmd-hotkey\" value=\"" + escapeAttr((editing && editing.hotkey) || "") + "\" placeholder=\"e.g. ctrl+shift+p\" />" +
+      "<p class=\"hint\">Runs this command on the current selection (skips picker).</p>" +
+      "<div class=\"actions\"><button class=\"btn\" id=\"cmd-save\">" + (editing ? "Update" : "Add command") + "</button>" +
+      (editing ? "<button class=\"btn secondary\" id=\"cmd-cancel\">Cancel</button>" : "") +
+      "</div></div><div class=\"cmd-list\">" + (list || "<p class=\"hint\">No commands yet.</p>") + "</div>";
+    if (editing) $("#cmd-kind").value = editing.kind;
+    $("#cmd-save").onclick = async () => {
+      const label = $("#cmd-label").value.trim();
+      const prompt = $("#cmd-prompt").value.trim();
+      const kind = $("#cmd-kind").value;
+      const hotkeyRaw = $("#cmd-hotkey").value.trim();
+      const hotkey = hotkeyRaw ? hotkeyRaw : null;
+      if (!label || !prompt) { setStatus("Label and prompt are required"); return; }
+      if (editingId) {
+        const i = config.commands.findIndex((c) => c.id === editingId);
+        if (i >= 0) config.commands[i] = Object.assign({}, config.commands[i], { label, prompt, kind, hotkey });
+        editingId = null;
+      } else {
+        const id = slug(label) + "-" + Math.random().toString(36).slice(2, 7);
+        config.commands.push({ id, label, prompt, kind, hotkey });
+      }
+      await saveConfig();
+      renderCommands();
+    };
+    const cancel = $("#cmd-cancel");
+    if (cancel) cancel.onclick = () => { editingId = null; renderCommands(); };
+    s.querySelectorAll(".cmd-item").forEach((el) => {
+      const id = el.dataset.id;
+      el.querySelector('[data-act="edit"]').onclick = () => { editingId = id; renderCommands(); };
+      el.querySelector('[data-act="dup"]').onclick = async () => {
+        const src = config.commands.find((c) => c.id === id);
+        if (!src) return;
+        config.commands.push(Object.assign({}, src, {
+          id: src.id + "-copy-" + Math.random().toString(36).slice(2, 6),
+          label: src.label + " copy",
+          hotkey: null,
+        }));
+        await saveConfig();
+        renderCommands();
+      };
+      el.querySelector('[data-act="del"]').onclick = async () => {
+        if (!confirm("Delete “" + id + "”?")) return;
+        config.commands = config.commands.filter((c) => c.id !== id);
+        if (editingId === id) editingId = null;
+        await saveConfig();
+        renderCommands();
+      };
+    });
+  }
+
+  function renderLimits() {
+    const L = config.limits || {};
+    const s = $("#section-limits");
+    s.innerHTML =
+      "<h1>Limits</h1>" +
+      "<p class=\"lead\">Gentle rails. Set any value to 0 for unlimited.</p>" +
+      "<div class=\"card\">" +
+      "<label>Soft warn (chars)</label><input id=\"soft_warn\" type=\"number\" min=\"0\" value=\"" + (L.soft_warn_chars ?? 8000) + "\" />" +
+      "<label>Hard max (chars)</label><input id=\"hard_max\" type=\"number\" min=\"0\" value=\"" + (L.hard_max_chars ?? 100000) + "\" />" +
+      "<label>Replace caution (chars)</label><input id=\"replace_warn\" type=\"number\" min=\"0\" value=\"" + (L.replace_warn_chars ?? 4000) + "\" />" +
+      "<div class=\"actions\">" +
+      "<button class=\"btn\" id=\"save-limits\">Save Limits</button>" +
+      "<button class=\"btn secondary\" id=\"reset-limits\">Reset defaults</button></div></div>";
+    $("#save-limits").onclick = async () => {
+      config.limits = {
+        soft_warn_chars: num($("#soft_warn").value),
+        hard_max_chars: num($("#hard_max").value),
+        replace_warn_chars: num($("#replace_warn").value),
+      };
+      await saveConfig();
+    };
+    $("#reset-limits").onclick = async () => {
+      config.limits = { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000 };
+      await saveConfig();
+      renderLimits();
+    };
+  }
+
+  async function saveConfig() {
+    try {
+      await invoke("save_config", { config });
+      setStatus("Saved");
+    } catch (e) {
+      setStatus(String(e));
+    }
+  }
+
+  async function load() {
+    setStatus("Loading config…");
+    try {
+      config = await invoke("get_config");
+      await refreshChatgptStatus();
+      renderGeneral();
+      renderModels();
+      renderCommands();
+      renderLimits();
+      setStatus("Loaded");
+    } catch (e) {
+      const msg = String(e);
+      setStatus(msg);
+      $("#section-general").innerHTML =
+        "<h1>Could not load settings</h1><p class=\"lead error\">" + escapeHtml(msg) + "</p>" +
+        "<p class=\"hint\">Quit the tray app fully and relaunch after updating. Ensure permissions allow get_config.</p>";
+      showSection("general");
+    }
+  }
+
+  // Wait briefly for Tauri global bridge
+  let tries = 0;
+  (function waitApi() {
+    if (getInvoke() || tries > 50) {
+      load();
+      return;
+    }
+    tries += 1;
+    setStatus("Waiting for Tauri… (" + tries + ")");
+    setTimeout(waitApi, 100);
+  })();
+})();
+  </script>
+</body>
+</html>

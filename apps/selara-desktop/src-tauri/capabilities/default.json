@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for Selara desktop",
+  "windows": ["settings"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "allow-get-config",
+    "allow-save-config",
+    "allow-config-path",
+    "allow-chatgpt-auth-status",
+    "allow-chatgpt-login",
+    "allow-chatgpt-logout",
+    "allow-list-chatgpt-models"
+  ]
+}
