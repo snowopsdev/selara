@@ -1,0 +1,72 @@
+name: PR template
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  sections:
+    name: Required sections
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR body sections
+        env:
+          # Passed through the environment so PR text is never interpolated
+          # into the script.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          REQUIRED = [
+              "What Problem This Solves",
+              "Why This Change Was Made",
+              "User Impact",
+              "Developer Impact",
+              "Evidence",
+          ]
+          MIN_CHARS = 40
+
+          body = os.environ.get("PR_BODY") or ""
+          # Drop template guidance comments so they never count as content.
+          body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+
+          # Split the body into (heading, content) pairs on "## " headings.
+          parts = re.split(r"^##\s+(.+?)\s*$", body, flags=re.M)
+          sections = {}
+          for i in range(1, len(parts), 2):
+              sections[parts[i].strip().lower()] = parts[i + 1].strip()
+
+          problems = []
+          for name in REQUIRED:
+              content = sections.get(name.lower())
+              if content is None:
+                  problems.append(f'missing section "## {name}"')
+              elif len(content) < MIN_CHARS:
+                  problems.append(
+                      f'section "## {name}" needs more detail '
+                      f"({len(content)} chars, minimum {MIN_CHARS})"
+                  )
+
+          # Enforce the template order for the sections that are present.
+          found = [h for h in (parts[i].strip().lower() for i in range(1, len(parts), 2))
+                   if h in [r.lower() for r in REQUIRED]]
+          expected = [r.lower() for r in REQUIRED if r.lower() in found]
+          if found != expected:
+              problems.append("sections are out of order; use the template order")
+
+          if problems:
+              print("PR description does not follow .github/PULL_REQUEST_TEMPLATE.md:\n")
+              for p in problems:
+                  print(f"  - {p}")
+              print(
+                  "\nEdit the PR description so every section is present, in order, "
+                  "and filled in with real context."
+              )
+              sys.exit(1)
+
+          print("All five PR sections are present and filled in.")
+          PY

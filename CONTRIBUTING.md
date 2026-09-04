@@ -6,7 +6,7 @@ Thanks for your interest in contributing. This document covers how to build, tes
 
 1. **Clone** — `git clone https://github.com/snowopsdev/selara.git && cd selara`
 2. **Test** — `cargo test --workspace` (on macOS also: `cargo run -p selara-desktop` for Settings)
-3. **PR** — branch from `main`, open a PR with the template, wait for CI
+3. **PR** — branch from `main`, open a PR using the five-section template, wait for CI
 
 ## Prerequisites
 
@@ -51,10 +51,20 @@ If you change hotkeys, selection replace, Accessibility behavior, or the Setting
 
 1. Branch from `main` (`git checkout -b your-topic`)
 2. Make focused commits; keep secrets out of the diff
-3. Open a PR against `main` (use the PR template)
+3. Open a PR against `main`. The description must use the five sections from `.github/PULL_REQUEST_TEMPLATE.md` (What Problem This Solves, Why This Change Was Made, User Impact, Developer Impact, Evidence). A CI check fails the PR if any section is missing or empty, and this applies whether the PR is written by hand, by an IDE, or by a coding agent.
 4. Wait for CI to go green
 5. **Codex review** — maintainers request this on PRs (GitHub Codex connector). External contributors do **not** need to run Codex themselves; it is not a blocker on your side.
 6. Address feedback, then merge when approved
+
+## Releases and versioning
+
+Versions follow [semantic versioning](https://semver.org) and are cut automatically by [release-please](https://github.com/googleapis/release-please) from commit messages, so nobody edits version numbers by hand.
+
+- Commit types decide the bump: `feat` raises the minor version, `fix` and `perf` raise the patch version, and a `!` after the type or a `BREAKING CHANGE:` footer raises the major version. While Selara is `0.x`, a breaking change raises the minor version instead.
+- After every merge to `main`, the Release workflow keeps one pull request open titled `chore(main): release X.Y.Z`. It bumps the workspace version in `Cargo.toml`, the desktop `package.json` and `tauri.conf.json`, refreshes `Cargo.lock`, and updates `CHANGELOG.md`.
+- Merging that pull request creates the `vX.Y.Z` tag and the GitHub Release, and attaches a macOS build of the `selara` CLI.
+- All crates share the workspace version (`version.workspace = true`). Do not set a crate version by hand.
+- Commits whose type is `build`, `ci`, `chore`, `test`, `style`, `meta`, or `license` do not appear in the changelog and do not trigger a release on their own.
 
 ## No secrets
 

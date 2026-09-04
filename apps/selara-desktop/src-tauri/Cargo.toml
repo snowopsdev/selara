@@ -1,6 +1,6 @@
 [package]
 name = "selara-desktop"
-version = "0.1.0"
+version.workspace = true
 description = "Selara macOS tray + Settings (Tauri)"
 authors = ["Aj Nieves"]
 edition = "2021"
