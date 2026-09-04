@@ -43,6 +43,7 @@ struct ServeApp {
     /// Text captured at hotkey time (before our window steals focus).
     captured_text: String,
     captured_app: Option<String>,
+    captured_range: Option<(i64, i64)>,
     target_pid: Option<i32>,
     job_rx: Receiver<JobResult>,
     job_tx: Sender<JobResult>,
@@ -97,6 +98,7 @@ impl ServeApp {
             phase: UiPhase::Hidden,
             captured_text: String::new(),
             captured_app: None,
+            captured_range: None,
             target_pid: None,
             job_rx,
             job_tx,
@@ -134,6 +136,7 @@ then restart `writing-tools serve`."
             Ok(Some(snap)) => {
                 self.captured_text = snap.text;
                 self.captured_app = snap.app_name;
+                self.captured_range = snap.range;
             }
             Ok(None) => {
                 self.phase = UiPhase::Error {
@@ -204,18 +207,25 @@ then restart `writing-tools serve`."
                     };
                 }
                 CommandKind::Replace => {
-                    if let Some(pid) = self.target_pid {
+                    // Hide first so macOS can restore focus to the source app,
+                    // then activate + paste. Pasting while we are still frontmost fails.
+                    let pid = self.target_pid;
+                    let original = self.captured_text.clone();
+                    let range = self.captured_range;
+                    self.hide(ctx);
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                    if let Some(pid) = pid {
                         let _ = activate_pid(pid);
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(180));
                     }
-                    match self
-                        .runtime
-                        .block_on(self.selection.replace_selection(&text))
-                    {
-                        Ok(()) => self.hide(ctx),
+                    match self.selection.replace_in_app(pid, &text, &original, range) {
+                        Ok(()) => {}
                         Err(e) => {
                             self.phase = UiPhase::Error {
                                 message: format!("Replace failed: {e}"),
                             };
+                            self.show_window(ctx, true);
                         }
                     }
                 }

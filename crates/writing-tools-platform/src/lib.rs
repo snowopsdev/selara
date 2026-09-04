@@ -14,6 +14,8 @@ pub mod macos;
 pub struct SelectionSnapshot {
     pub text: String,
     pub app_name: Option<String>,
+    /// `AXSelectedTextRange` (location, length) when available — used to reselect after focus return.
+    pub range: Option<(i64, i64)>,
 }
 
 #[async_trait]
