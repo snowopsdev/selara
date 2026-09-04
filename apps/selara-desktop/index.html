@@ -146,7 +146,8 @@ button.icon-btn {
 }
 button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
 .auth-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
-.auth-actions .btn { min-width: 0; }
+.auth-actions .btn { min-width: 0; flex: 1 1 0; }
+select:disabled { opacity: 0.65; cursor: not-allowed; }
 .models-save { margin-top: 16px; }
 .models-save .btn { min-width: 120px; }
   </style>
@@ -253,8 +254,14 @@ button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
   let chatgptModels = null;
 
   function statusDotClass(st) {
-    if (!st || !st.message) return "unknown";
-    return st.logged_in ? "ok" : "bad";
+    if (!st) return "unknown";
+    if (st.logged_in) return "ok";
+    // Amber for signed-out (Hut mockup); red only for hard errors.
+    const msg = (st.message || "").toLowerCase();
+    if (msg && (msg.includes("error") || msg.includes("failed") || msg.includes("not found") || msg.includes("enoent"))) {
+      return "bad";
+    }
+    return "unknown";
   }
 
   function statusLabel(st) {
@@ -346,9 +353,9 @@ button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
     const st = chatgptStatus || {};
     const signedIn = !!(st && st.logged_in);
     const dot = statusDotClass(st);
-    const shortStatus = !st || !st.message
-      ? "Status unknown"
-      : (signedIn ? "Signed in" : ("Not signed in" + (st.message ? ": " + st.message : "")));
+    const shortStatus = signedIn
+      ? "Signed in"
+      : (!st || !st.message ? "Status unknown" : "Not signed in");
 
     function emailInline(st) {
       if (!st || !st.logged_in || !st.email) return "";
@@ -364,17 +371,21 @@ button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
       );
     }
 
+    const modelHint = signedIn
+      ? "<p class=\"field-hint\" id=\"chatgpt-models-hint\">Models load from your ChatGPT / Codex account.</p>"
+      : "<p class=\"field-hint\" id=\"chatgpt-models-hint\" style=\"display:none\"></p>";
+    const modelSelectAttrs = signedIn ? "" : " disabled";
     const accountInner =
       "<div class=\"form-row\">" +
       "<label for=\"model-select\">Model</label>" +
       "<div class=\"control-stack\" id=\"model-chatgpt-wrap\">" +
-      "<select id=\"model-select\"><option value=\"\">Sign in to load models…</option></select>" +
-      "<p class=\"field-hint\" id=\"chatgpt-models-hint\">Models load from your ChatGPT / Codex account.</p>" +
+      "<select id=\"model-select\"" + modelSelectAttrs + "><option value=\"\">Sign in to load models</option></select>" +
+      modelHint +
       "</div></div>" +
       "<div class=\"status-row\" id=\"chatgpt-status-line\">" +
       "<span class=\"status-dot " + dot + "\" aria-hidden=\"true\"></span>" +
       "<span>" + escapeHtml(shortStatus) + "</span>" +
-      emailInline(st) +
+      (signedIn ? emailInline(st) : "") +
       "</div>" +
       "<div class=\"auth-actions\">" +
       (signedIn
@@ -382,7 +393,8 @@ button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
           "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
           "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>"
         : "<button class=\"btn\" id=\"chatgpt-login\">Sign in with ChatGPT</button>" +
-          "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>") +
+          "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
+          "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>") +
       "</div>";
 
     const byokInner =
@@ -448,9 +460,13 @@ button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
       if (pill) pill.style.display = isCg ? "inline-flex" : "none";
       const hint = $("#auth-hint");
       if (hint) {
-        hint.textContent = isCg
-          ? "Tokens live in ~/.codex/auth.json. Base URL isn't used in this mode."
-          : "Use your own API key. Platform model names (e.g. gpt-4o-mini) work here.";
+        if (!isCg) {
+          hint.textContent = "Use your own API key. Platform model names (e.g. gpt-4o-mini) work here.";
+        } else if (chatgptStatus && chatgptStatus.logged_in) {
+          hint.textContent = "Tokens live in ~/.codex/auth.json. Base URL isn't used in this mode.";
+        } else {
+          hint.textContent = "Requires codex on PATH. Sign-in opens the Codex browser flow. Base URL isn't used in this mode.";
+        }
       }
       if (isCg && chatgptStatus && chatgptStatus.logged_in) {
         loadChatgptModelsIntoSelect(p.model);
