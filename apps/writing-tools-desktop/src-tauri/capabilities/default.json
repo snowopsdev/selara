@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "Default capabilities for Writing Tools desktop",
   "windows": ["settings"],
-  "permissions": ["core:default", "shell:allow-open"]
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "allow-get-config",
+    "allow-save-config",
+    "allow-config-path"
+  ]
 }

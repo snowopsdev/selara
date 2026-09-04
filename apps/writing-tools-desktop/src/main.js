@@ -278,12 +278,22 @@ async function saveConfig() {
 }
 
 async function load() {
-  config = await invoke("get_config");
-  renderGeneral();
-  renderModels();
-  renderCommands();
-  renderLimits();
-  setStatus("Loaded");
+  try {
+    config = await invoke("get_config");
+    renderGeneral();
+    renderModels();
+    renderCommands();
+    renderLimits();
+    setStatus("Loaded");
+  } catch (e) {
+    const msg = String(e);
+    setStatus(msg);
+    const s = $("#section-general");
+    if (s) {
+      s.innerHTML = `<h1>Could not load settings</h1><p class="lead">${escapeHtml(msg)}</p><p class="hint">If this mentions permissions or deny, restart the desktop app after updating.</p>`;
+      showSection("general");
+    }
+  }
 }
 
 function num(v) {
@@ -303,4 +313,4 @@ function escapeAttr(s) {
   return escapeHtml(s).replaceAll('"', "&quot;");
 }
 
-load().catch((e) => setStatus(String(e)));
+load();
