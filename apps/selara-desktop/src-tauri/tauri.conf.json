@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "identifier": "dev.snowops.selara",
   "build": {
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
