@@ -315,6 +315,14 @@ pub async fn list_chatgpt_models() -> Result<Vec<String>, CoreError> {
         .or_else(|| value.as_array());
     if let Some(arr) = items {
         for item in arr {
+            // Skip Codex-internal hidden entries (e.g. gpt-reserve).
+            if item
+                .get("visibility")
+                .and_then(|v| v.as_str())
+                == Some("hide")
+            {
+                continue;
+            }
             if let Some(id) = item
                 .get("slug")
                 .or_else(|| item.get("id"))
