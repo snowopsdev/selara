@@ -2,7 +2,7 @@
 
 Cross-platform **Selara** writing assistant: a Rust core for LLM writing commands, plus thin OS shells for hotkeys and text selection.
 
-*(Local product rename from Writing Tools; GitHub repo remains `writing-tools-rs` for now.)*
+*(Local product rename from Writing Tools; GitHub repo: [`snowopsdev/selara`](https://github.com/snowopsdev/selara).)*
 
 Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools). This is a clean-room architecture spike, not a line-for-line port. Original prompts and code.
 
