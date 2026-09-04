@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Writing Tools Settings</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside class="nav">
+        <div class="brand">Writing Tools</div>
+        <button class="nav-item active" data-section="general">General</button>
+        <button class="nav-item" data-section="models">Models</button>
+        <button class="nav-item" data-section="commands">Commands</button>
+        <button class="nav-item" data-section="limits">Limits</button>
+        <div class="nav-foot" id="save-status"></div>
+      </aside>
+      <main class="content">
+        <section id="section-general" class="section active"></section>
+        <section id="section-models" class="section"></section>
+        <section id="section-commands" class="section"></section>
+        <section id="section-limits" class="section"></section>
+      </main>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

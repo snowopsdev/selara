@@ -4,6 +4,7 @@ members = [
   "crates/writing-tools-core",
   "crates/writing-tools-platform",
   "apps/writing-tools",
+  "apps/writing-tools-desktop/src-tauri",
 ]
 default-members = ["apps/writing-tools"]
 

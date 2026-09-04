@@ -115,3 +115,22 @@ Supported tokens: `ctrl`/`control`, `shift`, `alt`/`option`, `cmd`/`command`/`su
 ## License
 
 MIT
+
+## Desktop Settings (Tauri, macOS)
+
+Menu-bar app for Settings — no text selection required. The egui `serve` overlay still owns the hotkey picker for now.
+
+```bash
+cd apps/writing-tools-desktop
+# install JS deps with your package manager, then:
+npx vite --port 1420 --strictPort
+# other terminal:
+cargo run -p writing-tools-desktop
+```
+
+Tray: Open Settings (or left-click the icon). Close hides Settings; Quit exits.
+
+Sections: General (language + hotkey), Models (API keys), Commands (CRUD + duplicate), Limits.
+
+Config path: `~/.config/writing-tools/config.toml`.
+

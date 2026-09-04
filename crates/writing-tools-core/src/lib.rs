@@ -9,4 +9,4 @@ pub mod providers;
 pub use commands::{builtin_commands, run_command, CommandKind, WritingCommand};
 pub use config::{AppConfig, LimitsConfig, ProviderConfig};
 pub use error::CoreError;
-pub use providers::{CompletionRequest, LlmProvider, OpenAiCompatibleProvider, ProviderKind};
+pub use providers::{CompletionRequest, LlmProvider, AnthropicProvider, OpenAiCompatibleProvider, ProviderKind};

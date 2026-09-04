@@ -10,6 +10,9 @@ pub struct AppConfig {
     pub provider: ProviderConfig,
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
+    /// Preferred content/UI language code (e.g. "en", "es").
+    #[serde(default = "default_language")]
+    pub language: String,
     #[serde(default)]
     pub commands: Vec<WritingCommand>,
     /// Selection / request size rails. Editable in the Settings UI; 0 disables a knob.
@@ -47,6 +50,10 @@ fn default_hotkey() -> String {
     "ctrl+shift+space".into()
 }
 
+fn default_language() -> String {
+    "en".into()
+}
+
 fn default_soft_warn_chars() -> u64 {
     8_000
 }
@@ -79,6 +86,7 @@ impl Default for AppConfig {
                 api_key: None,
             },
             hotkey: default_hotkey(),
+            language: default_language(),
             commands: builtin_commands(),
             limits: LimitsConfig::default(),
         }
