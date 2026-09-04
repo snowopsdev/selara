@@ -88,56 +88,56 @@ button.btn.danger { background: var(--danger); }
 }
 .error { color: var(--danger); white-space: pre-wrap; }
 
+
 .section-label {
-  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--muted);
-  margin: 16px 0 10px;
+  margin: 20px 0 12px;
 }
-.section-label:first-of-type { margin-top: 0; }
+.section-label:first-of-type { margin-top: 2px; }
 .panel {
   background: var(--panel); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 18px 18px 16px;
+  border-radius: 12px; padding: 18px 20px 20px;
 }
-.field { margin-bottom: 14px; }
-.field:last-child { margin-bottom: 0; }
-.field label {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 12px; font-weight: 600; margin-bottom: 8px;
+.form-row {
+  display: grid; grid-template-columns: 110px 1fr; gap: 12px;
+  align-items: center; margin-bottom: 12px;
 }
-.field input, .field select {
-  width: 100%; height: 32px; margin-bottom: 0;
+.form-row > label {
+  margin: 0; font-size: 13px; font-weight: 500; color: var(--text);
+}
+.form-row input, .form-row select {
+  width: 100%; height: 32px; margin: 0;
   padding: 0 10px; border-radius: 8px;
-  border: 1px solid var(--border); background: transparent;
+  border: 1px solid var(--border); background: rgba(0,0,0,0.15);
   color: var(--text); font: inherit;
 }
-.field .hint { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+.control-stack { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.control-inline { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.control-inline select, .control-inline input { flex: 1; min-width: 0; }
+.field-hint { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.35; }
 .pill {
-  display: inline-flex; align-items: center;
-  font-size: 10px; font-weight: 650; letter-spacing: 0.02em;
-  text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
-  background: rgba(0,113,227,0.14); color: var(--accent);
-  border: 0;
+  display: inline-flex; align-items: center; flex-shrink: 0;
+  font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px;
+  border: 1px solid var(--border); color: var(--muted);
+  background: transparent; text-transform: none; letter-spacing: 0;
 }
 .status-row {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 13px; margin: 0 0 10px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 13px; margin: 4px 0 12px; color: var(--text);
 }
 .status-dot {
-  width: 9px; height: 9px; border-radius: 50%;
+  width: 8px; height: 8px; border-radius: 50%;
   background: var(--muted); flex-shrink: 0;
-  box-shadow: 0 0 0 2px rgba(0,0,0,0.08);
 }
-.status-dot.ok { background: #34c759; box-shadow: 0 0 0 3px rgba(52,199,89,0.25); }
-.status-dot.bad { background: var(--danger); box-shadow: 0 0 0 3px rgba(215,0,21,0.2); }
-.status-dot.unknown { background: #ff9f0a; box-shadow: 0 0 0 3px rgba(255,159,10,0.2); }
-.email-row {
-  display: flex; align-items: center; gap: 8px;
-  margin: 0 0 12px; font-size: 13px; color: var(--muted);
+.status-dot.ok { background: #34c759; box-shadow: 0 0 0 3px rgba(52,199,89,0.22); }
+.status-dot.bad { background: var(--danger); box-shadow: 0 0 0 3px rgba(215,0,21,0.18); }
+.status-dot.unknown { background: #ff9f0a; box-shadow: 0 0 0 3px rgba(255,159,10,0.18); }
+.email-inline {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--muted); margin-left: 4px;
 }
-.email-row .email-value {
-  font-variant-numeric: tabular-nums;
-  color: var(--text); letter-spacing: 0.01em;
-}
+.email-inline .email-value { color: var(--muted); font-variant-numeric: tabular-nums; }
 button.icon-btn {
   border: 1px solid var(--border); background: transparent; color: var(--muted);
   border-radius: 6px; width: 28px; height: 28px; padding: 0;
@@ -145,19 +145,10 @@ button.icon-btn {
   font-size: 14px; line-height: 1;
 }
 button.icon-btn:hover { color: var(--text); background: rgba(0,113,227,0.1); }
-button.btn.ghost {
-  background: transparent; color: var(--muted); border: 0; padding: 8px 10px;
-}
-button.btn.ghost:hover { color: var(--text); background: rgba(127,127,127,0.12); }
-.panel-footer {
-  display: flex; justify-content: flex-end; margin-top: 16px;
-  padding-top: 14px; border-top: 1px solid var(--border);
-}
-.auth-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
-.muted-note {
-  font-size: 12px; color: var(--muted); padding: 10px 12px;
-  background: rgba(127,127,127,0.08); border-radius: 8px; margin: 0 0 14px;
-}
+.auth-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+.auth-actions .btn { min-width: 0; }
+.models-save { margin-top: 16px; }
+.models-save .btn { min-width: 120px; }
   </style>
 </head>
 <body>
@@ -355,52 +346,67 @@ button.btn.ghost:hover { color: var(--text); background: rgba(127,127,127,0.12);
     const st = chatgptStatus || {};
     const signedIn = !!(st && st.logged_in);
     const dot = statusDotClass(st);
-    const statusLine = statusLabel(st);
+    const shortStatus = !st || !st.message
+      ? "Status unknown"
+      : (signedIn ? "Signed in" : ("Not signed in" + (st.message ? ": " + st.message : "")));
 
-    const accountBlock = "" +
-      "<div class=\"section-label\">Account <span class=\"pill\">Experimental</span></div>" +
-      "<div class=\"field\" id=\"model-chatgpt-wrap\">" +
+    function emailInline(st) {
+      if (!st || !st.logged_in || !st.email) return "";
+      const show = isEmailVisible();
+      const shown = show ? st.email : maskEmail(st.email);
+      const label = show ? "Hide email" : "Show email";
+      const icon = show ? "🙈" : "👁";
+      return (
+        "<span class=\"email-inline\" id=\"chatgpt-email-row\">" +
+        "<span class=\"email-value\" id=\"chatgpt-email-value\">" + escapeHtml(shown) + "</span>" +
+        "<button type=\"button\" class=\"icon-btn\" id=\"chatgpt-email-toggle\" title=\"" + label + "\" aria-label=\"" + label + "\" aria-pressed=\"" + (show ? "true" : "false") + "\">" + icon + "</button>" +
+        "</span>"
+      );
+    }
+
+    const accountInner =
+      "<div class=\"form-row\">" +
       "<label for=\"model-select\">Model</label>" +
+      "<div class=\"control-stack\" id=\"model-chatgpt-wrap\">" +
       "<select id=\"model-select\"><option value=\"\">Sign in to load models…</option></select>" +
-      "<p class=\"hint\" id=\"chatgpt-models-hint\">Models load from your ChatGPT / Codex account.</p>" +
-      "</div>" +
+      "<p class=\"field-hint\" id=\"chatgpt-models-hint\">Models load from your ChatGPT / Codex account.</p>" +
+      "</div></div>" +
       "<div class=\"status-row\" id=\"chatgpt-status-line\">" +
       "<span class=\"status-dot " + dot + "\" aria-hidden=\"true\"></span>" +
-      "<span>" + escapeHtml(statusLine) + "</span></div>" +
-      emailRowHtml(st) +
-      "<div class=\"auth-actions\" id=\"chatgpt-actions\">" +
-      (signedIn
-        ? ""
-        : "<button class=\"btn\" id=\"chatgpt-login\">Sign in with ChatGPT</button>") +
+      "<span>" + escapeHtml(shortStatus) + "</span>" +
+      emailInline(st) +
+      "</div>" +
+      "<div class=\"auth-actions\">" +
       (signedIn
         ? "<button class=\"btn secondary\" id=\"chatgpt-logout\">Sign out</button>" +
-          "<button class=\"btn ghost\" id=\"chatgpt-refresh\">Refresh status</button>" +
-          "<button class=\"btn ghost\" id=\"chatgpt-models\">Refresh models</button>"
-        : "<button class=\"btn ghost\" id=\"chatgpt-refresh\">Refresh status</button>") +
+          "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
+          "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>"
+        : "<button class=\"btn\" id=\"chatgpt-login\">Sign in with ChatGPT</button>" +
+          "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>") +
       "</div>";
 
-    const byokBlock = "" +
-      "<div class=\"section-label\">API key</div>" +
-      "<div class=\"field\" id=\"model-byok-wrap\">" +
+    const byokInner =
+      "<div class=\"form-row\" id=\"model-byok-wrap\">" +
       "<label for=\"model\">Model</label>" +
       "<input id=\"model\" value=\"" + escapeAttr(p.model || "") + "\" placeholder=\"gpt-4o-mini\" />" +
       "</div>" +
-      "<div class=\"field\" id=\"base-url-field\">" +
+      "<div class=\"form-row\" id=\"base-url-field\">" +
       "<label for=\"base_url\">Base URL</label>" +
       "<input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" />" +
       "</div>" +
-      "<div class=\"field\">" +
+      "<div class=\"form-row\">" +
       "<label for=\"api_key\">API key</label>" +
+      "<div class=\"control-stack\">" +
       "<input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" />" +
-      "<p class=\"hint\">Stored in ~/.config/selara/config.toml (or set SELARA_API_KEY).</p>" +
-      "</div>";
+      "<p class=\"field-hint\">Stored in ~/.config/selara/config.toml (or SELARA_API_KEY).</p>" +
+      "</div></div>";
 
     s.innerHTML =
       "<h1>Models</h1>" +
       "<p class=\"lead\">Connect an API key, or sign in with ChatGPT via Codex.</p>" +
       "<div class=\"panel\">" +
       "<div class=\"section-label\">Provider</div>" +
-      "<div class=\"field\">" +
+      "<div class=\"form-row\">" +
       "<label for=\"provider-kind\">Provider</label>" +
       "<select id=\"provider-kind\">" +
       "<option value=\"open_ai_compatible\">OpenAI-compatible</option>" +
@@ -409,19 +415,26 @@ button.btn.ghost:hover { color: var(--text); background: rgba(127,127,127,0.12);
       "<option value=\"gemini\">Google Gemini</option>" +
       "</select></div>" +
       "<div class=\"section-label\">Authentication</div>" +
-      "<div class=\"field\">" +
-      "<label for=\"provider-auth\">Auth mode <span class=\"pill\" id=\"auth-experimental-pill\" style=\"display:none\">Experimental</span></label>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"provider-auth\">Auth mode</label>" +
+      "<div class=\"control-stack\">" +
+      "<div class=\"control-inline\">" +
       "<select id=\"provider-auth\">" +
       "<option value=\"api_key\">API key (BYOK)</option>" +
       "<option value=\"chatgpt\">ChatGPT via Codex CLI</option>" +
       "</select>" +
-      "<p class=\"hint\" id=\"auth-hint\">ChatGPT mode needs Provider = OpenAI-compatible. Tokens stay in ~/.codex/auth.json.</p>" +
+      "<span class=\"pill\" id=\"auth-experimental-pill\" style=\"display:none\">Experimental</span>" +
       "</div>" +
-      "<div id=\"chatgpt-fields\">" + accountBlock + "</div>" +
-      "<div id=\"byok-fields\">" + byokBlock + "</div>" +
-      "<p class=\"muted-note\" id=\"base-url-note\" style=\"display:none\">Base URL isn't used with ChatGPT sign-in.</p>" +
-      "<div class=\"panel-footer\"><button class=\"btn\" id=\"save-models\">Save Models</button></div>" +
-      "</div>";
+      "<p class=\"field-hint\" id=\"auth-hint\">Tokens live in ~/.codex/auth.json.</p>" +
+      "</div></div>" +
+      "<div id=\"chatgpt-fields\">" +
+      "<div class=\"section-label\">Account</div>" + accountInner +
+      "</div>" +
+      "<div id=\"byok-fields\">" +
+      "<div class=\"section-label\">API key</div>" + byokInner +
+      "</div>" +
+      "</div>" +
+      "<div class=\"models-save\"><button class=\"btn\" id=\"save-models\">Save Models</button></div>";
 
     $("#provider-kind").value = p.kind || "open_ai_compatible";
     $("#provider-auth").value = auth;
@@ -433,12 +446,10 @@ button.btn.ghost:hover { color: var(--text); background: rgba(127,127,127,0.12);
       $("#chatgpt-fields").style.display = isCg ? "block" : "none";
       const pill = $("#auth-experimental-pill");
       if (pill) pill.style.display = isCg ? "inline-flex" : "none";
-      const note = $("#base-url-note");
-      if (note) note.style.display = isCg ? "block" : "none";
       const hint = $("#auth-hint");
       if (hint) {
         hint.textContent = isCg
-          ? "Requires codex on PATH. Sign-in opens the Codex browser flow. Codex model slugs come from your account."
+          ? "Tokens live in ~/.codex/auth.json. Base URL isn't used in this mode."
           : "Use your own API key. Platform model names (e.g. gpt-4o-mini) work here.";
       }
       if (isCg && chatgptStatus && chatgptStatus.logged_in) {
