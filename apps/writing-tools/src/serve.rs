@@ -59,6 +59,11 @@ impl ServeApp {
         let hotkey_fired = Arc::new(AtomicBool::new(false));
         let hotkey = MacosHotkey::new();
         let flag = hotkey_fired.clone();
+        // Wake egui when the hotkey fires so a hidden window still updates.
+        let egui_ctx = _cc.egui_ctx.clone();
+        hotkey.set_wake(move || {
+            egui_ctx.request_repaint();
+        });
         // Must register on the main thread (eframe creation runs there).
         block_on_ready(hotkey.register(
             &config.hotkey,
@@ -261,6 +266,8 @@ impl eframe::App for ServeApp {
         }
 
         if matches!(self.phase, UiPhase::Hidden) {
+            // Keep the event loop alive so hotkey.poll / wake still run after hide.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
             egui::CentralPanel::default().show(ctx, |_ui| {});
             return;
         }

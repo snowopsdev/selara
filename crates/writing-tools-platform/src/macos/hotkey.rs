@@ -77,11 +77,13 @@ pub fn parse_hotkey(spec: &str) -> Result<HotKey> {
 }
 
 /// Global hotkey registration. Construct and [`Self::register`] on the **main**
-/// thread, then call [`Self::poll`] each UI frame.
+/// thread. Call [`Self::set_wake`] so a hotkey can revive a hidden egui window.
 pub struct MacosHotkey {
     manager: Mutex<Option<GlobalHotKeyManager>>,
     registered: Mutex<Option<HotKey>>,
     on_fire: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Wakes the UI loop (egui `request_repaint`) so a hidden window still reacts.
+    wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl MacosHotkey {
@@ -90,33 +92,58 @@ impl MacosHotkey {
             manager: Mutex::new(None),
             registered: Mutex::new(None),
             on_fire: Mutex::new(None),
+            wake: Mutex::new(None),
         }
     }
 
-    /// Poll Carbon/global-hotkey events. Call from the UI/main thread event loop.
+    /// Call before [`HotkeyService::register`]. Pass egui `ctx.request_repaint`
+    /// so hotkeys revive a hidden / idle window.
+    pub fn set_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
+        *self
+            .wake
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(wake));
+    }
+
+    /// Drain the channel fallback. No-op when `set_event_handler` is active.
     pub fn poll(&self) {
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if event.state != HotKeyState::Pressed {
-                continue;
-            }
-            let id_ok = self
-                .registered
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .map(|h| h.id() == event.id)
-                .unwrap_or(false);
-            if !id_ok {
-                continue;
-            }
-            let cb = self
-                .on_fire
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            if let Some(cb) = cb {
-                cb();
-            }
+            Self::dispatch_event(
+                event,
+                &self.registered,
+                &self.on_fire,
+                &self.wake,
+            );
+        }
+    }
+
+    fn dispatch_event(
+        event: GlobalHotKeyEvent,
+        registered: &Mutex<Option<HotKey>>,
+        on_fire: &Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+        wake: &Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    ) {
+        if event.state != HotKeyState::Pressed {
+            return;
+        }
+        let id_ok = registered
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|h| h.id() == event.id)
+            .unwrap_or(false);
+        if !id_ok {
+            return;
+        }
+        if let Some(cb) = on_fire
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            cb();
+        }
+        if let Some(w) = wake.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            w();
         }
     }
 }
@@ -131,14 +158,41 @@ impl Default for MacosHotkey {
 impl HotkeyService for MacosHotkey {
     async fn register(&self, hotkey: &str, on_fire: Box<dyn Fn() + Send + Sync>) -> Result<()> {
         let parsed = parse_hotkey(hotkey).with_context(|| format!("parse hotkey `{hotkey}`"))?;
-        let manager = GlobalHotKeyManager::new().context("create GlobalHotKeyManager (main thread)")?;
+        let manager =
+            GlobalHotKeyManager::new().context("create GlobalHotKeyManager (main thread)")?;
         manager
             .register(parsed)
             .with_context(|| format!("register hotkey `{hotkey}`"))?;
 
+        let hotkey_id = parsed.id();
         *self.on_fire.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::from(on_fire));
         *self.registered.lock().unwrap_or_else(|e| e.into_inner()) = Some(parsed);
         *self.manager.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
+
+        // Event handler wakes a hidden egui loop. OnceCell: first set wins.
+        let on_fire = self
+            .on_fire
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let wake = self
+            .wake
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
+        GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+            if event.state != HotKeyState::Pressed || event.id != hotkey_id {
+                return;
+            }
+            if let Some(cb) = on_fire.as_ref() {
+                cb();
+            }
+            if let Some(w) = wake.as_ref() {
+                w();
+            }
+        }));
+
         Ok(())
     }
 }
