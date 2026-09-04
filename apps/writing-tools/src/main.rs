@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use writing_tools_core::commands::{find_command, run_command};
 use writing_tools_core::config::AppConfig;
-use writing_tools_core::providers::provider_from_config;
 
 #[cfg(target_os = "macos")]
 mod serve;
@@ -77,7 +76,10 @@ async fn async_cli(command: Commands, config_path: PathBuf) -> Result<()> {
         Commands::Init => {
             let cfg = AppConfig::load_or_init(&config_path)?;
             println!("config: {}", config_path.display());
-            println!("provider: {:?} / {}", cfg.provider.kind, cfg.provider.model);
+            println!(
+                "provider: {:?} / {} (auth={:?})",
+                cfg.provider.kind, cfg.provider.model, cfg.provider.auth
+            );
             println!("hotkey: {}", cfg.hotkey);
             println!("commands: {}", cfg.commands.len());
         }
@@ -101,13 +103,7 @@ async fn async_cli(command: Commands, config_path: PathBuf) -> Result<()> {
                 }
             };
             let command = find_command(&cfg.commands, &id)?;
-            let api_key = cfg.resolve_api_key()?;
-            let provider = provider_from_config(
-                cfg.provider.kind,
-                &cfg.provider.base_url,
-                &cfg.provider.model,
-                &api_key,
-            );
+            let provider = cfg.build_provider()?;
             let out = run_command(provider.as_ref(), command, &input, instruct.as_deref()).await?;
             println!("{out}");
         }

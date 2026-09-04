@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 use eframe::egui;
 use writing_tools_core::commands::{run_command, CommandKind, WritingCommand};
 use writing_tools_core::config::{AppConfig, LimitsConfig};
-use writing_tools_core::providers::provider_from_config;
 use writing_tools_platform::macos::{
     accessibility_trusted, activate_pid, frontmost_pid, prompt_accessibility, HotkeyAction,
     MacosHotkey, MacosSelection,
@@ -334,13 +333,7 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
 
         self.runtime.spawn(async move {
             let result = async {
-                let api_key = cfg.resolve_api_key()?;
-                let provider = provider_from_config(
-                    cfg.provider.kind,
-                    &cfg.provider.base_url,
-                    &cfg.provider.model,
-                    &api_key,
-                );
+                let provider = cfg.build_provider()?;
                 let out = run_command(provider.as_ref(), &cmd, &input, None).await?;
                 Ok::<_, anyhow::Error>((cmd.kind, cmd.label, out))
             }

@@ -178,39 +178,122 @@ button.btn.danger { background: var(--danger); }
     };
   }
 
+  let chatgptStatus = null;
+
+  async function refreshChatgptStatus() {
+    try {
+      chatgptStatus = await invoke("chatgpt_auth_status");
+    } catch (e) {
+      chatgptStatus = { logged_in: false, message: String(e), via_chatgpt: false };
+    }
+  }
+
   function renderModels() {
     const p = config.provider || {};
+    const auth = p.auth || "api_key";
     const s = $("#section-models");
+    const st = chatgptStatus || {};
+    const statusLine = st.message
+      ? (st.logged_in ? "Signed in: " : "Not signed in: ") + st.message
+      : "Status unknown — click Refresh.";
     s.innerHTML =
       "<h1>Models</h1>" +
-      "<p class=\"lead\">Connect an API key for the active provider. Subscription sign-in comes later.</p>" +
+      "<p class=\"lead\">BYOK API keys, or Experimental ChatGPT sign-in via the Codex CLI.</p>" +
       "<div class=\"card\">" +
       "<label for=\"provider-kind\">Provider</label>" +
       "<select id=\"provider-kind\">" +
-      "<option value=\"openai_compatible\">OpenAI-compatible</option>" +
+      "<option value=\"open_ai_compatible\">OpenAI-compatible</option>" +
       "<option value=\"anthropic\">Anthropic</option>" +
       "<option value=\"ollama\">Ollama (local)</option>" +
       "<option value=\"gemini\">Google Gemini</option>" +
       "</select>" +
+      "<label for=\"provider-auth\">Auth mode</label>" +
+      "<select id=\"provider-auth\">" +
+      "<option value=\"api_key\">API key (BYOK)</option>" +
+      "<option value=\"chatgpt\">ChatGPT via Codex CLI (Experimental)</option>" +
+      "</select>" +
+      "<p class=\"hint\">ChatGPT mode only applies when Provider is OpenAI-compatible. Tokens stay in ~/.codex/auth.json — never in config.toml.</p>" +
       "<div class=\"row\"><div><label for=\"model\">Model</label>" +
-      "<input id=\"model\" value=\"" + escapeAttr(p.model || "") + "\" /></div>" +
+      "<input id=\"model\" value=\"" + escapeAttr(p.model || "") + "\" placeholder=\"gpt-5.4-mini\" /></div>" +
       "<div><label for=\"base_url\">Base URL</label>" +
       "<input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" /></div></div>" +
+      "<div id=\"byok-fields\">" +
       "<label for=\"api_key\">API key</label>" +
       "<input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" />" +
-      "<p class=\"hint\">Stored in ~/.config/writing-tools/config.toml</p>" +
-      "<div class=\"actions\"><button class=\"btn\" id=\"save-models\">Save Models</button></div></div>" +
-      "<div class=\"soon\"><strong>Subscription / OAuth</strong> — planned. API keys work today.</div>";
-    $("#provider-kind").value = p.kind || "openai_compatible";
+      "<p class=\"hint\">Stored in ~/.config/writing-tools/config.toml (or set WRITING_TOOLS_API_KEY).</p>" +
+      "</div>" +
+      "<div id=\"chatgpt-fields\" style=\"display:none\">" +
+      "<div class=\"soon\" style=\"border-style:solid\">" +
+      "<strong>Experimental — ChatGPT (Codex CLI)</strong>" +
+      "<p class=\"hint\" style=\"margin:8px 0 0\">Requires <code>codex</code> on PATH. Sign-in opens the Codex browser flow.</p>" +
+      "<p id=\"chatgpt-status-line\" style=\"margin:10px 0 0;font-size:13px\">" + escapeHtml(statusLine) + "</p>" +
+      "<div class=\"actions\" style=\"margin-top:10px\">" +
+      "<button class=\"btn\" id=\"chatgpt-login\">Sign in with ChatGPT</button>" +
+      "<button class=\"btn secondary\" id=\"chatgpt-logout\">Sign out</button>" +
+      "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
+      "<button class=\"btn secondary\" id=\"chatgpt-models\">List Codex models</button>" +
+      "</div>" +
+      "<p class=\"hint\" id=\"chatgpt-models-hint\" style=\"margin-top:8px\"></p>" +
+      "</div></div>" +
+      "<div class=\"actions\"><button class=\"btn\" id=\"save-models\">Save Models</button></div></div>";
+    $("#provider-kind").value = p.kind || "open_ai_compatible";
+    $("#provider-auth").value = auth;
+    function syncAuthUi() {
+      const a = $("#provider-auth").value;
+      $("#byok-fields").style.display = a === "api_key" ? "block" : "none";
+      $("#chatgpt-fields").style.display = a === "chatgpt" ? "block" : "none";
+    }
+    syncAuthUi();
+    $("#provider-auth").onchange = syncAuthUi;
     $("#save-models").onclick = async () => {
       config.provider = {
         kind: $("#provider-kind").value,
         model: $("#model").value.trim(),
         base_url: $("#base_url").value.trim(),
         api_key: $("#api_key").value.trim() || null,
+        auth: $("#provider-auth").value || "api_key",
       };
       await saveConfig();
     };
+    const loginBtn = $("#chatgpt-login");
+    if (loginBtn) {
+      loginBtn.onclick = async () => {
+        setStatus("Opening Codex login…");
+        try {
+          chatgptStatus = await invoke("chatgpt_login");
+          setStatus(chatgptStatus.logged_in ? "ChatGPT signed in" : chatgptStatus.message);
+          renderModels();
+        } catch (e) {
+          setStatus(String(e));
+        }
+      };
+      $("#chatgpt-logout").onclick = async () => {
+        setStatus("Signing out…");
+        try {
+          chatgptStatus = await invoke("chatgpt_logout");
+          setStatus("Signed out");
+          renderModels();
+        } catch (e) {
+          setStatus(String(e));
+        }
+      };
+      $("#chatgpt-refresh").onclick = async () => {
+        await refreshChatgptStatus();
+        renderModels();
+        setStatus("Status refreshed");
+      };
+      $("#chatgpt-models").onclick = async () => {
+        setStatus("Listing Codex models…");
+        try {
+          const models = await invoke("list_chatgpt_models_cmd");
+          $("#chatgpt-models-hint").textContent = "Models: " + models.join(", ");
+          setStatus("Models loaded");
+        } catch (e) {
+          $("#chatgpt-models-hint").textContent = String(e);
+          setStatus(String(e));
+        }
+      };
+    }
   }
 
   function renderCommands() {
@@ -329,6 +412,7 @@ button.btn.danger { background: var(--danger); }
     setStatus("Loading config…");
     try {
       config = await invoke("get_config");
+      await refreshChatgptStatus();
       renderGeneral();
       renderModels();
       renderCommands();

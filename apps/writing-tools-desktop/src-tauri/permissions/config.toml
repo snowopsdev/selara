@@ -12,3 +12,23 @@ commands.allow = ["save_config"]
 identifier = "allow-config-path"
 description = "Read config file path"
 commands.allow = ["config_path"]
+
+[[permission]]
+identifier = "allow-chatgpt-auth-status"
+description = "Read ChatGPT / Codex CLI login status (Experimental)"
+commands.allow = ["chatgpt_auth_status"]
+
+[[permission]]
+identifier = "allow-chatgpt-login"
+description = "Start ChatGPT / Codex CLI login (Experimental)"
+commands.allow = ["chatgpt_login"]
+
+[[permission]]
+identifier = "allow-chatgpt-logout"
+description = "Log out of ChatGPT / Codex CLI (Experimental)"
+commands.allow = ["chatgpt_logout"]
+
+[[permission]]
+identifier = "allow-list-chatgpt-models"
+description = "List ChatGPT Codex model slugs (Experimental)"
+commands.allow = ["list_chatgpt_models_cmd"]

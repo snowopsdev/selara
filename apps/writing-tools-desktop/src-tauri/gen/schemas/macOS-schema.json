@@ -387,6 +387,24 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Read ChatGPT / Codex CLI login status (Experimental)",
+          "type": "string",
+          "const": "allow-chatgpt-auth-status",
+          "markdownDescription": "Read ChatGPT / Codex CLI login status (Experimental)"
+        },
+        {
+          "description": "Start ChatGPT / Codex CLI login (Experimental)",
+          "type": "string",
+          "const": "allow-chatgpt-login",
+          "markdownDescription": "Start ChatGPT / Codex CLI login (Experimental)"
+        },
+        {
+          "description": "Log out of ChatGPT / Codex CLI (Experimental)",
+          "type": "string",
+          "const": "allow-chatgpt-logout",
+          "markdownDescription": "Log out of ChatGPT / Codex CLI (Experimental)"
+        },
+        {
           "description": "Read config file path",
           "type": "string",
           "const": "allow-config-path",
@@ -397,6 +415,12 @@
           "type": "string",
           "const": "allow-get-config",
           "markdownDescription": "Load Writing Tools config"
+        },
+        {
+          "description": "List ChatGPT Codex model slugs (Experimental)",
+          "type": "string",
+          "const": "allow-list-chatgpt-models",
+          "markdownDescription": "List ChatGPT Codex model slugs (Experimental)"
         },
         {
           "description": "Save Writing Tools config",

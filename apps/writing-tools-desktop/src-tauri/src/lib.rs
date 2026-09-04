@@ -3,7 +3,9 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, Runtime, WindowEvent,
 };
+use writing_tools_core::codex_cli::{self, CodexLoginStatus};
 use writing_tools_core::config::AppConfig;
+use writing_tools_core::providers::list_chatgpt_models;
 
 #[tauri::command]
 fn get_config() -> Result<AppConfig, String> {
@@ -22,6 +24,27 @@ fn config_path() -> String {
     AppConfig::default_path().display().to_string()
 }
 
+#[tauri::command]
+fn chatgpt_auth_status() -> Result<CodexLoginStatus, String> {
+    codex_cli::login_status().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn chatgpt_login() -> Result<CodexLoginStatus, String> {
+    // Spawns the Codex CLI browser login flow; may take a while.
+    codex_cli::login().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn chatgpt_logout() -> Result<CodexLoginStatus, String> {
+    codex_cli::logout().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_chatgpt_models_cmd() -> Result<Vec<String>, String> {
+    list_chatgpt_models().await.map_err(|e| e.to_string())
+}
+
 fn show_settings<R: Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
@@ -33,7 +56,15 @@ fn show_settings<R: Runtime>(app: &tauri::AppHandle<R>) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![get_config, save_config, config_path])
+        .invoke_handler(tauri::generate_handler![
+            get_config,
+            save_config,
+            config_path,
+            chatgpt_auth_status,
+            chatgpt_login,
+            chatgpt_logout,
+            list_chatgpt_models_cmd
+        ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
