@@ -13,7 +13,8 @@ Rust workspace: `crates/selara-core` (config, commands, providers), `apps/selara
 | Desktop dist rebuild | `cd apps/selara-desktop && npm run build` |
 
 ## Pull Requests
-Every PR description uses exactly these `##` sections, in this order, each filled with real context (CI fails otherwise, see `.github/workflows/pr-template.yml`):
+- PR title is a conventional commit subject, `type(scope): Subject`. The repo squash-merges, so the title becomes the commit on `main` and drives versioning (CI fails otherwise).
+- Every PR description uses exactly these `##` sections, in this order, each filled with real context (CI fails otherwise, see `.github/workflows/pr-template.yml`):
 
 ```markdown
 ## What Problem This Solves
