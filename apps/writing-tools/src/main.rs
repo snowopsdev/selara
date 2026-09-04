@@ -6,8 +6,11 @@ use writing_tools_core::commands::{find_command, run_command};
 use writing_tools_core::config::AppConfig;
 use writing_tools_core::providers::provider_from_config;
 
+#[cfg(target_os = "macos")]
+mod serve;
+
 #[derive(Parser, Debug)]
-#[command(name = "writing-tools", about = "Cross-platform Writing Tools (Rust core spike)")]
+#[command(name = "writing-tools", about = "Cross-platform Writing Tools (Rust)")]
 struct Cli {
     /// Override config path (default: ~/.config/writing-tools/config.toml)
     #[arg(long, global = true)]
@@ -34,24 +37,48 @@ enum Commands {
         #[arg(long)]
         instruct: Option<String>,
     },
+    /// Start the desktop shell (global hotkey + picker UI). macOS only for now.
+    Serve,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
     let cli = Cli::parse();
-    let config_path = cli
-        .config
-        .unwrap_or_else(AppConfig::default_path);
+    let config_path = cli.config.clone().unwrap_or_else(AppConfig::default_path);
 
     match cli.command {
+        Commands::Serve => {
+            #[cfg(target_os = "macos")]
+            {
+                serve::run(config_path)?;
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                anyhow::bail!("`serve` is currently only supported on macOS");
+            }
+        }
+        other => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("tokio runtime")?;
+            rt.block_on(async_cli(other, config_path))?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn async_cli(command: Commands, config_path: PathBuf) -> Result<()> {
+    match command {
         Commands::Init => {
             let cfg = AppConfig::load_or_init(&config_path)?;
             println!("config: {}", config_path.display());
             println!("provider: {:?} / {}", cfg.provider.kind, cfg.provider.model);
+            println!("hotkey: {}", cfg.hotkey);
             println!("commands: {}", cfg.commands.len());
         }
         Commands::ListCommands => {
@@ -84,6 +111,7 @@ async fn main() -> Result<()> {
             let out = run_command(provider.as_ref(), command, &input, instruct.as_deref()).await?;
             println!("{out}");
         }
+        Commands::Serve => unreachable!("handled in main"),
     }
 
     Ok(())

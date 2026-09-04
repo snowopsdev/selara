@@ -26,7 +26,7 @@ pub struct ProviderConfig {
 }
 
 fn default_hotkey() -> String {
-    "ctrl+space".into()
+    "ctrl+shift+space".into()
 }
 
 impl Default for AppConfig {

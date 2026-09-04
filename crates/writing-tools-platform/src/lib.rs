@@ -1,9 +1,14 @@
 //! OS integration surface. Desktop shells implement these traits per platform.
 //! The first spike ships a no-op / stdin-stdout backend so core can be tested
 //! without Accessibility permissions.
+//!
+//! On macOS, enable the real backend via [`macos`].
 
 use anyhow::Result;
 use async_trait::async_trait;
+
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 #[derive(Debug, Clone)]
 pub struct SelectionSnapshot {
