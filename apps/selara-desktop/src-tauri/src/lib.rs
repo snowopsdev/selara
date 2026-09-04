@@ -100,6 +100,11 @@ pub fn run() {
             let _tray = tray.build(app)?;
 
             if let Some(win) = app.get_webview_window("settings") {
+                #[cfg(target_os = "macos")]
+                {
+                    use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+                    let _ = apply_vibrancy(&win, NSVisualEffectMaterial::Sidebar, None, None);
+                }
                 #[cfg(debug_assertions)]
                 {
                     win.open_devtools();
