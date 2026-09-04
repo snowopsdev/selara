@@ -1,0 +1,20 @@
+[package]
+name = "writing-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI / desktop shell for Writing Tools"
+
+[[bin]]
+name = "writing-tools"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+dirs.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+writing-tools-core = { path = "../../crates/writing-tools-core" }
+writing-tools-platform = { path = "../../crates/writing-tools-platform" }

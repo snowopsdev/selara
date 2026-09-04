@@ -1,0 +1,11 @@
+[package]
+name = "writing-tools-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OS shell traits for hotkeys, selection, and clipboard"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
