@@ -40,11 +40,7 @@ pub fn login_status() -> Result<CodexLoginStatus, CoreError> {
         })?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let message = if !stdout.is_empty() {
-        stdout
-    } else {
-        stderr
-    };
+    let message = if !stdout.is_empty() { stdout } else { stderr };
     let logged_in = output.status.success();
     let via_chatgpt = message.to_lowercase().contains("chatgpt");
     let email = if logged_in {

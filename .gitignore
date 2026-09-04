@@ -1,4 +1,33 @@
+# Rust
 /target
+**/target/
 **/*.rs.bk
-.DS_Store
+
+# Env / secrets
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*secret*
+*credentials*
+auth.json
+
+# Local config that may contain API keys (keep examples if added later)
+**/config.local.toml
+**/.selara/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node / Tauri frontend (also covered under apps/selara-desktop/.gitignore)
+node_modules/

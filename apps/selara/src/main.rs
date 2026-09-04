@@ -9,7 +9,10 @@ use selara_core::config::AppConfig;
 mod serve;
 
 #[derive(Parser, Debug)]
-#[command(name = "selara", about = "Cross-platform Selara writing assistant (Rust)")]
+#[command(
+    name = "selara",
+    about = "Cross-platform Selara writing assistant (Rust)"
+)]
 struct Cli {
     /// Override config path (default: ~/.config/selara/config.toml)
     #[arg(long, global = true)]

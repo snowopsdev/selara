@@ -2,9 +2,9 @@
 
 Cross-platform **Selara** writing assistant: a Rust core for LLM writing commands, plus thin OS shells for hotkeys and text selection.
 
-*(Local product rename from Writing Tools; GitHub repo: [`snowopsdev/selara`](https://github.com/snowopsdev/selara).)*
+GitHub: [`snowopsdev/selara`](https://github.com/snowopsdev/selara).
 
-Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools). This is a clean-room architecture spike, not a line-for-line port. Original prompts and code.
+Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools). This is a clean-room architecture spike, not a line-for-line port.
 
 ## Layout
 
@@ -22,16 +22,6 @@ flowchart LR
 | `apps/selara` | CLI + macOS `serve` desktop shell |
 | `apps/selara-desktop` | Tauri tray + Settings UI |
 
-## Config
-
-Default path: `~/.config/selara/config.toml`.
-
-- Override directory: `SELARA_CONFIG_DIR` (falls back to legacy `WRITING_TOOLS_CONFIG_DIR`)
-- API key env: `SELARA_API_KEY` (falls back to legacy `WRITING_TOOLS_API_KEY`)
-- **Migration:** on first load, if the Selara config is missing but `~/.config/writing-tools/config.toml` exists, it is copied into the Selara path (one-time message printed).
-
-Codex / ChatGPT auth paths (`~/.codex`) are unchanged.
-
 ## Quick start (CLI)
 
 ```bash
@@ -40,7 +30,7 @@ export SELARA_API_KEY=sk-...   # or ollama / whatever your provider needs
 cargo run -p selara -- run proofread --text "Their going to the store tommorow."
 ```
 
-Ollama example: edit `~/.config/selara/config.toml`:
+Ollama example — edit `~/.config/selara/config.toml`:
 
 ```toml
 [provider]
@@ -54,6 +44,16 @@ api_key = "ollama"
 cargo run -p selara -- list-commands
 cargo run -p selara -- run summary --text "$(pbpaste)"
 ```
+
+## Config
+
+Default path: `~/.config/selara/config.toml`.
+
+- Override directory: `SELARA_CONFIG_DIR` (falls back to legacy `WRITING_TOOLS_CONFIG_DIR`)
+- API key env: `SELARA_API_KEY` (falls back to legacy `WRITING_TOOLS_API_KEY`)
+- **Migration:** on first load, if the Selara config is missing but `~/.config/writing-tools/config.toml` exists, it is copied into the Selara path (one-time message printed).
+
+Codex / ChatGPT auth paths (`~/.codex`) are unchanged.
 
 ## macOS desktop shell (`serve`)
 
@@ -115,20 +115,6 @@ Supported tokens: `ctrl`/`control`, `shift`, `alt`/`option`, `cmd`/`command`/`su
 - Global hotkeys need the `serve` process running (no LaunchAgent yet).
 - Hotkey conflicts: if registration fails or nothing fires, pick another chord in config.
 
-## Status
-
-**Done:** workspace builds, config, builtin commands, OpenAI-compatible + Gemini providers, CLI `init` / `list-commands` / `run`, macOS `serve` (hotkey + picker + replace/popup), Tauri Settings tray.
-
-**Next:**
-
-1. LaunchAgent / menu-bar stay-resident polish
-2. Windows / Linux shells implementing the same platform traits
-3. GitHub repository rename / OSS polish
-
-## License
-
-MIT
-
 ## Desktop Settings (Tauri, macOS)
 
 Menu-bar app for Settings — no text selection required. The egui `serve` overlay still owns the hotkey picker for now.
@@ -146,3 +132,21 @@ Tray: Open Settings (or left-click the icon). Close hides Settings; Quit exits.
 Sections: General (language + hotkey), Models (API keys), Commands (CRUD + duplicate), Limits.
 
 Config path: `~/.config/selara/config.toml`.
+
+## Status
+
+**Done:** workspace builds, config, builtin commands, OpenAI-compatible + Gemini providers, CLI `init` / `list-commands` / `run`, macOS `serve` (hotkey + picker + replace/popup), Tauri Settings tray.
+
+**Next:**
+
+1. LaunchAgent / menu-bar stay-resident polish
+2. Windows / Linux shells implementing the same platform traits
+
+## Contributing / security / license
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — build, test, PR flow (CI + Codex review)
+- [SECURITY.md](SECURITY.md) — report vulnerabilities via GitHub Security Advisories
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
+- [LICENSE](LICENSE) — MIT
+
+CI runs on Linux. macOS Accessibility, global hotkeys, `serve`, and Tauri UI still need local macOS testing when those areas change.

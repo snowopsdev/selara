@@ -13,7 +13,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Aj Nieves"]
-repository = "https://github.com/snowopsdev/writing-tools-rs"
+repository = "https://github.com/snowopsdev/selara"
 
 [workspace.dependencies]
 anyhow = "1"
