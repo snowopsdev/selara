@@ -11,13 +11,39 @@ use crate::error::CoreError;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
-    /// Serde default is `open_ai_compatible`; also accept UI spelling `openai_compatible`.
-    #[serde(alias = "openai_compatible")]
+    /// Any OpenAI-style `/chat/completions` endpoint (OpenAI, Ollama, LM Studio, vLLM, ...).
+    /// Also accepts the UI spelling `openai_compatible` and the retired `ollama` kind.
+    #[serde(alias = "openai_compatible", alias = "ollama")]
     OpenAiCompatible,
-    Ollama,
-    Gemini,
+    /// OpenRouter: OpenAI-compatible wire format at `https://openrouter.ai/api/v1`.
+    OpenRouter,
     Anthropic,
 }
+
+impl ProviderKind {
+    /// Base URL used when the config leaves `base_url` empty.
+    pub fn default_base_url(self) -> &'static str {
+        match self {
+            ProviderKind::OpenAiCompatible => "https://api.openai.com/v1",
+            ProviderKind::OpenRouter => "https://openrouter.ai/api/v1",
+            ProviderKind::Anthropic => "https://api.anthropic.com",
+        }
+    }
+
+    /// Effective base URL: the configured one, or the kind's default when blank.
+    pub fn resolve_base_url(self, configured: &str) -> String {
+        let trimmed = configured.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            self.default_base_url().to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+const OPENROUTER_REFERER: &str = "https://github.com/snowopsdev/selara";
+const OPENROUTER_TITLE: &str = "Selara";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
@@ -34,6 +60,8 @@ pub struct OpenAiCompatibleProvider {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// Extra request headers (OpenRouter attribution, for example).
+    pub extra_headers: Vec<(String, String)>,
 }
 
 #[async_trait]
@@ -54,6 +82,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
         if !self.api_key.is_empty() {
             builder = builder.bearer_auth(&self.api_key);
         }
+        for (name, value) in &self.extra_headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
 
         let resp = builder.send().await?;
         let status = resp.status();
@@ -70,38 +101,6 @@ impl LlmProvider for OpenAiCompatibleProvider {
     }
 }
 
-/// Gemini uses a different REST shape; keep a thin adapter so the app shell can switch providers later.
-pub struct GeminiProvider {
-    pub api_key: String,
-    pub model: String,
-}
-
-#[async_trait]
-impl LlmProvider for GeminiProvider {
-    async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, self.api_key
-        );
-        let client = reqwest::Client::new();
-        let prompt = format!("{}\n\n{}", req.system, req.user);
-        let body = json!({
-            "contents": [{"parts": [{"text": prompt}]}]
-        });
-        let resp = client.post(url).json(&body).send().await?;
-        let status = resp.status();
-        let value: serde_json::Value = resp.json().await?;
-        if !status.is_success() {
-            return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
-        }
-        value
-            .pointer("/candidates/0/content/parts/0/text")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .ok_or_else(|| CoreError::Provider(format!("unexpected Gemini response: {value}")))
-    }
-}
-
 pub struct AnthropicProvider {
     pub api_key: String,
     pub model: String,
@@ -111,11 +110,7 @@ pub struct AnthropicProvider {
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
-        let base = if self.base_url.trim().is_empty() {
-            "https://api.anthropic.com".to_string()
-        } else {
-            self.base_url.trim_end_matches('/').to_string()
-        };
+        let base = ProviderKind::Anthropic.resolve_base_url(&self.base_url);
         let url = format!("{base}/v1/messages");
         let client = reqwest::Client::new();
         let body = json!({
@@ -129,7 +124,7 @@ impl LlmProvider for AnthropicProvider {
         let resp = client
             .post(url)
             .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", ANTHROPIC_VERSION)
             .json(&body)
             .send()
             .await?;
@@ -337,29 +332,261 @@ pub fn provider_from_config(
     model: &str,
     api_key: &str,
 ) -> Box<dyn LlmProvider> {
+    let base_url = kind.resolve_base_url(base_url);
     match kind {
-        ProviderKind::OpenAiCompatible | ProviderKind::Ollama => {
-            Box::new(OpenAiCompatibleProvider {
-                base_url: base_url.to_string(),
-                api_key: api_key.to_string(),
-                model: model.to_string(),
-            })
-        }
-        ProviderKind::Gemini => Box::new(GeminiProvider {
+        ProviderKind::OpenAiCompatible => Box::new(OpenAiCompatibleProvider {
+            base_url,
             api_key: api_key.to_string(),
             model: model.to_string(),
+            extra_headers: Vec::new(),
+        }),
+        ProviderKind::OpenRouter => Box::new(OpenAiCompatibleProvider {
+            base_url,
+            api_key: api_key.to_string(),
+            model: model.to_string(),
+            extra_headers: openrouter_headers(),
         }),
         ProviderKind::Anthropic => Box::new(AnthropicProvider {
             api_key: api_key.to_string(),
             model: model.to_string(),
-            base_url: base_url.to_string(),
+            base_url,
         }),
     }
+}
+
+fn openrouter_headers() -> Vec<(String, String)> {
+    vec![
+        ("HTTP-Referer".to_string(), OPENROUTER_REFERER.to_string()),
+        ("X-Title".to_string(), OPENROUTER_TITLE.to_string()),
+    ]
+}
+
+/// List model ids for a BYOK provider. Doubles as a connection test: a bad key or
+/// URL surfaces as a `CoreError::Provider` with the HTTP status.
+pub async fn list_provider_models(
+    kind: ProviderKind,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, CoreError> {
+    let base = kind.resolve_base_url(base_url);
+    let client = reqwest::Client::new();
+    let mut models = match kind {
+        ProviderKind::OpenAiCompatible | ProviderKind::OpenRouter => {
+            let mut builder = client.get(format!("{base}/models"));
+            if !api_key.is_empty() {
+                builder = builder.bearer_auth(api_key);
+            }
+            if kind == ProviderKind::OpenRouter {
+                for (name, value) in openrouter_headers() {
+                    builder = builder.header(name, value);
+                }
+            }
+            let value = send_json(builder, "list models").await?;
+            let mut ids = parse_openai_models(&value)?;
+            if kind == ProviderKind::OpenAiCompatible {
+                ids.retain(|id| looks_like_chat_model(id));
+            }
+            ids
+        }
+        ProviderKind::Anthropic => {
+            let mut ids = Vec::new();
+            let mut after: Option<String> = None;
+            // Anthropic pages with `has_more` / `last_id`; cap pages defensively.
+            for _ in 0..10 {
+                let mut builder = client
+                    .get(format!("{base}/v1/models"))
+                    .query(&[("limit", "1000")])
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", ANTHROPIC_VERSION);
+                if let Some(id) = &after {
+                    builder = builder.query(&[("after_id", id.as_str())]);
+                }
+                let value = send_json(builder, "list models").await?;
+                let (page, next) = parse_anthropic_models(&value)?;
+                ids.extend(page);
+                match next {
+                    Some(id) => after = Some(id),
+                    None => break,
+                }
+            }
+            ids
+        }
+    };
+    models.sort();
+    models.dedup();
+    if models.is_empty() {
+        return Err(CoreError::Provider(
+            "the provider returned no models for this key".into(),
+        ));
+    }
+    Ok(models)
+}
+
+async fn send_json(
+    builder: reqwest::RequestBuilder,
+    what: &str,
+) -> Result<serde_json::Value, CoreError> {
+    let resp = builder.send().await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        let detail: String = text.chars().take(300).collect();
+        return Err(CoreError::Provider(format!(
+            "{what} HTTP {status}: {detail}"
+        )));
+    }
+    serde_json::from_str(&text)
+        .map_err(|e| CoreError::Provider(format!("{what}: invalid JSON ({e})")))
+}
+
+/// `{ "data": [ { "id": ... } ] }` (OpenAI, OpenRouter, Ollama's compat layer).
+pub fn parse_openai_models(value: &serde_json::Value) -> Result<Vec<String>, CoreError> {
+    let items = value
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| value.get("models").and_then(|v| v.as_array()))
+        .ok_or_else(|| CoreError::Provider(format!("unexpected models response: {value}")))?;
+    Ok(items
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
+        .collect())
+}
+
+/// `{ "data": [ { "id": ... } ], "has_more": bool, "last_id": ... }`. Returns the ids
+/// on this page and the cursor for the next page when there is one.
+pub fn parse_anthropic_models(
+    value: &serde_json::Value,
+) -> Result<(Vec<String>, Option<String>), CoreError> {
+    let ids = parse_openai_models(value)?;
+    let has_more = value
+        .get("has_more")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let next = if has_more {
+        value
+            .get("last_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+    Ok((ids, next))
+}
+
+/// OpenAI's `/models` mixes in audio, image, embedding, and moderation models.
+/// Keep the list to things that answer a chat completion.
+pub fn looks_like_chat_model(id: &str) -> bool {
+    const NOT_CHAT: [&str; 14] = [
+        "embedding",
+        "whisper",
+        "tts",
+        "dall-e",
+        "moderation",
+        "audio",
+        "realtime",
+        "transcribe",
+        "image",
+        "babbage",
+        "davinci",
+        "search",
+        "similarity",
+        "sora",
+    ];
+    let lower = id.to_ascii_lowercase();
+    !NOT_CHAT.iter().any(|needle| lower.contains(needle))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_kind_accepts_retired_ollama_alias() {
+        let kind: ProviderKind = serde_json::from_str("\"ollama\"").unwrap();
+        assert_eq!(kind, ProviderKind::OpenAiCompatible);
+        let kind: ProviderKind = serde_json::from_str("\"open_router\"").unwrap();
+        assert_eq!(kind, ProviderKind::OpenRouter);
+        assert!(serde_json::from_str::<ProviderKind>("\"gemini\"").is_err());
+    }
+
+    #[test]
+    fn provider_kind_round_trips_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::OpenRouter).unwrap(),
+            "\"open_router\""
+        );
+    }
+
+    #[test]
+    fn resolve_base_url_falls_back_to_default_and_trims() {
+        assert_eq!(
+            ProviderKind::Anthropic.resolve_base_url("  "),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            ProviderKind::OpenRouter.resolve_base_url(""),
+            "https://openrouter.ai/api/v1"
+        );
+        assert_eq!(
+            ProviderKind::OpenAiCompatible.resolve_base_url("http://localhost:11434/v1/"),
+            "http://localhost:11434/v1"
+        );
+    }
+
+    #[test]
+    fn parses_openai_style_model_list() {
+        let v = serde_json::json!({"object":"list","data":[{"id":"gpt-4o-mini"},{"id":"gpt-4o"}]});
+        assert_eq!(
+            parse_openai_models(&v).unwrap(),
+            vec!["gpt-4o-mini", "gpt-4o"]
+        );
+        let bad = serde_json::json!({"error":{"message":"nope"}});
+        assert!(parse_openai_models(&bad).is_err());
+    }
+
+    #[test]
+    fn parses_anthropic_model_pages() {
+        let page = serde_json::json!({
+            "data":[{"type":"model","id":"claude-opus-5","display_name":"Claude Opus 5"}],
+            "has_more":true,"first_id":"claude-opus-5","last_id":"claude-opus-5"
+        });
+        let (ids, next) = parse_anthropic_models(&page).unwrap();
+        assert_eq!(ids, vec!["claude-opus-5"]);
+        assert_eq!(next.as_deref(), Some("claude-opus-5"));
+        let last = serde_json::json!({"data":[{"id":"claude-haiku-4-5"}],"has_more":false});
+        let (ids, next) = parse_anthropic_models(&last).unwrap();
+        assert_eq!(ids, vec!["claude-haiku-4-5"]);
+        assert!(next.is_none());
+    }
+
+    /// Live check against OpenRouter's public models endpoint (no key needed).
+    /// Run with `cargo test -p selara-core -- --ignored openrouter`.
+    #[tokio::test]
+    #[ignore = "hits the network"]
+    async fn openrouter_lists_models_without_a_key() {
+        let models = list_provider_models(ProviderKind::OpenRouter, "", "")
+            .await
+            .unwrap();
+        assert!(
+            models.iter().any(|m| m.starts_with("anthropic/")),
+            "{models:?}"
+        );
+        assert!(
+            models.iter().any(|m| m.starts_with("openai/")),
+            "{models:?}"
+        );
+    }
+
+    #[test]
+    fn chat_model_filter_drops_non_chat_ids() {
+        assert!(looks_like_chat_model("gpt-4o-mini"));
+        assert!(looks_like_chat_model("o4-mini"));
+        assert!(!looks_like_chat_model("text-embedding-3-small"));
+        assert!(!looks_like_chat_model("whisper-1"));
+        assert!(!looks_like_chat_model("gpt-4o-realtime-preview"));
+        assert!(!looks_like_chat_model("dall-e-3"));
+    }
 
     #[test]
     fn sse_parser_extracts_output_text_delta() {

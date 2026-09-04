@@ -14,6 +14,7 @@ pub use commands::{builtin_commands, run_command, CommandKind, WritingCommand};
 pub use config::{AppConfig, LimitsConfig, ProviderAuth, ProviderConfig};
 pub use error::CoreError;
 pub use providers::{
-    list_chatgpt_models, parse_sse_output_text_delta, provider_from_config, AnthropicProvider,
-    ChatGptCodexProvider, CompletionRequest, LlmProvider, OpenAiCompatibleProvider, ProviderKind,
+    list_chatgpt_models, list_provider_models, parse_sse_output_text_delta, provider_from_config,
+    AnthropicProvider, ChatGptCodexProvider, CompletionRequest, LlmProvider,
+    OpenAiCompatibleProvider, ProviderKind,
 };

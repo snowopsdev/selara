@@ -13,6 +13,7 @@
     "allow-chatgpt-auth-status",
     "allow-chatgpt-login",
     "allow-chatgpt-logout",
-    "allow-list-chatgpt-models"
+    "allow-list-chatgpt-models",
+    "allow-list-provider-models"
   ]
 }
