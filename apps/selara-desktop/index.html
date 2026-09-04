@@ -129,7 +129,7 @@ button.btn.danger { background: var(--danger); }
   background: transparent; text-transform: none; letter-spacing: 0;
 }
 .status-row {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 10px; flex-wrap: nowrap;
   font-size: 13px; margin: 4px 0 12px; color: var(--text);
 }
 .status-dot {
@@ -140,10 +140,13 @@ button.btn.danger { background: var(--danger); }
 .status-dot.bad { background: var(--danger); box-shadow: 0 0 0 3px rgba(215,0,21,0.18); }
 .status-dot.unknown { background: #ff9f0a; box-shadow: 0 0 0 3px rgba(255,159,10,0.18); }
 .email-inline {
-  display: inline-flex; align-items: center; gap: 6px;
-  color: var(--muted); margin-left: 4px;
+  display: inline-flex; align-items: center; gap: 8px;
+  color: var(--muted); margin-left: 0; min-width: 0;
 }
-.email-inline .email-value { color: var(--muted); font-variant-numeric: tabular-nums; }
+.email-inline .email-value {
+  color: var(--muted); letter-spacing: 0.02em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 button.icon-btn {
   border: 1px solid var(--border); background: transparent; color: var(--muted);
   border-radius: 6px; width: 28px; height: 28px; padding: 0;
@@ -286,12 +289,12 @@ select:disabled { opacity: 0.65; cursor: not-allowed; }
     if (!email) return "";
     const at = email.indexOf("@");
     if (at <= 0) return "••••••••";
-    const local = email.slice(0, at);
     const domain = email.slice(at + 1);
-    const localMask = local[0] + "•".repeat(Math.max(2, Math.min(local.length - 1, 8)));
     const dot = domain.lastIndexOf(".");
+    // Hut: bullet mask like ••••••••@••••.com (no leading letter — reads truncated otherwise).
+    const localMask = "•".repeat(8);
     const domMask = dot > 0
-      ? ("•".repeat(Math.max(2, Math.min(dot, 6))) + domain.slice(dot))
+      ? ("•".repeat(Math.max(4, Math.min(dot, 6))) + domain.slice(dot))
       : "••••";
     return localMask + "@" + domMask;
   }
