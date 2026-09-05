@@ -107,7 +107,14 @@ async fn async_cli(command: Commands, config_path: PathBuf) -> Result<()> {
             };
             let command = find_command(&cfg.commands, &id)?;
             let provider = cfg.build_provider()?;
-            let out = run_command(provider.as_ref(), command, &input, instruct.as_deref()).await?;
+            let out = run_command(
+                provider.as_ref(),
+                command,
+                &input,
+                instruct.as_deref(),
+                Some(&cfg.language),
+            )
+            .await?;
             println!("{out}");
         }
         Commands::Serve => unreachable!("handled in main"),

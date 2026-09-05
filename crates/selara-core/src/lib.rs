@@ -10,7 +10,9 @@ pub mod providers;
 
 pub use chatgpt_auth::ChatGptAuth;
 pub use codex_cli::CodexLoginStatus;
-pub use commands::{builtin_commands, run_command, CommandKind, WritingCommand};
+pub use commands::{
+    build_system_prompt, builtin_commands, run_command, CommandKind, WritingCommand,
+};
 pub use config::{AppConfig, LimitsConfig, ProviderAuth, ProviderConfig};
 pub use error::CoreError;
 pub use providers::{

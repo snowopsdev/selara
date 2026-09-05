@@ -21,11 +21,11 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 - **Works everywhere you can select text.** A global hotkey (default `ctrl+shift+space`) reads the selection through macOS Accessibility, with a clipboard fallback for apps that do not expose it.
 - **Replace or popup.** Replace commands (Proofread, Rewrite, Friendly, Professional, Concise) write the result back over the selection. Popup commands (Summary, Key Points, Table) open a scrollable result window with a copy button.
 - **Your prompts.** Every command is a labeled prompt. Edit the built-ins, add your own, duplicate one to make a variation, and search the list.
-- **Per-command hotkeys.** Give a command its own shortcut and it runs on the selection immediately, skipping the picker and its confirmations. Only the hard maximum applies on that path.
+- **Per-command hotkeys.** Give a command its own shortcut and it runs on the selection immediately, skipping the picker. If the selection trips a size limit, the picker opens with the warning and the command runs once you confirm.
 - **Any provider.** OpenAI-compatible `/chat/completions` (OpenAI, Ollama, LM Studio, vLLM), the Anthropic Messages API, or OpenRouter. Leave the base URL blank for the provider default or point it at a local server.
 - **Model discovery.** Load the model list straight from the provider. A bad key or URL shows up right there, so it doubles as a connection test.
 - **ChatGPT via Codex (experimental).** Reuse an existing ChatGPT subscription by signing in with the Codex CLI. Tokens stay in Codex's own auth store, never in Selara's config.
-- **Size limits.** A soft warning and a replace caution in the picker, plus a hard maximum that applies everywhere, so a stray select-all never sends 100k characters to a metered API.
+- **Size limits.** A soft warning, a replace caution, and a hard maximum, so a stray select-all never sends 100k characters to a metered API. They apply to picker and shortcut runs alike.
 - **Live config.** Everything lives in one TOML file. The `serve` process watches it and re-registers hotkeys within about a second of a save from the Settings app.
 - **Menu-bar Settings app.** A Tauri tray app with General, Models, Commands, and Limits tabs. No Dock icon, closes to the tray.
 - **Scriptable CLI.** `selara init`, `selara list-commands`, and `selara run <command>` for pipelines and quick checks.
@@ -90,7 +90,7 @@ Every tab writes to the same `config.toml`. If `serve` is running, saved changes
 
 ### General
 
-The global shortcut that opens the picker, plus a language code. The language value is saved to config but is not yet included in prompts, so changing it has no effect on results today.
+The global shortcut that opens the picker, plus a preferred language code. The language is added to every prompt as a hint: the model replies in that language unless the selected text is clearly written in another one, in which case it keeps the text's language.
 
 <img alt="General tab with the Language field set to en and the Shortcut field set to ctrl+shift+space" src="docs/screenshots/settings-general.png" width="820">
 
@@ -118,7 +118,7 @@ Click a row to edit it. The editor holds the label, the replace-or-popup mode, t
 
 ### Limits
 
-Guard rails for large selections. Set any value to `0` to disable it. The soft warn and replace caution are confirmations shown in the picker. A per-command hotkey bypasses both and only honors the hard maximum.
+Guard rails for large selections. Set any value to `0` to disable it. The soft warn and replace caution are confirmations shown in the picker. A per-command hotkey that trips one opens the picker with the warning and runs the command after you confirm.
 
 | Setting | Default | Effect |
 | --- | --- | --- |

@@ -50,6 +50,8 @@ struct ServeApp {
     soft_warn_acked: bool,
     /// Replace-size warn acknowledged for the current selection.
     replace_warn_acked: bool,
+    /// Command fired by its own shortcut that is waiting on a picker confirmation.
+    pending_direct: Option<WritingCommand>,
     settings_status: String,
     job_rx: Receiver<JobResult>,
     job_tx: Sender<JobResult>,
@@ -96,6 +98,7 @@ impl ServeApp {
             target_pid: None,
             soft_warn_acked: false,
             replace_warn_acked: false,
+            pending_direct: None,
             settings_status: String::new(),
             job_rx,
             job_tx,
@@ -214,6 +217,7 @@ impl ServeApp {
         self.target_pid = frontmost_pid();
         self.soft_warn_acked = false;
         self.replace_warn_acked = false;
+        self.pending_direct = None;
         match self.runtime.block_on(self.selection.read_selection()) {
             Ok(Some(snap)) => {
                 self.captured_text = snap.text;
@@ -295,12 +299,20 @@ then restart `selara serve`."
         };
         match self.capture_selection() {
             Ok(true) => {
-                // Direct shortcuts skip soft/replace confirms; hard max still applies.
-                self.soft_warn_acked = true;
-                self.replace_warn_acked = true;
                 self.show_window(ctx, true);
-                eprintln!("selara: command hotkey `{}` → running", cmd.id);
-                self.start_command(cmd);
+                if self.needs_confirmation(&cmd) {
+                    // Same rails as the picker: show it with the banner and run
+                    // the command once the user confirms.
+                    eprintln!(
+                        "selara: command hotkey `{}` → waiting for confirmation",
+                        cmd.id
+                    );
+                    self.pending_direct = Some(cmd);
+                    self.phase = UiPhase::Picker;
+                } else {
+                    eprintln!("selara: command hotkey `{}` → running", cmd.id);
+                    self.start_command(cmd);
+                }
             }
             Ok(false) => {
                 self.phase = UiPhase::Error {
@@ -320,7 +332,16 @@ Select text in another app, then press its shortcut again.",
         }
     }
 
+    /// True when the picker would show a soft-warn or replace-caution banner
+    /// for this command on the current selection. The hard max is checked by
+    /// `start_command` and is never skippable.
+    fn needs_confirmation(&self, cmd: &WritingCommand) -> bool {
+        self.needs_soft_warn()
+            || (matches!(cmd.kind, CommandKind::Replace) && self.needs_replace_warn())
+    }
+
     fn hide(&mut self, ctx: &egui::Context) {
+        self.pending_direct = None;
         self.phase = UiPhase::Hidden;
         self.show_window(ctx, false);
     }
@@ -345,6 +366,8 @@ Select text in another app, then press its shortcut again.",
     }
 
     fn start_command(&mut self, cmd: WritingCommand) {
+        // Picking a command by hand supersedes any shortcut-triggered one.
+        self.pending_direct = None;
         if self.over_hard_max() {
             let max = self.config.limits.hard_max_chars;
             self.phase = UiPhase::Error {
@@ -386,7 +409,8 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
         self.runtime.spawn(async move {
             let result = async {
                 let provider = cfg.build_provider()?;
-                let out = run_command(provider.as_ref(), &cmd, &input, None).await?;
+                let out =
+                    run_command(provider.as_ref(), &cmd, &input, None, Some(&cfg.language)).await?;
                 Ok::<_, anyhow::Error>((cmd.kind, cmd.label, out))
             }
             .await;
@@ -543,6 +567,12 @@ impl eframe::App for ServeApp {
                 UiPhase::Picker => {
                     let chars = self.selection_chars();
                     ui.label(format!("Selection ({chars} chars)"));
+                    if let Some(pending) = &self.pending_direct {
+                        ui.small(format!(
+                            "{} was triggered by its shortcut and will run once you confirm below.",
+                            pending.label
+                        ));
+                    }
                     let preview: String = self.captured_text.chars().take(220).collect();
                     ui.small(if self.captured_text.chars().count() > 220 {
                         format!("{preview}…")
@@ -694,6 +724,18 @@ impl eframe::App for ServeApp {
         }
         if ack_replace {
             self.replace_warn_acked = true;
+        }
+        if ack_soft || ack_replace {
+            // A shortcut-triggered command runs as soon as its last rail is cleared.
+            let ready = self
+                .pending_direct
+                .as_ref()
+                .is_some_and(|cmd| !self.needs_confirmation(cmd));
+            if ready {
+                if let Some(cmd) = self.pending_direct.take() {
+                    self.start_command(cmd);
+                }
+            }
         }
         if open_settings {
             self.settings_status.clear();
