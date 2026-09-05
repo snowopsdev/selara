@@ -5,7 +5,7 @@ Thanks for your interest in contributing. This document covers how to build, tes
 ## Start here
 
 1. **Clone** — `git clone https://github.com/snowopsdev/selara.git && cd selara`
-2. **Test** — `cargo test --workspace` (on macOS also: `cargo run -p selara-desktop` for Settings)
+2. **Test** — `cargo test --workspace` (on macOS also: `cd apps/selara-desktop && npx tauri dev` for Settings)
 3. **PR** — branch from `main`, open a PR using the five-section template, wait for CI
 
 ## Prerequisites
@@ -24,10 +24,10 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
-macOS Settings tray (one-liner):
+macOS Settings tray (one-liner, starts the Vite dev server the debug build loads from):
 
 ```bash
-cargo run -p selara-desktop
+cd apps/selara-desktop && npx tauri dev
 ```
 
 (`serve` / hotkeys still need a separate `cargo run -p selara -- serve`.)
