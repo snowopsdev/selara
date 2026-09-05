@@ -112,6 +112,9 @@ pub async fn run_command(
     custom_instruction: Option<&str>,
     language: Option<&str>,
 ) -> Result<String, CoreError> {
+    if input.trim().is_empty() {
+        return Err(CoreError::EmptyInput);
+    }
     let system = build_system_prompt(command, custom_instruction, language);
 
     provider
@@ -183,5 +186,31 @@ mod tests {
             .find("Additional user instruction: Keep it short.")
             .unwrap();
         assert!(lang < extra);
+    }
+
+    struct EchoProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for EchoProvider {
+        async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+            Ok(req.user)
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_and_whitespace_input_are_rejected() {
+        for input in ["", "   ", "\n\t"] {
+            let err = run_command(&EchoProvider, &cmd(), input, None, None)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, CoreError::EmptyInput),
+                "expected EmptyInput for {input:?}, got {err}"
+            );
+        }
+        let out = run_command(&EchoProvider, &cmd(), "hello", None, None)
+            .await
+            .unwrap();
+        assert_eq!(out, "hello");
     }
 }

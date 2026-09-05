@@ -6,6 +6,8 @@ pub enum CoreError {
     Config(String),
     #[error("unknown command: {0}")]
     UnknownCommand(String),
+    #[error("empty input: provide text to transform")]
+    EmptyInput,
     #[error("provider error: {0}")]
     Provider(String),
     #[error(transparent)]

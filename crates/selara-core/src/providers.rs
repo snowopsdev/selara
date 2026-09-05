@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -7,6 +9,82 @@ use crate::chatgpt_auth::{
     ChatGptAuth, CODEX_MODELS_URL, CODEX_ORIGINATOR, CODEX_RESPONSES_URL, CODEX_USER_AGENT,
 };
 use crate::error::CoreError;
+
+/// Fail fast on a black hole, but do not cap a still-progressing completion.
+/// `timeout()` is a total deadline through the last body byte; a local model or
+/// ChatGPT SSE stream can legitimately exceed that while still sending data.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub(crate) fn http_client() -> Result<reqwest::Client, CoreError> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .read_timeout(HTTP_READ_IDLE_TIMEOUT)
+        .build()?)
+}
+
+/// Read the body as text, then JSON. Non-JSON error pages keep the HTTP status.
+async fn json_or_raw(
+    resp: reqwest::Response,
+) -> Result<(reqwest::StatusCode, serde_json::Value), CoreError> {
+    let status = resp.status();
+    let text = resp.text().await?;
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) => Ok((status, value)),
+        Err(_) if !status.is_success() => {
+            let detail: String = text.chars().take(300).collect();
+            Err(CoreError::Provider(format!("HTTP {status}: {detail}")))
+        }
+        Err(e) => Err(CoreError::Provider(format!(
+            "invalid JSON ({e}): {}",
+            text.chars().take(200).collect::<String>()
+        ))),
+    }
+}
+
+/// Chat Completions `message.content` is a string, or an array of text parts.
+fn openai_message_content(value: &serde_json::Value) -> Option<String> {
+    let content = value.pointer("/choices/0/message/content")?;
+    if let Some(s) = content.as_str() {
+        let trimmed = s.trim().to_string();
+        return (!trimmed.is_empty()).then_some(trimmed);
+    }
+    let arr = content.as_array()?;
+    let mut out = String::new();
+    for block in arr {
+        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+            out.push_str(text);
+        } else if let Some(s) = block.as_str() {
+            out.push_str(s);
+        }
+    }
+    let trimmed = out.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// Drain complete SSE events from a streaming buffer (LF or CRLF framed).
+pub fn take_complete_sse_events(buf: &mut String) -> Vec<String> {
+    let mut events = Vec::new();
+    while let Some((end, delim)) = sse_event_end(buf) {
+        let event = buf[..end].to_string();
+        buf.replace_range(..end + delim, "");
+        if !event.trim().is_empty() {
+            events.push(event);
+        }
+    }
+    events
+}
+
+fn sse_event_end(buf: &str) -> Option<(usize, usize)> {
+    let lf = buf.find("\n\n").map(|i| (i, 2usize));
+    let crlf = buf.find("\r\n\r\n").map(|i| (i, 4usize));
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +119,16 @@ impl ProviderKind {
     }
 }
 
+/// Anthropic's documented root is host-only (`https://api.anthropic.com`). If a
+/// config pastes the versioned `/v1` prefix, strip it so `/v1/messages` is not doubled.
+fn anthropic_api_root(configured: &str) -> String {
+    ProviderKind::Anthropic
+        .resolve_base_url(configured)
+        .trim_end_matches('/')
+        .trim_end_matches("/v1")
+        .to_string()
+}
+
 const OPENROUTER_REFERER: &str = "https://github.com/snowopsdev/selara";
 const OPENROUTER_TITLE: &str = "Selara";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -68,7 +156,7 @@ pub struct OpenAiCompatibleProvider {
 impl LlmProvider for OpenAiCompatibleProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let client = reqwest::Client::new();
+        let client = http_client()?;
         let body = json!({
             "model": self.model,
             "messages": [
@@ -87,16 +175,12 @@ impl LlmProvider for OpenAiCompatibleProvider {
         }
 
         let resp = builder.send().await?;
-        let status = resp.status();
-        let value: serde_json::Value = resp.json().await?;
+        let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
         }
 
-        value
-            .pointer("/choices/0/message/content")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
+        openai_message_content(&value)
             .ok_or_else(|| CoreError::Provider(format!("unexpected response: {value}")))
     }
 }
@@ -110,9 +194,9 @@ pub struct AnthropicProvider {
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
-        let base = ProviderKind::Anthropic.resolve_base_url(&self.base_url);
+        let base = anthropic_api_root(&self.base_url);
         let url = format!("{base}/v1/messages");
-        let client = reqwest::Client::new();
+        let client = http_client()?;
         let body = json!({
             "model": self.model,
             "max_tokens": 4096,
@@ -128,8 +212,7 @@ impl LlmProvider for AnthropicProvider {
             .json(&body)
             .send()
             .await?;
-        let status = resp.status();
-        let value: serde_json::Value = resp.json().await?;
+        let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
         }
@@ -167,7 +250,7 @@ impl LlmProvider for ChatGptCodexProvider {
         let mut auth = self.auth.clone();
         auth.ensure_fresh().await?;
 
-        let client = reqwest::Client::new();
+        let client = http_client()?;
         let body = json!({
             "model": self.model,
             "instructions": req.system,
@@ -211,10 +294,7 @@ impl LlmProvider for ChatGptCodexProvider {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
-            // Process complete SSE events (blank-line delimited).
-            while let Some(idx) = buf.find("\n\n") {
-                let event = buf[..idx].to_string();
-                buf = buf[idx + 2..].to_string();
+            for event in take_complete_sse_events(&mut buf) {
                 if let Some(delta) = parse_sse_output_text_delta(&event) {
                     out.push_str(&delta);
                 }
@@ -279,7 +359,7 @@ pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
 pub async fn list_chatgpt_models() -> Result<Vec<String>, CoreError> {
     let mut auth = ChatGptAuth::load()?;
     auth.ensure_fresh().await?;
-    let client = reqwest::Client::new();
+    let client = http_client()?;
     let mut builder = client
         .get(CODEX_MODELS_URL)
         .header("Authorization", format!("Bearer {}", auth.access_token))
@@ -290,12 +370,14 @@ pub async fn list_chatgpt_models() -> Result<Vec<String>, CoreError> {
     }
     let resp = builder.send().await?;
     let status = resp.status();
-    let value: serde_json::Value = resp.json().await?;
+    let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(CoreError::Provider(format!(
-            "list models HTTP {status}: {value}"
+            "list models HTTP {status}: {text}"
         )));
     }
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| CoreError::Provider(format!("list models: invalid JSON ({e})")))?;
     let mut out = Vec::new();
     // Accept a few shapes: { data: [ { id / slug } ] } or a bare array.
     let items = value
@@ -369,7 +451,7 @@ pub async fn list_provider_models(
     api_key: &str,
 ) -> Result<Vec<String>, CoreError> {
     let base = kind.resolve_base_url(base_url);
-    let client = reqwest::Client::new();
+    let client = http_client()?;
     let mut models = match kind {
         ProviderKind::OpenAiCompatible | ProviderKind::OpenRouter => {
             let mut builder = client.get(format!("{base}/models"));
@@ -389,12 +471,13 @@ pub async fn list_provider_models(
             ids
         }
         ProviderKind::Anthropic => {
+            let root = anthropic_api_root(base_url);
             let mut ids = Vec::new();
             let mut after: Option<String> = None;
             // Anthropic pages with `has_more` / `last_id`; cap pages defensively.
             for _ in 0..10 {
                 let mut builder = client
-                    .get(format!("{base}/v1/models"))
+                    .get(format!("{root}/v1/models"))
                     .query(&[("limit", "1000")])
                     .header("x-api-key", api_key)
                     .header("anthropic-version", ANTHROPIC_VERSION);
@@ -535,6 +618,30 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_root_strips_versioned_prefix() {
+        assert_eq!(anthropic_api_root(""), "https://api.anthropic.com");
+        assert_eq!(
+            anthropic_api_root("https://api.anthropic.com"),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            anthropic_api_root("https://api.anthropic.com/v1"),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            anthropic_api_root("https://api.anthropic.com/v1/"),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            format!(
+                "{}/v1/messages",
+                anthropic_api_root("https://api.anthropic.com/v1")
+            ),
+            "https://api.anthropic.com/v1/messages"
+        );
+    }
+
+    #[test]
     fn parses_openai_style_model_list() {
         let v = serde_json::json!({"object":"list","data":[{"id":"gpt-4o-mini"},{"id":"gpt-4o"}]});
         assert_eq!(
@@ -618,5 +725,157 @@ data: \"delta\":\"ab\"}\n";
 data: {\"type\":\"response.output_text.delta\",\"delta\":\"ab\"}\n";
         assert_eq!(parse_sse_output_text_delta(block2).as_deref(), Some("ab"));
         let _ = block; // keep for documentation
+    }
+
+    #[test]
+    fn http_client_uses_connect_and_read_idle_timeouts() {
+        assert_eq!(HTTP_CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(HTTP_READ_IDLE_TIMEOUT, Duration::from_secs(60));
+        http_client().expect("client should build");
+    }
+
+    #[test]
+    fn sse_framing_splits_crlf_and_lf_events() {
+        let mut buf = String::from(
+            "event: response.output_text.delta\r\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\r\n\r\n\
+event: response.output_text.delta\r\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"!\"}\r\n\r\n",
+        );
+        let events = take_complete_sse_events(&mut buf);
+        assert!(buf.is_empty(), "expected buffer drained, leftover {buf:?}");
+        let text: String = events
+            .iter()
+            .filter_map(|e| parse_sse_output_text_delta(e))
+            .collect();
+        assert_eq!(text, "Hello!");
+
+        let mut lf = String::from(
+            "event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
+        );
+        let events = take_complete_sse_events(&mut lf);
+        assert_eq!(lf, "partial");
+        let text: String = events
+            .iter()
+            .filter_map(|e| parse_sse_output_text_delta(e))
+            .collect();
+        assert_eq!(text, "AB");
+    }
+
+    #[test]
+    fn openai_content_accepts_string_or_text_parts() {
+        let string = serde_json::json!({
+            "choices":[{"message":{"content":"  hi  "}}]
+        });
+        assert_eq!(openai_message_content(&string).as_deref(), Some("hi"));
+        let parts = serde_json::json!({
+            "choices":[{"message":{"content":[
+                {"type":"text","text":"Hel"},
+                {"type":"text","text":"lo"}
+            ]}}]
+        });
+        assert_eq!(openai_message_content(&parts).as_deref(), Some("Hello"));
+        let empty = serde_json::json!({"choices":[{"message":{"content":[]}}]});
+        assert!(openai_message_content(&empty).is_none());
+    }
+
+    fn spawn_http(status: u16, body: &str, content_type: &str) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_string();
+        let content_type = content_type.to_string();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn html_error_page_keeps_http_status() {
+        let base = spawn_http(502, "<html>bad gateway</html>", "text/html");
+        let provider = OpenAiCompatibleProvider {
+            base_url: format!("{base}/v1"),
+            api_key: "k".into(),
+            model: "m".into(),
+            extra_headers: Vec::new(),
+        };
+        let err = provider
+            .complete(CompletionRequest {
+                system: "s".into(),
+                user: "u".into(),
+            })
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("502") && msg.contains("bad gateway"),
+            "expected HTTP 502 with body, got {msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("error decoding"),
+            "must not hide status behind a JSON decode error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_completion_reads_text_part_array() {
+        let payload = r#"{"choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}]}"#;
+        let base = spawn_http(200, payload, "application/json");
+        let provider = OpenAiCompatibleProvider {
+            base_url: format!("{base}/v1"),
+            api_key: "k".into(),
+            model: "m".into(),
+            extra_headers: Vec::new(),
+        };
+        let out = provider
+            .complete(CompletionRequest {
+                system: "s".into(),
+                user: "u".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+    }
+
+    #[tokio::test]
+    async fn anthropic_reads_text_block() {
+        let payload = r#"{"content":[{"type":"text","text":"claude-ok"}]}"#;
+        let base = spawn_http(200, payload, "application/json");
+        let provider = AnthropicProvider {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url: base,
+        };
+        let out = provider
+            .complete(CompletionRequest {
+                system: "s".into(),
+                user: "u".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out, "claude-ok");
+    }
+
+    #[tokio::test]
+    async fn list_models_html_error_keeps_status() {
+        let base = spawn_http(401, "<html>denied</html>", "text/html");
+        let err = list_provider_models(ProviderKind::OpenAiCompatible, &base, "k")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("401"), "{msg}");
+        assert!(msg.contains("denied"), "{msg}");
     }
 }

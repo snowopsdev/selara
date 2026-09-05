@@ -103,7 +103,10 @@ impl ChatGptAuth {
 
     /// Refresh tokens via OpenAI OAuth and write back to auth.json (mode 0600).
     pub async fn refresh(&mut self) -> Result<(), CoreError> {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(60))
+            .build()?;
         let body = json!({
             "client_id": CODEX_OAUTH_CLIENT_ID,
             "grant_type": "refresh_token",
@@ -116,12 +119,15 @@ impl ChatGptAuth {
             .send()
             .await?;
         let status = resp.status();
-        let value: serde_json::Value = resp.json().await?;
+        let text = resp.text().await?;
         if !status.is_success() {
+            let detail: String = text.chars().take(300).collect();
             return Err(CoreError::Provider(format!(
-                "ChatGPT token refresh failed HTTP {status}: {value}"
+                "ChatGPT token refresh failed HTTP {status}: {detail}"
             )));
         }
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| CoreError::Provider(format!("refresh: invalid JSON ({e})")))?;
         let access = value
             .get("access_token")
             .and_then(|v| v.as_str())

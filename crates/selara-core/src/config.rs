@@ -25,7 +25,9 @@ pub struct AppConfig {
     /// Preferred content/UI language code (e.g. "en", "es").
     #[serde(default = "default_language")]
     pub language: String,
-    #[serde(default)]
+    /// Omitted in TOML (README-style `[provider]`-only files) loads the built-ins.
+    /// An explicit `commands = []` still means "no commands".
+    #[serde(default = "builtin_commands")]
     pub commands: Vec<WritingCommand>,
     /// Selection / request size rails. Editable in the Settings UI; 0 disables a knob.
     #[serde(default)]
@@ -233,6 +235,50 @@ fn maybe_migrate_legacy_config(path: &Path) -> Result<(), CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_commands_load_builtins_explicit_empty_stays_empty() {
+        let omitted = r#"
+[provider]
+kind = "open_ai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+"#;
+        let cfg: AppConfig = toml::from_str(omitted).unwrap();
+        assert_eq!(
+            cfg.commands.len(),
+            builtin_commands().len(),
+            "README-style provider-only TOML must keep built-in commands"
+        );
+        assert!(cfg.commands.iter().any(|c| c.id == "proofread"));
+
+        let empty = r#"
+commands = []
+
+[provider]
+kind = "open_ai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+"#;
+        let cfg: AppConfig = toml::from_str(empty).unwrap();
+        assert!(
+            cfg.commands.is_empty(),
+            "explicit commands = [] must remain empty"
+        );
+    }
+
+    #[test]
+    fn ollama_kind_alias_loads_as_openai_compatible() {
+        let raw = r#"
+[provider]
+kind = "ollama"
+base_url = "http://localhost:11434/v1"
+model = "llama3.1:8b"
+"#;
+        let cfg: AppConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.provider.kind, ProviderKind::OpenAiCompatible);
+        assert_eq!(cfg.commands.len(), builtin_commands().len());
+    }
 
     #[test]
     fn auth_defaults_to_api_key() {
