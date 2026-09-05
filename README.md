@@ -21,11 +21,11 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 - **Works everywhere you can select text.** A global hotkey (default `ctrl+shift+space`) reads the selection through macOS Accessibility, with a clipboard fallback for apps that do not expose it.
 - **Replace or popup.** Replace commands (Proofread, Rewrite, Friendly, Professional, Concise) write the result back over the selection. Popup commands (Summary, Key Points, Table) open a scrollable result window with a copy button.
 - **Your prompts.** Every command is a labeled prompt. Edit the built-ins, add your own, duplicate one to make a variation, and search the list.
-- **Per-command hotkeys.** Give a command its own shortcut and it runs on the selection immediately, skipping the picker.
+- **Per-command hotkeys.** Give a command its own shortcut and it runs on the selection immediately, skipping the picker and its confirmations. Only the hard maximum applies on that path.
 - **Any provider.** OpenAI-compatible `/chat/completions` (OpenAI, Ollama, LM Studio, vLLM), the Anthropic Messages API, or OpenRouter. Leave the base URL blank for the provider default or point it at a local server.
 - **Model discovery.** Load the model list straight from the provider. A bad key or URL shows up right there, so it doubles as a connection test.
 - **ChatGPT via Codex (experimental).** Reuse an existing ChatGPT subscription by signing in with the Codex CLI. Tokens stay in Codex's own auth store, never in Selara's config.
-- **Size limits.** Soft warnings, a hard maximum, and a separate caution before replacing a large selection, so a stray select-all never sends 100k characters to a metered API.
+- **Size limits.** A soft warning and a replace caution in the picker, plus a hard maximum that applies everywhere, so a stray select-all never sends 100k characters to a metered API.
 - **Live config.** Everything lives in one TOML file. The `serve` process watches it and re-registers hotkeys within about a second of a save from the Settings app.
 - **Menu-bar Settings app.** A Tauri tray app with General, Models, Commands, and Limits tabs. No Dock icon, closes to the tray.
 - **Scriptable CLI.** `selara init`, `selara list-commands`, and `selara run <command>` for pipelines and quick checks.
@@ -77,10 +77,12 @@ The `serve` shell registers the hotkey, reads the selection, shows a small comma
 To open the Settings app:
 
 ```bash
-cargo run -p selara-desktop
+cd apps/selara-desktop && npx tauri dev
 ```
 
-It lives in the menu bar. Left-click the icon (or choose **Open Settings**) to show the window. Closing the window hides it. **Quit** exits. For UI work with hot reload, use `cd apps/selara-desktop && npx tauri dev` instead.
+It lives in the menu bar. Left-click the icon (or choose **Open Settings**) to show the window. Closing the window hides it. **Quit** exits.
+
+Use the Tauri command rather than `cargo run -p selara-desktop`. A debug build loads the Vite dev server that `tauri dev` starts for it, so running the binary alone opens a blank window.
 
 ## Settings app tour
 
@@ -88,7 +90,7 @@ Every tab writes to the same `config.toml`. If `serve` is running, saved changes
 
 ### General
 
-Language hint for the model and the global shortcut that opens the picker.
+The global shortcut that opens the picker, plus a language code. The language value is saved to config but is not yet included in prompts, so changing it has no effect on results today.
 
 <img alt="General tab with the Language field set to en and the Shortcut field set to ctrl+shift+space" src="docs/screenshots/settings-general.png" width="820">
 
@@ -116,7 +118,7 @@ Click a row to edit it. The editor holds the label, the replace-or-popup mode, t
 
 ### Limits
 
-Guard rails for large selections. Set any value to `0` to disable it.
+Guard rails for large selections. Set any value to `0` to disable it. The soft warn and replace caution are confirmations shown in the picker. A per-command hotkey bypasses both and only honors the hard maximum.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
