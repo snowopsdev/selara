@@ -10,11 +10,17 @@ use crate::chatgpt_auth::{
 };
 use crate::error::CoreError;
 
-/// Bound hung providers so CLI/`serve` fail instead of blocking forever.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Fail fast on a black hole, but do not cap a still-progressing completion.
+/// `timeout()` is a total deadline through the last body byte; a local model or
+/// ChatGPT SSE stream can legitimately exceed that while still sending data.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) fn http_client() -> Result<reqwest::Client, CoreError> {
-    Ok(reqwest::Client::builder().timeout(HTTP_TIMEOUT).build()?)
+    Ok(reqwest::Client::builder()
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .read_timeout(HTTP_READ_IDLE_TIMEOUT)
+        .build()?)
 }
 
 /// Read the body as text, then JSON. Non-JSON error pages keep the HTTP status.
@@ -719,6 +725,13 @@ data: \"delta\":\"ab\"}\n";
 data: {\"type\":\"response.output_text.delta\",\"delta\":\"ab\"}\n";
         assert_eq!(parse_sse_output_text_delta(block2).as_deref(), Some("ab"));
         let _ = block; // keep for documentation
+    }
+
+    #[test]
+    fn http_client_uses_connect_and_read_idle_timeouts() {
+        assert_eq!(HTTP_CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(HTTP_READ_IDLE_TIMEOUT, Duration::from_secs(60));
+        http_client().expect("client should build");
     }
 
     #[test]

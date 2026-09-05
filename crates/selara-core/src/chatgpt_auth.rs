@@ -104,7 +104,8 @@ impl ChatGptAuth {
     /// Refresh tokens via OpenAI OAuth and write back to auth.json (mode 0600).
     pub async fn refresh(&mut self) -> Result<(), CoreError> {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(60))
             .build()?;
         let body = json!({
             "client_id": CODEX_OAUTH_CLIENT_ID,
