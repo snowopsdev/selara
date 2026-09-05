@@ -83,17 +83,36 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
     ]
 }
 
+/// Assemble the system prompt: the command's prompt, then the preferred
+/// language from config (blank means no hint), then any one-off instruction.
+pub fn build_system_prompt(
+    command: &WritingCommand,
+    custom_instruction: Option<&str>,
+    language: Option<&str>,
+) -> String {
+    let mut system = command.prompt.clone();
+    if let Some(lang) = language.map(str::trim).filter(|l| !l.is_empty()) {
+        system.push_str(&format!(
+            "\nPreferred language: {lang}. Use it for the reply only when the instructions \
+above do not specify an output language and the text is not clearly written in another \
+language. An explicit language in the instructions always wins; otherwise keep the text's \
+own language."
+        ));
+    }
+    if let Some(extra) = custom_instruction {
+        system.push_str(&format!("\nAdditional user instruction: {extra}"));
+    }
+    system
+}
+
 pub async fn run_command(
     provider: &dyn LlmProvider,
     command: &WritingCommand,
     input: &str,
     custom_instruction: Option<&str>,
+    language: Option<&str>,
 ) -> Result<String, CoreError> {
-    let system = if let Some(extra) = custom_instruction {
-        format!("{}\nAdditional user instruction: {}", command.prompt, extra)
-    } else {
-        command.prompt.clone()
-    };
+    let system = build_system_prompt(command, custom_instruction, language);
 
     provider
         .complete(CompletionRequest {
@@ -111,4 +130,58 @@ pub fn find_command<'a>(
         .iter()
         .find(|c| c.id == id)
         .ok_or_else(|| CoreError::UnknownCommand(id.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cmd() -> WritingCommand {
+        WritingCommand {
+            id: "proofread".into(),
+            label: "Proofread".into(),
+            kind: CommandKind::Replace,
+            prompt: "Proofread the text.".into(),
+            hotkey: None,
+        }
+    }
+
+    #[test]
+    fn prompt_is_bare_without_extras() {
+        assert_eq!(
+            build_system_prompt(&cmd(), None, None),
+            "Proofread the text."
+        );
+    }
+
+    #[test]
+    fn prompt_includes_language_line() {
+        let system = build_system_prompt(&cmd(), None, Some("es"));
+        assert!(system.starts_with("Proofread the text.\n"));
+        assert!(system.contains("Preferred language: es."));
+    }
+
+    #[test]
+    fn language_hint_defers_to_command_instructions() {
+        let system = build_system_prompt(&cmd(), None, Some("en"));
+        assert!(system.contains("An explicit language in the instructions always wins"));
+    }
+
+    #[test]
+    fn prompt_skips_blank_language() {
+        assert_eq!(
+            build_system_prompt(&cmd(), None, Some("  ")),
+            "Proofread the text."
+        );
+    }
+
+    #[test]
+    fn prompt_puts_instruction_after_language() {
+        let system = build_system_prompt(&cmd(), Some("Keep it short."), Some("fr"));
+        let lang = system.find("Preferred language: fr.").unwrap();
+        let extra = system
+            .find("Additional user instruction: Keep it short.")
+            .unwrap();
+        assert!(lang < extra);
+    }
 }
