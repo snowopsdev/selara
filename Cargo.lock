@@ -4714,7 +4714,7 @@ dependencies = [
 
 [[package]]
 name = "selara"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4730,7 +4730,7 @@ dependencies = [
 
 [[package]]
 name = "selara-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4746,7 +4746,7 @@ dependencies = [
 
 [[package]]
 name = "selara-desktop"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "selara-core",
@@ -4760,7 +4760,7 @@ dependencies = [
 
 [[package]]
 name = "selara-platform"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "accessibility",
  "accessibility-sys",
