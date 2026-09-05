@@ -27,6 +27,15 @@ def merged_pr():
     }
 
 
+def reviewed_pr():
+    pr = merged_pr()
+    pr["status"] = "ready"
+    for key in ("merge_commit", "merged_at", "landed_on_target", "postmerge_passed", "postmerge_evidence"):
+        pr.pop(key, None)
+    pr["gate"].pop("mergeable", None)
+    return pr
+
+
 class MergeDeliveryTests(unittest.TestCase):
     def state(self, pr):
         return {"findings": [], "prs": [pr], "target_branch": "main"}
@@ -131,6 +140,86 @@ class MergeDeliveryTests(unittest.TestCase):
             state = report.load_state(path)
             self.assertEqual("merge", state["delivery"])
             self.assertEqual("completed", state["lanes"][0]["status"])
+
+
+class ReviewDeliveryTests(unittest.TestCase):
+    def state(self, pr):
+        return {"findings": [], "prs": [pr], "target_branch": "main", "delivery": "review"}
+
+    def test_incomplete_review_statuses_are_rejected(self):
+        for status in ("draft", "reviewing", "fixing", "queued", "blocked"):
+            pr = reviewed_pr()
+            pr["status"] = status
+            with self.subTest(status=status), self.assertRaisesRegex(SystemExit, "review is not complete"):
+                report.validate_review_delivery(self.state(pr))
+
+    def test_ready_without_a_gate_cannot_complete(self):
+        pr = reviewed_pr()
+        pr["gate"] = {}
+        with self.assertRaisesRegex(SystemExit, "Stale"):
+            report.validate_review_delivery(self.state(pr))
+
+    def test_review_gate_must_match_the_current_head(self):
+        for field in ("head_sha", "codex_reviewed_sha"):
+            pr = reviewed_pr()
+            pr["gate"][field] = "d" * 40
+            with self.subTest(field=field), self.assertRaisesRegex(SystemExit, "Stale"):
+                report.validate_review_delivery(self.state(pr))
+
+    def test_every_review_condition_must_pass(self):
+        for field in ("codex_complete", "checks_passed", "validation_passed", "threads_resolved", "approvals_satisfied"):
+            for value in (False, None, "true"):
+                pr = reviewed_pr()
+                pr["gate"][field] = value
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(SystemExit, field):
+                    report.validate_review_delivery(self.state(pr))
+
+    def test_verified_findings_need_a_reviewed_pr(self):
+        state = self.state(reviewed_pr())
+        state["findings"] = [{"id": "E2E-001", "status": "verified", "pr": "missing"}]
+        with self.assertRaisesRegex(SystemExit, "lacks a reviewed PR"):
+            report.validate_review_delivery(state)
+
+    def test_review_delivery_does_not_require_landing(self):
+        report.validate_review_delivery(self.state(reviewed_pr()))
+
+    def test_cli_review_delivery_rejects_missing_review_receipts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = (Path(directory) / "run.md").resolve()
+            snapshot = Path(directory) / "pr.json"
+
+            def cli(command, *arguments):
+                args = report.build_parser().parse_args([command, "--report", str(path), *arguments])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    args.func(args)
+
+            cli("init", "--repo", directory, "--run-id", "review-fixture", "--delivery", "review", "--target-branch", "main")
+            for number in range(1, 13):
+                cli("lane", "--lane", str(number), "--status", "completed")
+            for name in report.CHECKPOINTS:
+                cli("checkpoint", "--name", name, "--outcome", "passed", "--evidence", "fixture/" + name)
+            with self.assertRaisesRegex(SystemExit, "lacks a reviewed PR"):
+                self._complete_with_verified_finding(cli)
+            snapshot.write_text(json.dumps(reviewed_pr()))
+            cli("pr", "--file", str(snapshot))
+            cli("finding", "--id", "E2E-001", "--lane", "01", "--title", "Synthetic fixture",
+                "--severity", "major", "--status", "verified",
+                "--reproduction", "Run controlled fixture", "--expected", "Saved value", "--actual", "Lost value",
+                "--evidence", "fixture/trace", "--root-cause", "State reset", "--fix", "Preserve state",
+                "--regression", "Fails before, passes after", "--validation", "Journey passed",
+                "--commit", "b" * 40, "--pr", reviewed_pr()["url"])
+            cli("status", "--status", "completed", "--phase", "completed")
+            self.assertEqual("review", report.load_state(path)["delivery"])
+            self.assertEqual("completed", report.load_state(path)["status"])
+
+    def _complete_with_verified_finding(self, cli):
+        cli("finding", "--id", "E2E-001", "--lane", "01", "--title", "Synthetic fixture",
+            "--severity", "major", "--status", "verified",
+            "--reproduction", "Run controlled fixture", "--expected", "Saved value", "--actual", "Lost value",
+            "--evidence", "fixture/trace", "--root-cause", "State reset", "--fix", "Preserve state",
+            "--regression", "Fails before, passes after", "--validation", "Journey passed",
+            "--commit", "b" * 40)
+        cli("status", "--status", "completed", "--phase", "completed")
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ Read [autonomy-loop.md](references/autonomy-loop.md) before dispatch and [safe-o
 4. Choose work mode `audit` or `repair`. Choose delivery `local`, `review`, or `merge`. A request to deliver autonomously through main authorizes campaign PR creation, pushes, review requests and replies, conversation resolution, and merges after checks pass. Record this authority once and carry it through the run and resumption without asking again per PR. Audit-only and local-only requests retain their narrower scope. The skill itself does not grant authority beyond the user's request.
 5. For merge delivery, confirm the repository has `main`, or use the branch the user named. Inspect branch protections, required reviewers, checks, merge methods, queues, and Codex review setup. Keep working on independent tasks if an external dependency is unavailable.
 
-Initialize merge delivery with `report.py --delivery merge`. The helper's completion checks reject ready or queued PRs, stale review evidence, unresolved threads, unmet approvals, failed checks, and missing landing evidence. Those checks validate recorded structure, not live GitHub. Inspect GitHub and the artifacts before claiming success.
+Initialize merge delivery with `report.py --delivery merge`, or `report.py --delivery review` when the requested work stops after review. Merge completion rejects ready or queued PRs and missing landing evidence. Review completion rejects missing PR snapshots, stale review evidence, unresolved threads, unmet approvals, and failed checks, and does not require merge receipts. Those checks validate recorded structure, not live GitHub. Inspect GitHub and the artifacts before claiming success.
 
 ## Assign and isolate work
 

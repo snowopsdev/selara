@@ -380,8 +380,64 @@ def validate_completion(data: dict[str, Any]) -> None:
         checkpoint = data.get("checkpoints", {}).get(name, {})
         if checkpoint.get("outcome") not in {"passed", "not-applicable"} or not checkpoint.get("evidence"):
             raise SystemExit(f"Incomplete checkpoint: {name}")
-    if data.get("delivery") == "merge":
+    delivery = data.get("delivery", "local")
+    if delivery == "merge":
         validate_merge_delivery(data)
+    elif delivery == "review":
+        validate_review_delivery(data)
+
+
+REVIEW_COMPLETE_STATUSES = {"ready", "merged"}
+REVIEW_GATE_FLAGS = (
+    "codex_complete",
+    "checks_passed",
+    "validation_passed",
+    "threads_resolved",
+    "approvals_satisfied",
+)
+REVIEW_GATE_EVIDENCE = (
+    "base_sha",
+    "checked_at",
+    "checks_evidence",
+    "review_evidence",
+    "threads_evidence",
+    "validation_evidence",
+)
+
+
+def validate_review_gate(pr: dict[str, Any], *, require_mergeable: bool = False) -> None:
+    """Check current-head review receipts. Does not inspect live GitHub."""
+    gate = pr.get("gate", {})
+    if not isinstance(gate, dict):
+        raise SystemExit(f"Invalid review evidence for PR {pr['number']}")
+    if not pr.get("head_sha") or gate.get("head_sha") != pr["head_sha"] or gate.get("codex_reviewed_sha") != pr["head_sha"]:
+        raise SystemExit(f"Stale head or Codex review for PR {pr['number']}")
+    flags = REVIEW_GATE_FLAGS + (("mergeable",) if require_mergeable else ())
+    for field in flags:
+        if gate.get(field) is not True:
+            raise SystemExit(f"Merge gate {field} not satisfied for PR {pr['number']}")
+    for field in REVIEW_GATE_EVIDENCE:
+        if not gate.get(field):
+            raise SystemExit(f"Missing {field} for PR {pr['number']}")
+
+
+def validate_review_delivery(data: dict[str, Any]) -> None:
+    """Validate recorded review receipts without requiring merge or landing."""
+    prs = data.get("prs", [])
+    reviewed = {pr["url"]: pr for pr in prs if pr["status"] in REVIEW_COMPLETE_STATUSES}
+    for finding in data["findings"]:
+        if finding["status"] == "verified" and finding.get("pr") not in reviewed:
+            raise SystemExit(f"Finding lacks a reviewed PR: {finding['id']}")
+    for pr in prs:
+        if pr["status"] == "superseded":
+            if not pr.get("reason") or pr.get("superseded_by") not in reviewed:
+                raise SystemExit(f"Unresolved replacement for PR {pr['number']}")
+            continue
+        if pr["status"] not in REVIEW_COMPLETE_STATUSES:
+            raise SystemExit(f"PR {pr['number']} review is not complete")
+        validate_review_gate(pr)
+        if pr.get("target_branch") != data.get("target_branch", "main"):
+            raise SystemExit(f"Wrong merge target for PR {pr['number']}")
 
 
 def validate_merge_delivery(data: dict[str, Any]) -> None:
@@ -398,17 +454,7 @@ def validate_merge_delivery(data: dict[str, Any]) -> None:
             continue
         if pr["status"] != "merged":
             raise SystemExit(f"PR {pr['number']} is not merged")
-        gate = pr.get("gate", {})
-        if not isinstance(gate, dict):
-            raise SystemExit(f"Invalid merge evidence for PR {pr['number']}")
-        if not pr.get("head_sha") or gate.get("head_sha") != pr["head_sha"] or gate.get("codex_reviewed_sha") != pr["head_sha"]:
-            raise SystemExit(f"Stale head or Codex review for PR {pr['number']}")
-        for field in ("codex_complete", "checks_passed", "validation_passed", "threads_resolved", "approvals_satisfied", "mergeable"):
-            if gate.get(field) is not True:
-                raise SystemExit(f"Merge gate {field} not satisfied for PR {pr['number']}")
-        for field in ("base_sha", "checked_at", "checks_evidence", "review_evidence", "threads_evidence", "validation_evidence"):
-            if not gate.get(field):
-                raise SystemExit(f"Missing {field} for PR {pr['number']}")
+        validate_review_gate(pr, require_mergeable=True)
         if pr.get("target_branch") != data.get("target_branch", "main"):
             raise SystemExit(f"Wrong merge target for PR {pr['number']}")
         if pr.get("landed_on_target") is not True or pr.get("postmerge_passed") is not True:

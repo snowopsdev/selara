@@ -127,7 +127,11 @@ For a merged PR, the full receipt has this shape. Populate each value from obser
 }
 ```
 
-Merge delivery cannot complete until every registered PR is merged with current-head review, passing gates, landing evidence, and checks on the target branch. Every verified finding must link to one of those merged PRs. A superseded PR needs a `reason` and `superseded_by` URL pointing to a merged replacement. Queue acceptance or auto-merge enablement does not satisfy this requirement. Zero fixes may require no code PRs; explain that outcome in the convergence checkpoint.
+Merge delivery cannot complete until every registered PR is merged with current-head review, passing gates, landing evidence, and checks on the target branch. Every verified finding must link to one of those merged PRs. A superseded PR needs a `reason` and `superseded_by` URL pointing to a merged replacement. Queue acceptance or auto-merge enablement does not satisfy this requirement.
+
+Review delivery cannot complete until every registered PR is `ready` or `merged` with current-head Codex review, passing checks, resolved threads, and satisfied approvals. Every verified finding must link to one of those PRs. Landing and post-merge receipts are not required. Draft, reviewing, fixing, queued, and blocked PRs are not complete.
+
+Zero fixes may require no code PRs; explain that outcome in the convergence checkpoint.
 
 Old campaigns load as local delivery. When the user extends a campaign to merging, resume the same state with `status --status running --phase convergence --delivery merge --target-branch main --message "User authorized delivery through main"`. A change to delivery or target needs an explanation. Do not downgrade requested delivery to make completion pass. Reconcile PR evidence and checkpoints; old ready-for-review evidence is not a merge receipt.
 
