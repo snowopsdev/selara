@@ -90,7 +90,7 @@ Every tab writes to the same `config.toml`. If `serve` is running, saved changes
 
 ### General
 
-The global shortcut that opens the picker, plus a preferred language code. The language is added to every prompt as a hint: the model replies in that language unless the selected text is clearly written in another one, in which case it keeps the text's language.
+The global shortcut that opens the picker, plus a preferred language code. The language is added to every prompt as a hint: the model replies in that language unless the command itself names an output language (a "Translate to French" command wins) or the selected text is clearly written in another one, in which case it keeps the text's language.
 
 <img alt="General tab with the Language field set to en and the Shortcut field set to ctrl+shift+space" src="docs/screenshots/settings-general.png" width="820">
 

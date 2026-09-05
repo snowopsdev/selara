@@ -93,8 +93,10 @@ pub fn build_system_prompt(
     let mut system = command.prompt.clone();
     if let Some(lang) = language.map(str::trim).filter(|l| !l.is_empty()) {
         system.push_str(&format!(
-            "\nPreferred language: {lang}. Reply in this language unless the text is clearly \
-written in another language; in that case keep the text's language."
+            "\nPreferred language: {lang}. Use it for the reply only when the instructions \
+above do not specify an output language and the text is not clearly written in another \
+language. An explicit language in the instructions always wins; otherwise keep the text's \
+own language."
         ));
     }
     if let Some(extra) = custom_instruction {
@@ -157,6 +159,12 @@ mod tests {
         let system = build_system_prompt(&cmd(), None, Some("es"));
         assert!(system.starts_with("Proofread the text.\n"));
         assert!(system.contains("Preferred language: es."));
+    }
+
+    #[test]
+    fn language_hint_defers_to_command_instructions() {
+        let system = build_system_prompt(&cmd(), None, Some("en"));
+        assert!(system.contains("An explicit language in the instructions always wins"));
     }
 
     #[test]

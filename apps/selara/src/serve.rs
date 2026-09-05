@@ -340,6 +340,22 @@ Select text in another app, then press its shortcut again.",
             || (matches!(cmd.kind, CommandKind::Replace) && self.needs_replace_warn())
     }
 
+    /// Run a shortcut-triggered command once nothing blocks it any more. Checked
+    /// every frame the picker is shown, so it fires after an acknowledgement
+    /// click and also after a limit is raised or disabled in Settings or the
+    /// config file. A hard-max block keeps the picker (and its red banner) up.
+    fn run_pending_if_ready(&mut self) {
+        let ready = self
+            .pending_direct
+            .as_ref()
+            .is_some_and(|cmd| !self.over_hard_max() && !self.needs_confirmation(cmd));
+        if ready {
+            if let Some(cmd) = self.pending_direct.take() {
+                self.start_command(cmd);
+            }
+        }
+    }
+
     fn hide(&mut self, ctx: &egui::Context) {
         self.pending_direct = None;
         self.phase = UiPhase::Hidden;
@@ -725,18 +741,6 @@ impl eframe::App for ServeApp {
         if ack_replace {
             self.replace_warn_acked = true;
         }
-        if ack_soft || ack_replace {
-            // A shortcut-triggered command runs as soon as its last rail is cleared.
-            let ready = self
-                .pending_direct
-                .as_ref()
-                .is_some_and(|cmd| !self.needs_confirmation(cmd));
-            if ready {
-                if let Some(cmd) = self.pending_direct.take() {
-                    self.start_command(cmd);
-                }
-            }
-        }
         if open_settings {
             self.settings_status.clear();
             self.phase = UiPhase::Settings;
@@ -756,6 +760,9 @@ impl eframe::App for ServeApp {
         }
         if let Some(cmd) = clicked {
             self.start_command(cmd);
+        }
+        if matches!(self.phase, UiPhase::Picker) {
+            self.run_pending_if_ready();
         }
     }
 }
