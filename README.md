@@ -29,6 +29,7 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 - **Model discovery.** Load the model list straight from the provider. A bad key or URL shows up right there, so it doubles as a connection test.
 - **ChatGPT via Codex (experimental).** Reuse an existing ChatGPT subscription by signing in with the Codex CLI. Tokens stay in Codex's own auth store, never in Selara's config.
 - **Size limits.** A soft warning, a replace caution, and a hard maximum, so a stray select-all never sends 100k characters to a metered API. They apply to picker and shortcut runs alike.
+- **Secret guard.** If the selection looks like it holds an API key, a private key block, a JWT, or a card number, the picker asks before sending it to a hosted provider; local servers are exempt.
 - **Live config.** Everything lives in one TOML file. The `serve` process watches the config directory for changes and re-registers hotkeys as soon as the Settings app saves (with a 5-second poll as a fallback), while staying idle otherwise.
 - **Menu-bar Settings app.** A Tauri tray app with Status, General, Models, Commands, and Limits tabs. The Status tab shows whether `serve` is running, whether Accessibility is granted, and whether the provider answers. No Dock icon, closes to the tray.
 - **Scriptable CLI.** `selara init`, `selara list-commands`, `selara run <command>`, and `selara key set|clear|status` for pipelines and quick checks.
@@ -142,6 +143,7 @@ Guard rails for large selections. Set any value to `0` to disable it. The soft w
 | Soft warn | 8000 chars | Ask before sending a large selection |
 | Hard max | 100000 chars | Refuse anything larger |
 | Replace caution | 4000 chars | Ask again before overwriting a large selection |
+| Secret guard | on | Ask before sending secret-shaped text (API keys, private keys, JWTs, card numbers) to a hosted provider; local servers (`localhost`, `.local`, private IPs) are exempt |
 
 <img alt="Limits tab with Soft warn 8000, Hard max 100000, and Replace caution 4000, plus Reset to defaults and Save changes buttons" src="docs/screenshots/settings-limits.png" width="820">
 
