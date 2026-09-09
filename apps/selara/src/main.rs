@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use selara_core::commands::{find_command, run_command};
+use selara_core::commands::{
+    find_command, run_command, run_command_stream, CommandKind, PromptVars,
+};
 use selara_core::config::{ApiKeySource, AppConfig};
 use selara_core::secrets;
 
@@ -39,6 +41,11 @@ enum Action {
         /// Extra instruction appended to the command prompt
         #[arg(long)]
         instruct: Option<String>,
+        /// Print the result only once it is complete. By default popup
+        /// commands stream their output as the model writes it; replace
+        /// commands always print the finished, cleaned text.
+        #[arg(long)]
+        no_stream: bool,
     },
     /// Start the desktop shell (global hotkey + picker UI). macOS only for now.
     Serve,
@@ -157,7 +164,12 @@ async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
                 println!("{:<14} {:<12} {}", c.id, format!("{:?}", c.kind), c.label);
             }
         }
-        Action::Run { id, text, instruct } => {
+        Action::Run {
+            id,
+            text,
+            instruct,
+            no_stream,
+        } => {
             let cfg = AppConfig::load_or_init(&config_path)?;
             let input = match text {
                 Some(t) => t,
@@ -172,15 +184,42 @@ async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
             };
             let command = find_command(&cfg.commands, &id)?;
             let provider = cfg.build_provider_for(command)?;
-            let out = run_command(
-                provider.as_ref(),
-                command,
-                &input,
-                instruct.as_deref(),
-                Some(&cfg.language),
-            )
-            .await?;
-            println!("{out}");
+            // Replace output is cleaned only once the reply is complete, so
+            // it is never streamed; popup markdown is printed as it arrives.
+            if no_stream || command.kind == CommandKind::Replace {
+                let out = run_command(
+                    provider.as_ref(),
+                    command,
+                    &input,
+                    instruct.as_deref(),
+                    Some(&cfg.language),
+                )
+                .await?;
+                println!("{out}");
+            } else {
+                use std::io::Write;
+                let mut stdout = std::io::stdout();
+                let mut print_delta = |delta: &str| {
+                    let _ = stdout.write_all(delta.as_bytes());
+                    let _ = stdout.flush();
+                };
+                let result = run_command_stream(
+                    provider.as_ref(),
+                    command,
+                    &input,
+                    instruct.as_deref(),
+                    PromptVars {
+                        language: Some(&cfg.language),
+                        app: None,
+                    },
+                    &mut print_delta,
+                )
+                .await;
+                // End the streamed line even when the stream failed midway, so
+                // the error on stderr does not continue a partial line.
+                println!();
+                result?;
+            }
         }
         Action::Serve => unreachable!("handled in main"),
     }
