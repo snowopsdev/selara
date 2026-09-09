@@ -77,15 +77,31 @@ fn is_token_separator(c: char) -> bool {
     c.is_whitespace()
         || matches!(
             c,
-            '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';' | '='
+            '"' | '\''
+                | '`'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | ','
+                | ';'
+                | '='
+                | ':'
         )
 }
 
-/// Split on whitespace, quotes, brackets, and `=`/`,`/`;`, then trim trailing
-/// sentence punctuation so `key: sk-abc...` and `(sk-abc...)` both surface.
+/// Split on whitespace, quotes, brackets, and `=`/`,`/`;`/`:`, then trim
+/// trailing sentence punctuation so `key: sk-abc...`, `KEY:sk-abc...` and
+/// `(sk-abc...)` all surface. A colon has to delimit and not merely be
+/// trimmed: otherwise `OPENAI_API_KEY:sk-...` is a single token whose start
+/// is the label, so no key prefix matches and the value slips through.
 fn tokens(text: &str) -> impl Iterator<Item = &str> {
     text.split(is_token_separator)
-        .map(|t| t.trim_end_matches(['.', ':', '!', '?']))
+        .map(|t| t.trim_end_matches(['.', '!', '?']))
         .filter(|t| !t.is_empty())
 }
 
@@ -144,8 +160,10 @@ fn luhn_ok(digits: &[u8]) -> bool {
 }
 
 /// Runs of 13–19 digits, optionally grouped by single spaces or dashes, that
-/// pass the Luhn check. Longer runs are not cards and are skipped whole, so a
-/// hash or a long id does not get sliced into false positives.
+/// pass the Luhn check. A run is examined at its group boundaries, so a card
+/// followed directly by another numeric field (`4111 1111 1111 1111 12/29`)
+/// is still reported, while an unbroken digit run (a hash or a long id) only
+/// ever gets tested whole and is never sliced into false positives.
 fn find_card_numbers(text: &str, out: &mut Vec<SecretHit>) {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
@@ -154,13 +172,16 @@ fn find_card_numbers(text: &str, out: &mut Vec<SecretHit>) {
             i += 1;
             continue;
         }
-        let start = i;
-        let mut digits: Vec<u8> = Vec::new();
+        // Char ranges of the contiguous digit groups making up this run.
+        let mut groups: Vec<(usize, usize)> = Vec::new();
         while i < chars.len() {
             let c = chars[i];
             if c.is_ascii_digit() {
-                digits.push(c as u8 - b'0');
-                i += 1;
+                let start = i;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                groups.push((start, i));
             } else if matches!(c, ' ' | '-') && i + 1 < chars.len() && chars[i + 1].is_ascii_digit()
             {
                 i += 1;
@@ -168,14 +189,46 @@ fn find_card_numbers(text: &str, out: &mut Vec<SecretHit>) {
                 break;
             }
         }
-        if (13..=19).contains(&digits.len()) && luhn_ok(&digits) {
-            let run: String = chars[start..i].iter().collect();
+        if let Some((start, end)) = find_card_span(&chars, &groups) {
+            let run: String = chars[start..end].iter().collect();
             out.push(SecretHit {
                 kind: SecretKind::CardNumber,
                 preview: preview_of(&run),
             });
         }
     }
+}
+
+/// Char range of the first group-aligned span of 13–19 digits that passes
+/// Luhn, preferring the earliest start and, from there, the longest span.
+/// Spans start and end on group boundaries, so a single unbroken 20-digit
+/// group offers no candidate at all and cannot be sliced into a card.
+fn find_card_span(chars: &[char], groups: &[(usize, usize)]) -> Option<(usize, usize)> {
+    for first in 0..groups.len() {
+        let start = groups[first].0;
+        let mut len = 0usize;
+        let mut ends: Vec<usize> = Vec::new();
+        for &(group_start, group_end) in &groups[first..] {
+            len += group_end - group_start;
+            if len > 19 {
+                break;
+            }
+            if len >= 13 {
+                ends.push(group_end);
+            }
+        }
+        for &end in ends.iter().rev() {
+            let digits: Vec<u8> = chars[start..end]
+                .iter()
+                .filter(|c| c.is_ascii_digit())
+                .map(|c| *c as u8 - b'0')
+                .collect();
+            if luhn_ok(&digits) {
+                return Some((start, end));
+            }
+        }
+    }
+    None
 }
 
 fn find_private_keys(text: &str, out: &mut Vec<SecretHit>) {
@@ -255,9 +308,18 @@ fn is_private_v4(host: &str) -> bool {
     a == 10 || (a == 192 && b == 168) || (a == 172 && (16..=31).contains(&b))
 }
 
+/// IPv6 space that never leaves the local network: unique-local `fc00::/7`
+/// and link-local unicast `fe80::/10` — what a LAN box or a self-configured
+/// interface hands a local inference server.
+fn is_private_v6(ip: std::net::Ipv6Addr) -> bool {
+    let first = ip.segments()[0];
+    (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+}
+
 /// Whether requests for this provider leave the machine. Loopback, `.local`
-/// names, and private IPv4 ranges count as local; everything else (including
-/// the provider defaults used when `base_url` is blank) is hosted.
+/// names, private IPv4 ranges, and unique-local or link-local IPv6 count as
+/// local; everything else (including the provider defaults used when
+/// `base_url` is blank) is hosted.
 pub fn provider_is_hosted(kind: ProviderKind, base_url: &str) -> bool {
     let host = url_host(&kind.resolve_base_url(base_url));
     if host.is_empty() {
@@ -269,9 +331,12 @@ pub fn provider_is_hosted(kind: ProviderKind, base_url: &str) -> bool {
     let local = host == "localhost"
         || host.ends_with(".local")
         || host.ends_with(".localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_unspecified(),
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback() || v6.is_unspecified() || is_private_v6(v6)
+            }
+        })
         || is_private_v4(&host);
     !local
 }
@@ -409,6 +474,26 @@ mod tests {
     }
 
     #[test]
+    fn keys_are_found_when_a_colon_joins_label_and_value() {
+        // Placeholder bodies joined at runtime, as above: the point here is
+        // the delimiter, not the value.
+        let key = format!("sk-{}", "a".repeat(30));
+        let pat = format!("ghp_{}", "a".repeat(36));
+        assert_eq!(
+            kinds(&format!("OPENAI_API_KEY:{key}")),
+            vec![SecretKind::ApiKey]
+        );
+        assert_eq!(kinds(&format!("token:{pat}")), vec![SecretKind::ApiKey]);
+        assert_eq!(
+            kinds(&format!("{{\"api_key\":\"{key}\"}}")),
+            vec![SecretKind::ApiKey]
+        );
+        // The preview shows the value, not the label it was glued to.
+        let hits = scan_secrets(&format!("OPENAI_API_KEY:{key}"));
+        assert_eq!(hits[0].preview, "sk-aaa…", "{hits:?}");
+    }
+
+    #[test]
     fn detects_private_key_blocks() {
         // find_private_keys only looks for the BEGIN/END markers, so the body
         // is a placeholder rather than anything resembling DER base64.
@@ -480,6 +565,29 @@ mod tests {
             kinds(&luhn_complete("123456789012")),
             vec![SecretKind::CardNumber]
         );
+    }
+
+    #[test]
+    fn a_card_beside_another_numeric_field_is_still_found() {
+        let card = luhn_complete("123456789012345");
+        let spaced = format!(
+            "{} {} {} {}",
+            &card[0..4],
+            &card[4..8],
+            &card[8..12],
+            &card[12..16]
+        );
+        let expected = format!("{}…", &spaced[0..6]);
+        // Expiry glued straight onto the card: the combined 18-digit run
+        // fails Luhn, so only a group-aligned scan finds the card.
+        let hits = scan_secrets(&format!("{spaced} 12/29"));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].kind, SecretKind::CardNumber);
+        assert_eq!(hits[0].preview, expected, "{hits:?}");
+        // Same when the adjacent field comes first.
+        let hits = scan_secrets(&format!("99 {spaced}"));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].preview, expected, "{hits:?}");
     }
 
     #[test]
@@ -557,6 +665,27 @@ mod tests {
             "http://172.31.255.254/v1",
         ] {
             assert!(!provider_is_hosted(k, url), "{url} should be local");
+        }
+    }
+
+    #[test]
+    fn private_ipv6_servers_are_not_hosted() {
+        let k = ProviderKind::OpenAiCompatible;
+        for url in [
+            "http://[fd00::1]:11434/v1",
+            "http://[fc00::1]:8080/v1",
+            "http://[fdff:ffff::a]:1234/v1",
+            "http://[fe80::1]:11434/v1",
+            "http://[fe80::1ff:fe23:4567:890a]:8000/v1",
+            "http://[::1]:8080/v1",
+            "http://[::]:8080/v1",
+        ] {
+            assert!(!provider_is_hosted(k, url), "{url} should be local");
+        }
+        // Global unicast still leaves the machine, and `fec0::/10` is the
+        // deprecated site-local range, so it stays hosted.
+        for url in ["http://[2606:4700:4700::1111]/v1", "http://[fec0::1]/v1"] {
+            assert!(provider_is_hosted(k, url), "{url} should be hosted");
         }
     }
 
