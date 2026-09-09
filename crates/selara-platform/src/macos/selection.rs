@@ -7,8 +7,10 @@
 //!
 //! Replace must run **after** our UI hides and the source app is frontmost again.
 //! The delayed restore compares `NSPasteboard.changeCount` against the value
-//! recorded right after our own write and leaves the pasteboard alone if the
-//! user copied something else in between.
+//! `-[NSPasteboard clearContents]` returned for our own write — one call, so no
+//! other process's write can be mistaken for ours — and additionally checks that
+//! the pasteboard still holds the text we put there. Either guard failing leaves
+//! the pasteboard alone.
 
 #![allow(deprecated)]
 
@@ -294,6 +296,79 @@ mod pasteboard {
         )
     }
 
+    /// The UTI every plain-text paste consumer reads (`NSPasteboardTypeString`).
+    pub(super) const TEXT_TYPE: &str = "public.utf8-plain-text";
+
+    /// A +1 `NSString` copied from `s`, or nil.
+    unsafe fn nsstring_new(s: &str) -> id {
+        let obj: id = msg_send![class!(NSString), alloc];
+        // initWithBytes:length:encoding: copies the UTF-8 (NSUTF8StringEncoding = 4).
+        msg_send![obj,
+            initWithBytes: s.as_ptr() as *const c_void
+            length: s.len()
+            encoding: 4u64]
+    }
+
+    /// Replace the pasteboard with `text` and return the `changeCount` that
+    /// *this* write produced.
+    ///
+    /// The count has to come out of the write itself. Writing and then reading
+    /// `changeCount` as two calls leaves a window in which another process can
+    /// write: the number read back would then be that stranger's, the delayed
+    /// restore would see it unchanged, and it would overwrite their content
+    /// while believing it was still holding Selara's own paste text.
+    /// `-[NSPasteboard clearContents]` closes that window — it bumps the count
+    /// and returns the new value in a single pasteboard-server round trip, and
+    /// the `setString:forType:` that follows writes into the session that call
+    /// opened without bumping it again.
+    pub(super) fn write_text(text: &str) -> Result<i64> {
+        let _guard = lock();
+        autoreleasepool(|| {
+            // SAFETY: generalPasteboard is a live singleton; both NSStrings are +1
+            // and released before returning, and setString: copies the contents.
+            unsafe {
+                let pb = general_pasteboard()?;
+                let ours: i64 = msg_send![pb, clearContents];
+                let value = nsstring_new(text);
+                if value.is_null() {
+                    bail!("NSString for the paste text returned nil");
+                }
+                let ty = nsstring_new(TEXT_TYPE);
+                if ty.is_null() {
+                    let _: () = msg_send![value, release];
+                    bail!("NSString for the pasteboard type returned nil");
+                }
+                let ok: bool = msg_send![pb, setString: value forType: ty];
+                let _: () = msg_send![value, release];
+                let _: () = msg_send![ty, release];
+                if !ok {
+                    bail!("NSPasteboard setString:forType: returned NO");
+                }
+                Ok(ours)
+            }
+        })
+    }
+
+    /// The plain text currently on the general pasteboard, if any.
+    pub(super) fn pasteboard_text() -> Option<String> {
+        let _guard = lock();
+        autoreleasepool(|| {
+            // SAFETY: `ty` is +1 and released here; `stringForType:` returns an
+            // autoreleased NSString that `nsstring_to_string` copies out.
+            unsafe {
+                let pb = general_pasteboard().ok()?;
+                let ty = nsstring_new(TEXT_TYPE);
+                if ty.is_null() {
+                    return None;
+                }
+                let s: id = msg_send![pb, stringForType: ty];
+                let out = nsstring_to_string(s);
+                let _: () = msg_send![ty, release];
+                out
+            }
+        })
+    }
+
     /// Current `NSPasteboard.changeCount`; bumps on every write by any process.
     pub(super) fn pasteboard_change_count() -> i64 {
         let _guard = lock();
@@ -427,12 +502,10 @@ fn clip_get(clip: &Mutex<Clipboard>) -> Result<Option<String>> {
     }
 }
 
-fn clip_set(clip: &Mutex<Clipboard>, text: &str) -> Result<()> {
-    let _pb = pasteboard::lock();
-    let mut c = clip.lock().unwrap_or_else(|e| e.into_inner());
-    c.set_text(text.to_string())?;
-    Ok(())
-}
+// There is no `clip_set`: writing the paste text goes through
+// `pasteboard::write_text`, which returns the changeCount its own write
+// produced. arboard cannot report that, and reading the count back afterwards
+// is exactly the race the delayed restore has to be immune to.
 
 pub struct MacosSelection {
     clipboard: Mutex<Clipboard>,
@@ -459,9 +532,12 @@ impl MacosSelection {
 
     fn replace_via_clipboard_fallback(&self, text: &str) -> Result<()> {
         let snap = snapshot_pasteboard().context("snapshot pasteboard before ⌘V")?;
-        clip_set(&self.clipboard, text)?;
-        // changeCount right after our write; any later copy by the user bumps it.
-        let ours = pasteboard_change_count();
+        // Write and read the guard in one call: `clearContents` returns the
+        // changeCount it produced, so `ours` is always Selara's own write and
+        // never an intervening one from another process.
+        let ours =
+            pasteboard::write_text(text).context("write the paste text to the pasteboard")?;
+        let written = text.to_string();
         // Let the pasteboard settle before synthesizing ⌘V.
         thread::sleep(Duration::from_millis(80));
         clipboard_paste()?;
@@ -474,6 +550,12 @@ impl MacosSelection {
                     ours,
                     now, "pasteboard changed since our paste; leaving it alone"
                 );
+                return;
+            }
+            // Second guard on the contents themselves, so a writer that somehow
+            // leaves the count alone still cannot have its content discarded.
+            if pasteboard::pasteboard_text().as_deref() != Some(written.as_str()) {
+                debug!("pasteboard no longer holds our paste text; leaving it alone");
                 return;
             }
             if let Err(e) = restore_pasteboard(&snap) {
@@ -717,7 +799,8 @@ mod tests {
     }
 
     use super::pasteboard::{
-        pasteboard_change_count, restore_pasteboard, snapshot_pasteboard, PasteboardSnapshot,
+        pasteboard_change_count, pasteboard_text, restore_pasteboard, snapshot_pasteboard,
+        write_text, PasteboardSnapshot,
     };
     use arboard::Clipboard;
     use std::sync::{Mutex, MutexGuard};
@@ -816,5 +899,34 @@ mod tests {
         restore_pasteboard(&empty).expect("restore empty snapshot");
         let after = snapshot_pasteboard().expect("snapshot after clear");
         assert!(after.items.is_empty(), "pasteboard has no items: {after:?}");
+    }
+
+    /// The guard the delayed restore relies on: the changeCount it compares
+    /// against has to be the one our own write produced, not one read back
+    /// afterwards, which another process could have bumped in between.
+    #[test]
+    fn write_text_returns_the_change_count_of_its_own_write() {
+        let _exclusive = exclusive();
+        let _guard = RestoreOnDrop(snapshot_pasteboard().expect("initial snapshot"));
+
+        let before = pasteboard_change_count();
+        let ours = write_text("selara paste text").expect("write paste text");
+
+        assert!(
+            ours > before,
+            "the write bumped the count: {before} -> {ours}"
+        );
+        assert_eq!(
+            pasteboard_change_count(),
+            ours,
+            "nothing bumps the count between the write and a later read"
+        );
+        assert_eq!(pasteboard_text().as_deref(), Some("selara paste text"));
+
+        // A later write by anyone else moves the count away, which is what makes
+        // the delayed restore back off instead of clobbering their content.
+        let theirs = write_text("someone else's copy").expect("second write");
+        assert_ne!(theirs, ours);
+        assert_eq!(pasteboard_text().as_deref(), Some("someone else's copy"));
     }
 }
