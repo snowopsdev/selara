@@ -42,6 +42,22 @@ async fn json_or_raw(
     }
 }
 
+/// Error for a Responses API response that ended incomplete.
+///
+/// Only `max_output_tokens` is a token limit; every other reason gets its own
+/// message naming what the API actually reported, so a `content_filter` stop is
+/// not dressed up as "pick a model with a larger output limit". Either way the
+/// partial text is discarded.
+fn incomplete_response_error(reason: &str) -> CoreError {
+    if reason == "max_output_tokens" {
+        return truncation_error("response incomplete: max_output_tokens");
+    }
+    CoreError::Provider(format!(
+        "the model stopped before finishing (incomplete_details.reason = {reason}); \
+         the partial result was discarded because it would have replaced your selection"
+    ))
+}
+
 /// Error returned when a provider stopped generating because it hit its output
 /// token limit. Callers replace the user's selection with the result, so a
 /// silently truncated rewrite would destroy text; surfacing it as an error is
@@ -69,12 +85,62 @@ pub fn is_reasoning_model(id: &str) -> bool {
     o_series || bare.starts_with("gpt-5")
 }
 
-/// `max_tokens` for an Anthropic request sized to the input. A rewrite's output
-/// is roughly the length of its input; at ~4 chars per token, `chars / 2` gives
-/// about 2x headroom. The floor keeps short inputs generous and the ceiling
-/// stays under current model output limits.
-pub fn anthropic_max_tokens(input_chars: usize) -> u32 {
-    (input_chars / 2).clamp(4096, 32_000) as u32
+/// Every Claude model has always accepted this many output tokens, so it is the
+/// safe request size for a model id this build does not recognise.
+const ANTHROPIC_MIN_MAX_TOKENS: u32 = 4_096;
+/// The most this helper ever asks for. Chosen because every Claude model from
+/// 3.7 / 4 onwards accepts at least this much.
+const ANTHROPIC_MAX_MAX_TOKENS: u32 = 32_000;
+
+/// The output-token ceiling of `model`.
+///
+/// Anthropic rejects a `max_tokens` above the selected model's output limit
+/// with HTTP 400, and that limit is per model: the original Claude 3 family
+/// caps at 4,096 and Claude 3.5 at 8,192, while Claude 3.7 and everything after
+/// it accepts at least 64,000. Because the provider takes arbitrary model ids
+/// — a custom gateway, or a model released after this build — an id that
+/// matches nothing known gets the floor rather than an optimistic guess, which
+/// is exactly the fixed 4,096 that used to be sent unconditionally.
+///
+/// A vendor prefix is stripped first, so OpenRouter-style `anthropic/claude-…`
+/// ids classify the same as bare ones.
+///
+/// The dynamic alternative is `GET /v1/models/{id}`, whose `max_tokens` field
+/// reports this per model; that costs an extra round trip on every completion,
+/// and this covers the published families with a safe fallback for the rest.
+fn anthropic_model_max_tokens(model: &str) -> u32 {
+    let id = model.trim().to_ascii_lowercase();
+    let bare = id.rsplit('/').next().unwrap_or(id.as_str());
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|p| bare.starts_with(p));
+
+    if starts(&["claude-3-5-", "claude-3.5-"]) {
+        8_192
+    } else if starts(&["claude-3-7-", "claude-3.7-"]) {
+        // 64,000, i.e. more than this helper ever asks for.
+        ANTHROPIC_MAX_MAX_TOKENS
+    } else if starts(&["claude-3-", "claude-3."]) {
+        // Claude 3 Opus / Sonnet / Haiku.
+        4_096
+    } else if bare.starts_with("claude-") {
+        // Claude 4 and later. The lowest ceiling in that range is Opus 4 /
+        // Opus 4.1 at 32,000; the rest are 64,000 or more.
+        ANTHROPIC_MAX_MAX_TOKENS
+    } else {
+        ANTHROPIC_MIN_MAX_TOKENS
+    }
+}
+
+/// `max_tokens` for an Anthropic request sized to the input, then held to what
+/// `model` actually accepts. A rewrite's output is roughly the length of its
+/// input; at ~4 chars per token, `chars / 2` gives about 2x headroom. The floor
+/// keeps short inputs generous, and the model's own ceiling has the last word
+/// so a long selection cannot produce a request the API rejects outright.
+pub fn anthropic_max_tokens(model: &str, input_chars: usize) -> u32 {
+    let want = (input_chars / 2).clamp(
+        ANTHROPIC_MIN_MAX_TOKENS as usize,
+        ANTHROPIC_MAX_MAX_TOKENS as usize,
+    ) as u32;
+    want.min(anthropic_model_max_tokens(model))
 }
 
 /// Chat Completions `message.content` is a string, or an array of text parts.
@@ -243,7 +309,7 @@ impl LlmProvider for AnthropicProvider {
         let client = http_client()?;
         let body = json!({
             "model": self.model,
-            "max_tokens": anthropic_max_tokens(req.user.chars().count()),
+            "max_tokens": anthropic_max_tokens(&self.model, req.user.chars().count()),
             "system": req.system,
             "messages": [
                 {"role": "user", "content": req.user}
@@ -338,7 +404,7 @@ impl LlmProvider for ChatGptCodexProvider {
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
         let mut out = String::new();
-        let mut truncated = false;
+        let mut incomplete: Option<String> = None;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -346,7 +412,7 @@ impl LlmProvider for ChatGptCodexProvider {
                 if let Some(delta) = parse_sse_output_text_delta(&event) {
                     out.push_str(&delta);
                 }
-                truncated |= sse_event_marks_truncation(&event);
+                incomplete = incomplete.or_else(|| sse_event_incomplete_reason(&event));
             }
         }
         // Trailing event without final blank line
@@ -354,12 +420,12 @@ impl LlmProvider for ChatGptCodexProvider {
             if let Some(delta) = parse_sse_output_text_delta(&buf) {
                 out.push_str(&delta);
             }
-            truncated |= sse_event_marks_truncation(&buf);
+            incomplete = incomplete.or_else(|| sse_event_incomplete_reason(&buf));
         }
         // Drain the whole stream first so the connection closes cleanly, but
         // never hand back partial text: the caller would write it over the selection.
-        if truncated {
-            return Err(truncation_error("response incomplete: max_output_tokens"));
+        if let Some(reason) = incomplete {
+            return Err(incomplete_response_error(&reason));
         }
 
         let trimmed = out.trim().to_string();
@@ -396,30 +462,41 @@ fn parse_sse_event(event_block: &str) -> Option<(Option<String>, serde_json::Val
     Some((event_name, value))
 }
 
-/// True when a Responses API terminal event says the output was cut short:
-/// a `response.incomplete` event, a `response.completed` whose `response.status`
-/// is not `completed`, or any terminal event whose
-/// `response.incomplete_details.reason` is `max_output_tokens`.
-pub fn sse_event_marks_truncation(event_block: &str) -> bool {
-    let Some((event_name, value)) = parse_sse_event(event_block) else {
-        return false;
-    };
+/// Stand-in when a terminal event says the response is incomplete but names no
+/// `incomplete_details.reason`.
+pub const UNKNOWN_INCOMPLETE_REASON: &str = "unspecified";
+
+/// Why a Responses API terminal event says the output was cut short, if it was.
+///
+/// Terminal-and-incomplete means a `response.incomplete` event, a
+/// `response.completed` whose `response.status` is not `completed`, or any
+/// terminal event carrying an `incomplete_details.reason`. The reason itself is
+/// returned rather than folded into a boolean: `max_output_tokens` is a token
+/// limit the user can act on by shortening the selection or changing model, but
+/// `content_filter` and the other reasons are not, and telling someone to pick
+/// a bigger model for a content filter is wrong advice. A reason-less incomplete
+/// yields `UNKNOWN_INCOMPLETE_REASON`, so the partial output is still rejected.
+pub fn sse_event_incomplete_reason(event_block: &str) -> Option<String> {
+    let (event_name, value) = parse_sse_event(event_block)?;
     let json_type = value.get("type").and_then(|v| v.as_str());
     let is_type = |name: &str| event_name.as_deref() == Some(name) || json_type == Some(name);
-    if is_type("response.incomplete") {
-        return true;
-    }
     let reason = value
         .pointer("/response/incomplete_details/reason")
         .and_then(|v| v.as_str());
-    if reason == Some("max_output_tokens") {
-        return true;
+
+    if is_type("response.incomplete") {
+        return Some(reason.unwrap_or(UNKNOWN_INCOMPLETE_REASON).to_string());
+    }
+    if let Some(reason) = reason {
+        return Some(reason.to_string());
     }
     if is_type("response.completed") {
         let status = value.pointer("/response/status").and_then(|v| v.as_str());
-        return status.is_some_and(|s| s != "completed");
+        if status.is_some_and(|s| s != "completed") {
+            return Some(UNKNOWN_INCOMPLETE_REASON.to_string());
+        }
     }
-    false
+    None
 }
 
 /// Extract text from an SSE event whose `event:` is `response.output_text.delta`
@@ -1061,7 +1138,9 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
         let (base, rx) = spawn_http_capture(200, payload, "application/json");
         let provider = AnthropicProvider {
             api_key: "k".into(),
-            model: "m".into(),
+            // A real id: the sizing is now capped by the model's own output
+            // limit, so this must not be a placeholder.
+            model: "claude-sonnet-4-5".into(),
             base_url: base,
         };
         let out = provider
@@ -1076,42 +1155,141 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
         assert_eq!(sent["max_tokens"], 10_000, "{}", sent["max_tokens"]);
     }
 
+    /// The same request against a 8,192-token model must send 8,192, not the
+    /// 10,000 the input size alone would ask for — Anthropic rejects the larger
+    /// value with HTTP 400 before generating anything.
+    #[tokio::test]
+    async fn anthropic_request_is_held_to_the_model_output_limit() {
+        let payload = r#"{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}"#;
+        let (base, rx) = spawn_http_capture(200, payload, "application/json");
+        let provider = AnthropicProvider {
+            api_key: "k".into(),
+            model: "claude-3-5-sonnet-latest".into(),
+            base_url: base,
+        };
+        provider
+            .complete(CompletionRequest {
+                system: "s".into(),
+                user: "x".repeat(20_000),
+            })
+            .await
+            .unwrap();
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["max_tokens"], 8_192, "{}", sent["max_tokens"]);
+    }
+
     #[test]
     fn anthropic_max_tokens_clamps_to_input_size() {
-        assert_eq!(anthropic_max_tokens(0), 4096);
-        assert_eq!(anthropic_max_tokens(100), 4096);
-        assert_eq!(anthropic_max_tokens(8192), 4096);
-        assert_eq!(anthropic_max_tokens(20_000), 10_000);
-        assert_eq!(anthropic_max_tokens(1_000_000), 32_000);
+        let model = "claude-sonnet-4-5";
+        assert_eq!(anthropic_max_tokens(model, 0), 4096);
+        assert_eq!(anthropic_max_tokens(model, 100), 4096);
+        assert_eq!(anthropic_max_tokens(model, 8192), 4096);
+        assert_eq!(anthropic_max_tokens(model, 20_000), 10_000);
+        assert_eq!(anthropic_max_tokens(model, 1_000_000), 32_000);
+    }
+
+    /// The regression: a long selection asked for up to 32,000 output tokens
+    /// regardless of model, and Anthropic answers HTTP 400 when that exceeds
+    /// the selected model's ceiling - so a request that used to succeed at the
+    /// old fixed 4,096 started failing before generation.
+    #[test]
+    fn anthropic_max_tokens_never_exceeds_the_model_ceiling() {
+        // Claude 3 family: 4,096.
+        assert_eq!(
+            anthropic_max_tokens("claude-3-opus-20240229", 1_000_000),
+            4_096
+        );
+        assert_eq!(
+            anthropic_max_tokens("claude-3-haiku-20240307", 100_000),
+            4_096
+        );
+        // Claude 3.5: 8,192.
+        assert_eq!(
+            anthropic_max_tokens("claude-3-5-sonnet-latest", 1_000_000),
+            8_192
+        );
+        assert_eq!(
+            anthropic_max_tokens("claude-3-5-haiku-latest", 30_000),
+            8_192
+        );
+        // Claude 3.7 and Claude 4+: at least 32,000, so the input sizing wins.
+        assert_eq!(
+            anthropic_max_tokens("claude-3-7-sonnet-latest", 1_000_000),
+            32_000
+        );
+        assert_eq!(anthropic_max_tokens("claude-opus-4-1", 1_000_000), 32_000);
+        // A vendor prefix must not defeat the classification.
+        assert_eq!(
+            anthropic_max_tokens("anthropic/claude-3-5-sonnet-latest", 1_000_000),
+            8_192
+        );
+        // An id this build does not know gets the always-safe floor.
+        assert_eq!(anthropic_max_tokens("my-gateway-model", 1_000_000), 4_096);
     }
 
     #[test]
     fn sse_truncation_detects_incomplete_terminal_events() {
         let incomplete = "event: response.incomplete\n\
 data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n";
-        assert!(sse_event_marks_truncation(incomplete));
+        assert_eq!(
+            sse_event_incomplete_reason(incomplete).as_deref(),
+            Some("max_output_tokens")
+        );
 
         let completed_but_cut = "event: response.completed\n\
 data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n";
-        assert!(sse_event_marks_truncation(completed_but_cut));
+        assert_eq!(
+            sse_event_incomplete_reason(completed_but_cut).as_deref(),
+            Some("max_output_tokens")
+        );
 
         let completed_wrong_status =
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"incomplete\"}}\n";
-        assert!(sse_event_marks_truncation(completed_wrong_status));
+        assert_eq!(
+            sse_event_incomplete_reason(completed_wrong_status).as_deref(),
+            Some(UNKNOWN_INCOMPLETE_REASON)
+        );
     }
 
     #[test]
     fn sse_truncation_ignores_normal_events() {
         let completed = "event: response.completed\n\
 data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"incomplete_details\":null}}\n";
-        assert!(!sse_event_marks_truncation(completed));
+        assert!(sse_event_incomplete_reason(completed).is_none());
 
         let delta = "event: response.output_text.delta\n\
 data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n";
-        assert!(!sse_event_marks_truncation(delta));
+        assert!(sse_event_incomplete_reason(delta).is_none());
 
-        assert!(!sse_event_marks_truncation("data: [DONE]\n"));
-        assert!(!sse_event_marks_truncation("event: ping\n"));
+        assert!(sse_event_incomplete_reason("data: [DONE]\n").is_none());
+        assert!(sse_event_incomplete_reason("event: ping\n").is_none());
+    }
+
+    /// The regression: every `response.incomplete` was reported as a token
+    /// limit, so a content-filter stop told the user to pick a model with a
+    /// larger output limit - advice that cannot help.
+    #[test]
+    fn non_token_limit_incomplete_reasons_are_reported_as_themselves() {
+        let filtered = "event: response.incomplete\n\
+data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"}}}\n";
+        assert_eq!(
+            sse_event_incomplete_reason(filtered).as_deref(),
+            Some("content_filter")
+        );
+
+        let msg = incomplete_response_error("content_filter").to_string();
+        assert!(
+            msg.contains("content_filter"),
+            "names the real reason: {msg}"
+        );
+        assert!(
+            !msg.contains("larger output limit"),
+            "does not give token-limit advice: {msg}"
+        );
+
+        // The token-limit case keeps its original wording and advice.
+        let token = incomplete_response_error("max_output_tokens").to_string();
+        assert!(token.contains("larger output limit"), "{token}");
     }
 
     #[tokio::test]
