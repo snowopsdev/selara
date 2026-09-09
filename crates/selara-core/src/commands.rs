@@ -1148,6 +1148,28 @@ mod tests {
 
     /// Streams the input back one line at a time (newline included), so
     /// tests can see exactly which fragments the sink received.
+    /// Streams a fixed reply line by line whatever the input, so the finished
+    /// text can differ from the selection the cleaner compares it against.
+    struct CannedStreamProvider(&'static str);
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CannedStreamProvider {
+        async fn complete(&self, _req: CompletionRequest) -> Result<String, CoreError> {
+            Ok(self.0.to_string())
+        }
+
+        async fn complete_stream(
+            &self,
+            _req: CompletionRequest,
+            on_delta: &mut DeltaSink<'_>,
+        ) -> Result<String, CoreError> {
+            for line in self.0.split_inclusive('\n') {
+                on_delta(line);
+            }
+            Ok(self.0.to_string())
+        }
+    }
+
     struct LineStreamProvider;
 
     #[async_trait::async_trait]
@@ -1170,12 +1192,15 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_stream_cleans_replace_final_text_but_forwards_raw_deltas() {
+        // The selection is plain, so the fence and preamble the model added
+        // are framing and are stripped from the returned text - but not from
+        // the deltas, which are for progress display only.
         let fenced = "```\nHere is the corrected text:\nTwo cats.\n```";
         let mut seen: Vec<String> = Vec::new();
         let out = run_command_stream(
-            &LineStreamProvider,
+            &CannedStreamProvider(fenced),
             &cmd(),
-            fenced,
+            "Two cats!",
             None,
             PromptVars::default(),
             &mut |d: &str| seen.push(d.to_string()),

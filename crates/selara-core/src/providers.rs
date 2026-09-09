@@ -537,7 +537,11 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
         let mut out = String::new();
         let mut truncated = false;
+        let mut terminated = false;
         for_each_sse_event(resp, |event| {
+            if sse_is_done_sentinel(event) {
+                terminated = true;
+            }
             let Some((_, value)) = parse_sse_event(event) else {
                 return Ok(());
             };
@@ -553,12 +557,12 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 out.push_str(text);
                 on_delta(text);
             }
-            if value
+            if let Some(reason) = value
                 .pointer("/choices/0/finish_reason")
                 .and_then(|v| v.as_str())
-                == Some("length")
             {
-                truncated = true;
+                terminated = true;
+                truncated |= reason == "length";
             }
             Ok(())
         })
@@ -567,6 +571,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
         // never hand back partial text: the caller would write it over the selection.
         if truncated {
             return Err(truncation_error("finish_reason=length"));
+        }
+        if !terminated {
+            return Err(incomplete_stream_error("no finish_reason or [DONE] event"));
         }
         let trimmed = out.trim().to_string();
         if trimmed.is_empty() {
@@ -669,6 +676,7 @@ impl LlmProvider for AnthropicProvider {
 
         let mut out = String::new();
         let mut truncated = false;
+        let mut terminated = false;
         for_each_sse_event(resp, |event| {
             let Some((event_name, value)) = parse_sse_event(event) else {
                 return Ok(());
@@ -685,12 +693,15 @@ impl LlmProvider for AnthropicProvider {
                     }
                 }
                 "message_delta" => {
-                    if value.pointer("/delta/stop_reason").and_then(|v| v.as_str())
-                        == Some("max_tokens")
+                    // The final message_delta carries the stop reason; earlier
+                    // ones leave it null.
+                    if let Some(stop) = value.pointer("/delta/stop_reason").and_then(|v| v.as_str())
                     {
-                        truncated = true;
+                        terminated = true;
+                        truncated |= stop == "max_tokens";
                     }
                 }
+                "message_stop" => terminated = true,
                 "error" => {
                     let message = value
                         .pointer("/error/message")
@@ -701,8 +712,8 @@ impl LlmProvider for AnthropicProvider {
                         "Anthropic stream error: {message}"
                     )));
                 }
-                // message_start, content_block_start/stop, ping, message_stop:
-                // nothing to extract; the body ends after message_stop.
+                // message_start, content_block_start/stop, ping: nothing to
+                // extract; the body ends after message_stop.
                 _ => {}
             }
             Ok(())
@@ -710,6 +721,9 @@ impl LlmProvider for AnthropicProvider {
         .await?;
         if truncated {
             return Err(truncation_error("stop_reason=max_tokens"));
+        }
+        if !terminated {
+            return Err(incomplete_stream_error("no message_stop event"));
         }
         let trimmed = out.trim().to_string();
         if trimmed.is_empty() {
@@ -795,6 +809,7 @@ impl LlmProvider for ChatGptCodexProvider {
 
         let mut out = String::new();
         let mut incomplete: Option<String> = None;
+        let mut terminated = false;
         for_each_sse_event(resp, |event| {
             if let Some(delta) = parse_sse_output_text_delta(event) {
                 out.push_str(&delta);
@@ -803,6 +818,7 @@ impl LlmProvider for ChatGptCodexProvider {
             if incomplete.is_none() {
                 incomplete = sse_event_incomplete_reason(event);
             }
+            terminated |= sse_event_is_terminal(event);
             Ok(())
         })
         .await?;
@@ -810,6 +826,9 @@ impl LlmProvider for ChatGptCodexProvider {
         // never hand back partial text: the caller would write it over the selection.
         if let Some(reason) = incomplete {
             return Err(incomplete_response_error(&reason));
+        }
+        if !terminated {
+            return Err(incomplete_stream_error("no response.completed event"));
         }
 
         let trimmed = out.trim().to_string();
@@ -820,6 +839,46 @@ impl LlmProvider for ChatGptCodexProvider {
         }
         Ok(trimmed)
     }
+}
+
+/// A stream that ends without the provider's terminal event may have been cut
+/// short by a proxy or a dropped connection, and the text collected so far can
+/// stop mid-sentence. Replace would paste that over the whole selection, so an
+/// unterminated stream is an error rather than a silently partial answer.
+fn incomplete_stream_error(detail: &str) -> CoreError {
+    CoreError::Provider(format!(
+        "the response stream ended before the model finished ({detail}); \
+         nothing was written, try again"
+    ))
+}
+
+/// True when the block is the `[DONE]` sentinel that closes an OpenAI-style
+/// stream. `parse_sse_event` deliberately returns `None` for it, so terminal
+/// detection has to look at the raw block.
+fn sse_is_done_sentinel(event_block: &str) -> bool {
+    event_block
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .any(|data| data.trim() == "[DONE]")
+}
+
+/// True when the block is a Responses API terminal event, i.e. the server said
+/// the response is over instead of the connection merely ending.
+pub fn sse_event_is_terminal(event_block: &str) -> bool {
+    if sse_is_done_sentinel(event_block) {
+        return true;
+    }
+    let Some((event_name, value)) = parse_sse_event(event_block) else {
+        return false;
+    };
+    let kind = event_name
+        .as_deref()
+        .or_else(|| value.get("type").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    matches!(
+        kind,
+        "response.completed" | "response.incomplete" | "response.failed" | "error"
+    )
 }
 
 /// Split one SSE event block into its `event:` name and parsed JSON `data:`
@@ -2040,6 +2099,73 @@ data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",
             "must not leak partial output: {msg}"
         );
         assert_eq!(seen, 1, "the delta before the cut-off is still forwarded");
+    }
+
+    #[tokio::test]
+    async fn openai_stream_without_a_terminal_event_is_an_error() {
+        // The server closes cleanly after two deltas: no finish_reason, no
+        // [DONE]. The text so far may be cut off mid-sentence.
+        let d1 = openai_delta("\"Half a \"");
+        let d2 = openai_delta("\"sente\"");
+        let (base, _rx) = spawn_http_chunked(200, "text/event-stream", vec![&d1, &d2]);
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ended before the model finished"), "{msg}");
+        assert!(
+            !msg.contains("sente"),
+            "must not leak partial output: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_stream_accepts_done_without_finish_reason() {
+        // Some OpenAI-compatible servers close with [DONE] only; that is a
+        // complete stream.
+        let d1 = openai_delta("\"whole answer\"");
+        let (base, _rx) =
+            spawn_http_chunked(200, "text/event-stream", vec![&d1, "data: [DONE]\n\n"]);
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap();
+        assert_eq!(out, "whole answer");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_without_message_stop_is_an_error() {
+        let d1 = anthropic_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"half a sente"}}"#,
+        );
+        let (base, _rx) = spawn_http_chunked(200, "text/event-stream", vec![&d1]);
+        let err = anthropic_provider(base)
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ended before the model finished"), "{msg}");
+        assert!(
+            !msg.contains("sente"),
+            "must not leak partial output: {msg}"
+        );
+    }
+
+    #[test]
+    fn sse_terminal_events_are_recognised() {
+        assert!(sse_event_is_terminal("data: [DONE]\n"));
+        assert!(sse_event_is_terminal(
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n"
+        ));
+        assert!(sse_event_is_terminal(
+            "data: {\"type\":\"response.incomplete\"}\n"
+        ));
+        assert!(!sse_event_is_terminal(
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n"
+        ));
+        assert!(!sse_event_is_terminal("event: ping\n"));
     }
 
     #[tokio::test]
