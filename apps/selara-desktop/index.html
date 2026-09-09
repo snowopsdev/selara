@@ -985,12 +985,16 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     if (loginBtn) {
       loginBtn.onclick = async () => {
         setStatus("Opening Codex login…");
+        loginBtn.disabled = true;
+        loginBtn.textContent = "Waiting for browser sign-in…";
         try {
           chatgptStatus = await invoke("chatgpt_login");
           setStatus(chatgptStatus.logged_in ? "ChatGPT signed in" : chatgptStatus.message);
           renderModels();
         } catch (e) {
           setStatus(String(e));
+          loginBtn.disabled = false;
+          loginBtn.textContent = "Sign in with ChatGPT";
         }
       };
     }
