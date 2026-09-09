@@ -99,6 +99,10 @@ pub struct LimitsConfig {
     /// Extra caution before Replace above this size. `0` = never.
     #[serde(default = "default_replace_warn_chars")]
     pub replace_warn_chars: u64,
+    /// Ask before sending text that looks like an API key, private key, JWT,
+    /// or card number to a hosted provider. Local servers are exempt.
+    #[serde(default = "default_true")]
+    pub secret_guard: bool,
 }
 
 fn default_hotkey() -> String {
@@ -121,12 +125,17 @@ fn default_replace_warn_chars() -> u64 {
     4_000
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
             soft_warn_chars: default_soft_warn_chars(),
             hard_max_chars: default_hard_max_chars(),
             replace_warn_chars: default_replace_warn_chars(),
+            secret_guard: default_true(),
         }
     }
 }
@@ -753,6 +762,14 @@ model = "gpt-4o-mini"
         .unwrap();
         assert_eq!(cfg.limits.hard_max_chars, 2);
         assert_eq!(cfg.limits.replace_warn_chars, 3);
+        assert!(cfg.limits.secret_guard, "omitted secret_guard stays on");
+
+        cfg.apply_section(
+            "limits",
+            serde_json::json!({"soft_warn_chars": 1, "hard_max_chars": 2, "secret_guard": false}),
+        )
+        .unwrap();
+        assert!(!cfg.limits.secret_guard);
 
         let err = cfg
             .apply_section("nope", serde_json::json!({}))
