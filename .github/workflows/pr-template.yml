@@ -24,9 +24,15 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           # Dependabot titles come from .github/dependabot.yml `commit-message`
           # prefixes plus its own lowercase subject ("bump foo from 1 to 2"),
-          # which may run past the length cap. Relax only those two rules for
-          # dependabot[bot]; the type/scope shape still has to be valid.
-          DEPENDABOT: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+          # which may run past the length cap. Relax only those two rules, and
+          # only for a PR that is both authored by dependabot[bot] and pushed to
+          # a `dependabot/` branch in this repository (Dependabot always does
+          # both). No other bot, and no human or app reusing that branch prefix,
+          # gets the relaxation; the type/scope shape still has to be valid.
+          DEPENDABOT: >-
+            ${{ github.event.pull_request.user.login == 'dependabot[bot]'
+            && github.event.pull_request.head.repo.full_name == github.repository
+            && startsWith(github.event.pull_request.head.ref, 'dependabot/') }}
         run: |
           python3 - <<'PY'
           import os, re, sys
@@ -65,9 +71,17 @@ jobs:
           print(f'PR title "{title}" is a valid conventional commit subject.')
           PY
 
-      # Dependabot writes its own release-notes body, not the template.
+      # Dependabot writes its own release-notes body, not the template, and it
+      # cannot be taught to. The exemption is documented in AGENTS.md and is
+      # deliberately narrow: it needs all three of the author login, a head
+      # branch in this repository (not a fork), and Dependabot's own
+      # `dependabot/` branch prefix. Any other bot or app still has to file a
+      # PR description that follows the template.
       - name: Check PR body sections
-        if: github.event.pull_request.user.login != 'dependabot[bot]'
+        if: >-
+          !(github.event.pull_request.user.login == 'dependabot[bot]'
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && startsWith(github.event.pull_request.head.ref, 'dependabot/'))
         env:
           # Passed through the environment so PR text is never interpolated
           # into the script.

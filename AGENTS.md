@@ -27,6 +27,7 @@ Rust workspace: `crates/selara-core` (config, commands, providers), `apps/selara
 - Template with per-section guidance: `.github/PULL_REQUEST_TEMPLATE.md`. Use it as the body; do not substitute another format.
 - Evidence includes commands run with results, test output, and screenshots for any UI change.
 - This applies to any tool or agent opening or editing a PR, including `gh pr create --body`.
+- Two automated PRs are exempt from the body check because their descriptions are generated and cannot be templated: release-please's `chore(main): release X.Y.Z` (changelog body) and Dependabot's dependency bumps (upstream release notes). The Dependabot exemption requires the `dependabot[bot]` author, a head branch in this repository, and a `dependabot/` branch prefix — no other bot or app is exempt.
 
 ## Commits
 - Conventional format: `type(scope): Subject` (`feat`, `fix`, `ref`, `docs`, `build`, `ci`, `chore`).
