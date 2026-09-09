@@ -1,4 +1,7 @@
 use selara_core::codex_cli::{self, CodexLoginStatus};
+use selara_core::commands::{
+    merge_commands, parse_command_pack, render_command_pack, MergeMode, MergeReport,
+};
 use selara_core::config::{serve_pidfile, ApiKeySource, AppConfig};
 use selara_core::providers::{list_chatgpt_models, list_provider_models, ProviderKind};
 use selara_core::secrets;
@@ -7,6 +10,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, Runtime, WindowEvent,
 };
+use tauri_plugin_dialog::DialogExt;
 
 #[tauri::command]
 fn get_config() -> Result<AppConfig, String> {
@@ -60,6 +64,62 @@ fn clear_api_key(kind: ProviderKind) -> Result<ApiKeySource, String> {
     secrets::keychain_delete(kind).map_err(|e| e.to_string())?;
     let cfg = AppConfig::load_or_init(&AppConfig::default_path()).map_err(|e| e.to_string())?;
     Ok(cfg.api_key_source())
+}
+
+/// Save every command as a TOML pack via a save dialog. Returns the path, or
+/// `None` when the dialog was cancelled. Runs off the main thread because the
+/// blocking dialog must not be shown from it.
+#[tauri::command]
+async fn export_commands(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let cfg = AppConfig::load_or_init(&AppConfig::default_path()).map_err(|e| e.to_string())?;
+    let text = render_command_pack(&cfg.commands).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(picked) = app
+            .dialog()
+            .file()
+            .set_title("Export Selara commands")
+            .set_file_name("selara-commands.toml")
+            .add_filter("Command pack", &["toml", "json"])
+            .blocking_save_file()
+        else {
+            return Ok(None);
+        };
+        let path = picked.into_path().map_err(|e| e.to_string())?;
+        std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+    .map_err(|e| format!("export task failed: {e}"))?
+}
+
+/// Pick a TOML/JSON pack, merge it into the config with `mode`, save, and
+/// report what happened. `None` when the dialog was cancelled.
+#[tauri::command]
+async fn import_commands(
+    app: tauri::AppHandle,
+    mode: MergeMode,
+) -> Result<Option<MergeReport>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(picked) = app
+            .dialog()
+            .file()
+            .set_title("Import Selara commands")
+            .add_filter("Command pack", &["toml", "json"])
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = picked.into_path().map_err(|e| e.to_string())?;
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let incoming = parse_command_pack(&text).map_err(|e| e.to_string())?;
+        let cfg_path = AppConfig::default_path();
+        let mut cfg = AppConfig::load_or_init(&cfg_path).map_err(|e| e.to_string())?;
+        let report = merge_commands(&mut cfg.commands, incoming, mode);
+        cfg.save(&cfg_path).map_err(|e| e.to_string())?;
+        Ok(Some(report))
+    })
+    .await
+    .map_err(|e| format!("import task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -198,6 +258,7 @@ fn show_settings<R: Runtime>(app: &tauri::AppHandle<R>) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
@@ -205,6 +266,8 @@ pub fn run() {
             api_key_source,
             store_api_key,
             clear_api_key,
+            export_commands,
+            import_commands,
             config_path,
             chatgpt_auth_status,
             chatgpt_login,
