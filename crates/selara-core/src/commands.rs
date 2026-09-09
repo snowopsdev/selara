@@ -104,6 +104,125 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
     ]
 }
 
+/// A shareable set of commands: `commands = [...]` / `[[commands]]` in TOML, or
+/// a JSON array / `{ "commands": [...] }`. This is the same shape as the
+/// `commands` table in `config.toml`, so a config file is itself a valid pack.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CommandPack {
+    #[serde(default)]
+    pub commands: Vec<WritingCommand>,
+}
+
+/// Parse a pack from JSON or TOML text.
+pub fn parse_command_pack(text: &str) -> Result<Vec<WritingCommand>, CoreError> {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        if let Ok(list) = serde_json::from_str::<Vec<WritingCommand>>(trimmed) {
+            return Ok(list);
+        }
+        if let Ok(pack) = serde_json::from_str::<CommandPack>(trimmed) {
+            return Ok(pack.commands);
+        }
+    }
+    match toml::from_str::<CommandPack>(text) {
+        Ok(pack) if !pack.commands.is_empty() => Ok(pack.commands),
+        Ok(_) => Err(CoreError::Config(
+            "command pack contains no commands (expected `[[commands]]` in TOML or a JSON array)"
+                .into(),
+        )),
+        Err(e) => Err(CoreError::Config(format!(
+            "could not read command pack as JSON or TOML: {e}"
+        ))),
+    }
+}
+
+/// Render commands as a TOML pack (`[[commands]]` tables).
+pub fn render_command_pack(commands: &[WritingCommand]) -> Result<String, CoreError> {
+    let pack = CommandPack {
+        commands: commands.to_vec(),
+    };
+    toml::to_string_pretty(&pack).map_err(|e| CoreError::Config(e.to_string()))
+}
+
+/// What to do when an imported command has the same id as an existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMode {
+    /// Keep the existing command and add the import under a new id.
+    KeepBoth,
+    /// Overwrite the existing command in place (its position is kept).
+    Replace,
+    /// Leave the existing command alone and drop the import.
+    Skip,
+}
+
+/// Outcome of [`merge_commands`], for the UI's status line.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct MergeReport {
+    pub added: usize,
+    pub replaced: usize,
+    pub skipped: usize,
+    /// `(imported id, id it was stored under)` when `KeepBoth` had to rename.
+    pub renamed: Vec<(String, String)>,
+    /// Imported hotkeys dropped because another command already uses them.
+    pub hotkeys_dropped: usize,
+}
+
+/// Merge `incoming` into `existing` according to `mode`. Hotkeys that would
+/// collide with a command already in the list are dropped, never duplicated,
+/// so a reload of `serve` cannot fail on a duplicate binding.
+pub fn merge_commands(
+    existing: &mut Vec<WritingCommand>,
+    incoming: Vec<WritingCommand>,
+    mode: MergeMode,
+) -> MergeReport {
+    let mut report = MergeReport::default();
+    for mut cmd in incoming {
+        let pos = existing.iter().position(|c| c.id == cmd.id);
+        // Hotkey collisions: compare against everything except the command
+        // this one is about to replace.
+        if let Some(hk) = cmd
+            .hotkey
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+        {
+            let taken = existing.iter().enumerate().any(|(i, c)| {
+                Some(i) != pos.filter(|_| mode == MergeMode::Replace)
+                    && c.hotkey.as_deref().map(str::trim) == Some(hk)
+            });
+            if taken {
+                cmd.hotkey = None;
+                report.hotkeys_dropped += 1;
+            }
+        }
+        match (pos, mode) {
+            (None, _) => {
+                existing.push(cmd);
+                report.added += 1;
+            }
+            (Some(i), MergeMode::Replace) => {
+                existing[i] = cmd;
+                report.replaced += 1;
+            }
+            (Some(_), MergeMode::Skip) => report.skipped += 1,
+            (Some(_), MergeMode::KeepBoth) => {
+                let original = cmd.id.clone();
+                let mut n = 2;
+                while existing.iter().any(|c| c.id == format!("{original}-{n}")) {
+                    n += 1;
+                }
+                cmd.id = format!("{original}-{n}");
+                cmd.label = format!("{} (imported)", cmd.label);
+                report.renamed.push((original, cmd.id.clone()));
+                existing.push(cmd);
+                report.added += 1;
+            }
+        }
+    }
+    report
+}
+
 /// Values a prompt can reference with `{{name}}` placeholders.
 ///
 /// `{{language}}` is the preferred language from config; `{{app}}` is the
@@ -663,6 +782,75 @@ mod tests {
         let system = build_system_prompt_with(&popup_cmd(), Some("Mention {{app}}."), vars);
         assert!(system.contains("Additional user instruction: Mention Slack."));
         assert!(system.contains("Preferred language: de."));
+    }
+
+    fn pack_cmd(id: &str, hotkey: Option<&str>) -> WritingCommand {
+        WritingCommand {
+            id: id.into(),
+            label: id.to_uppercase(),
+            kind: CommandKind::Replace,
+            prompt: format!("Do {id}."),
+            hotkey: hotkey.map(str::to_string),
+            model: None,
+        }
+    }
+
+    #[test]
+    fn pack_round_trips_through_toml_and_reads_json() {
+        let cmds = vec![pack_cmd("a", Some("ctrl+1")), pack_cmd("b", None)];
+        let toml_text = render_command_pack(&cmds).unwrap();
+        assert!(toml_text.contains("[[commands]]"), "{toml_text}");
+        let back = parse_command_pack(&toml_text).unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].hotkey.as_deref(), Some("ctrl+1"));
+
+        let json_array = r#"[{"id":"x","label":"X","kind":"popup","prompt":"P"}]"#;
+        assert_eq!(
+            parse_command_pack(json_array).unwrap()[0].kind,
+            CommandKind::Popup
+        );
+        let json_obj = r#"{"commands":[{"id":"y","label":"Y","kind":"replace","prompt":"Q"}]}"#;
+        assert_eq!(parse_command_pack(json_obj).unwrap()[0].id, "y");
+
+        // A whole config.toml is a valid pack too (only its commands are read).
+        let cfg_like = "hotkey = \"ctrl+space\"\n[provider]\nkind = \"anthropic\"\nbase_url = \"\"\nmodel = \"m\"\n[[commands]]\nid = \"z\"\nlabel = \"Z\"\nkind = \"popup\"\nprompt = \"R\"\n";
+        assert_eq!(parse_command_pack(cfg_like).unwrap()[0].id, "z");
+
+        assert!(parse_command_pack("not a pack").is_err());
+        assert!(parse_command_pack("hotkey = \"x\"").is_err(), "no commands");
+    }
+
+    #[test]
+    fn merge_modes_and_hotkey_collisions() {
+        let base = || vec![pack_cmd("a", Some("ctrl+1")), pack_cmd("b", None)];
+        let incoming = || vec![pack_cmd("a", Some("ctrl+9")), pack_cmd("c", Some("ctrl+1"))];
+
+        let mut e = base();
+        let r = merge_commands(&mut e, incoming(), MergeMode::Skip);
+        assert_eq!((r.added, r.replaced, r.skipped), (1, 0, 1));
+        assert_eq!(e.len(), 3);
+        assert_eq!(e[0].hotkey.as_deref(), Some("ctrl+1"), "existing untouched");
+        assert_eq!(e[2].id, "c");
+        assert_eq!(e[2].hotkey, None, "colliding hotkey dropped");
+        assert_eq!(r.hotkeys_dropped, 1);
+
+        let mut e = base();
+        let r = merge_commands(&mut e, incoming(), MergeMode::Replace);
+        assert_eq!((r.added, r.replaced, r.skipped), (1, 1, 0));
+        assert_eq!(e[0].hotkey.as_deref(), Some("ctrl+9"), "replaced in place");
+        assert_eq!(e[0].label, "A");
+        // `c` wanted ctrl+1, which `a` no longer holds after the replace.
+        assert_eq!(e[2].hotkey.as_deref(), Some("ctrl+1"));
+        assert_eq!(r.hotkeys_dropped, 0);
+
+        let mut e = base();
+        e.push(pack_cmd("a-2", None));
+        let r = merge_commands(&mut e, incoming(), MergeMode::KeepBoth);
+        assert_eq!((r.added, r.replaced, r.skipped), (2, 0, 0));
+        assert_eq!(r.renamed, vec![("a".to_string(), "a-3".to_string())]);
+        let renamed = e.iter().find(|c| c.id == "a-3").unwrap();
+        assert_eq!(renamed.label, "A (imported)");
+        assert_eq!(renamed.hotkey.as_deref(), Some("ctrl+9"));
     }
 
     struct EchoProvider;

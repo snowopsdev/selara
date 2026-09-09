@@ -29,6 +29,16 @@ description = "Remove the provider API key from the OS keychain"
 commands.allow = ["clear_api_key"]
 
 [[permission]]
+identifier = "allow-export-commands"
+description = "Write the command list to a file chosen in a save dialog"
+commands.allow = ["export_commands"]
+
+[[permission]]
+identifier = "allow-import-commands"
+description = "Merge commands from a file chosen in an open dialog"
+commands.allow = ["import_commands"]
+
+[[permission]]
 identifier = "allow-config-path"
 description = "Read config file path"
 commands.allow = ["config_path"]
