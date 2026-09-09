@@ -171,7 +171,7 @@ async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
                 }
             };
             let command = find_command(&cfg.commands, &id)?;
-            let provider = cfg.build_provider()?;
+            let provider = cfg.build_provider_for(command)?;
             let out = run_command(
                 provider.as_ref(),
                 command,

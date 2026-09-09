@@ -597,7 +597,7 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
 
         self.runtime.spawn(async move {
             let result = async {
-                let provider = cfg.build_provider()?;
+                let provider = cfg.build_provider_for(&cmd)?;
                 let vars = PromptVars {
                     language: Some(&cfg.language),
                     app: app_name.as_deref(),

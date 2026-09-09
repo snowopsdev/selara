@@ -20,6 +20,11 @@ pub struct WritingCommand {
     /// Optional global shortcut that runs this command directly (skip picker).
     #[serde(default)]
     pub hotkey: Option<String>,
+    /// Optional model id that overrides `provider.model` for this command
+    /// only (same provider and credentials), e.g. a cheap local model for
+    /// Proofread and a frontier model for Rewrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 pub fn builtin_commands() -> Vec<WritingCommand> {
@@ -30,6 +35,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             kind: CommandKind::Replace,
             prompt: "Proofread the text. Fix grammar, spelling, and punctuation only. Keep meaning and voice. Return only the corrected text.".into(),
             hotkey: None,
+            model: None,
         },
         WritingCommand {
             id: "rewrite".into(),
@@ -37,6 +43,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             kind: CommandKind::Replace,
             prompt: "Rewrite the text for clarity and flow. Keep the original meaning. Return only the rewritten text.".into(),
             hotkey: None,
+            model: None,
         },
         WritingCommand {
             id: "friendly".into(),
@@ -44,6 +51,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             kind: CommandKind::Replace,
             prompt: "Rewrite the text in a warm, friendly tone. Return only the rewritten text.".into(),
             hotkey: None,
+            model: None,
         },
         WritingCommand {
             id: "professional".into(),
@@ -51,6 +59,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             kind: CommandKind::Replace,
             prompt: "Rewrite the text in a clear, professional tone. Return only the rewritten text.".into(),
             hotkey: None,
+            model: None,
         },
         WritingCommand {
             id: "concise".into(),
@@ -58,6 +67,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             kind: CommandKind::Replace,
             prompt: "Make the text more concise without losing key meaning. Return only the rewritten text.".into(),
             hotkey: None,
+            model: None,
         },
         WritingCommand {
             id: "summary".into(),
@@ -65,6 +75,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             kind: CommandKind::Popup,
             prompt: "Summarize the text clearly in markdown. Use short paragraphs or bullets as needed.".into(),
             hotkey: None,
+            model: None,
         },
         WritingCommand {
             id: "key_points".into(),
@@ -72,6 +83,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             kind: CommandKind::Popup,
             prompt: "Extract the key points as a markdown bullet list.".into(),
             hotkey: None,
+            model: None,
         },
         WritingCommand {
             id: "table".into(),
@@ -79,6 +91,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             kind: CommandKind::Popup,
             prompt: "Convert the useful information in the text into a markdown table.".into(),
             hotkey: None,
+            model: None,
         },
         WritingCommand {
             id: "translate".into(),
@@ -86,6 +99,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             kind: CommandKind::Replace,
             prompt: "Translate the text to {{language}}. Return only the translation.".into(),
             hotkey: None,
+            model: None,
         },
     ]
 }
@@ -392,6 +406,7 @@ mod tests {
             kind: CommandKind::Replace,
             prompt: "Proofread the text.".into(),
             hotkey: None,
+            model: None,
         }
     }
 
@@ -402,6 +417,7 @@ mod tests {
             kind: CommandKind::Popup,
             prompt: "Summarize the text.".into(),
             hotkey: None,
+            model: None,
         }
     }
 
