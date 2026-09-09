@@ -12,8 +12,8 @@ mod selection;
 pub use clipboard::MacosClipboard;
 pub use hotkey::{parse_hotkey, HotkeyAction, MacosHotkey};
 pub use selection::{
-    accessibility_trusted, activate_pid, frontmost_pid, mouse_location, prompt_accessibility,
-    screen_visible_frame_at, MacosSelection,
+    accessibility_trusted, activate_pid, frontmost_app_name, frontmost_bundle_id, frontmost_pid,
+    mouse_location, prompt_accessibility, screen_visible_frame_at, MacosSelection,
 };
 
 /// Convenience bundle of macOS platform services.
