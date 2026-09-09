@@ -43,6 +43,13 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/snowopsdev/selara/releases/latest/download/latest.json"],
+      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBKEY"
     }
   }
 }
