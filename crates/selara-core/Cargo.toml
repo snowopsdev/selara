@@ -9,6 +9,7 @@ description = "Provider-agnostic writing commands and config for Selara"
 anyhow.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
+keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native", "windows-native"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

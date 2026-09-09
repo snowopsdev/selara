@@ -1,6 +1,7 @@
 use selara_core::codex_cli::{self, CodexLoginStatus};
-use selara_core::config::AppConfig;
+use selara_core::config::{ApiKeySource, AppConfig};
 use selara_core::providers::{list_chatgpt_models, list_provider_models, ProviderKind};
+use selara_core::secrets;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -31,6 +32,34 @@ fn save_config_section(section: String, value: serde_json::Value) -> Result<AppC
         .map_err(|e| e.to_string())?;
     cfg.save(&path).map_err(|e| e.to_string())?;
     Ok(cfg)
+}
+
+/// Where the current provider's key comes from (env, keychain, config, none).
+#[tauri::command]
+fn api_key_source() -> Result<ApiKeySource, String> {
+    let cfg = AppConfig::load_or_init(&AppConfig::default_path()).map_err(|e| e.to_string())?;
+    Ok(cfg.api_key_source())
+}
+
+/// Store a key in the OS keychain for `kind` and drop any plaintext copy from
+/// config.toml so the keychain entry is what `serve` and the CLI use.
+#[tauri::command]
+fn store_api_key(kind: ProviderKind, api_key: String) -> Result<ApiKeySource, String> {
+    secrets::keychain_set(kind, &api_key).map_err(|e| e.to_string())?;
+    let path = AppConfig::default_path();
+    let mut cfg = AppConfig::load_or_init(&path).map_err(|e| e.to_string())?;
+    if cfg.provider.kind == kind && cfg.provider.api_key.is_some() {
+        cfg.provider.api_key = None;
+        cfg.save(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(cfg.api_key_source())
+}
+
+#[tauri::command]
+fn clear_api_key(kind: ProviderKind) -> Result<ApiKeySource, String> {
+    secrets::keychain_delete(kind).map_err(|e| e.to_string())?;
+    let cfg = AppConfig::load_or_init(&AppConfig::default_path()).map_err(|e| e.to_string())?;
+    Ok(cfg.api_key_source())
 }
 
 #[tauri::command]
@@ -89,6 +118,7 @@ async fn list_provider_models_cmd(
                 .find_map(|var| std::env::var(var).ok())
                 .filter(|k| !k.trim().is_empty())
         })
+        .or_else(|| secrets::keychain_get(kind).ok().flatten())
         .unwrap_or_default();
     list_provider_models(kind, &base_url, key.trim())
         .await
@@ -110,6 +140,9 @@ pub fn run() {
             get_config,
             save_config,
             save_config_section,
+            api_key_source,
+            store_api_key,
+            clear_api_key,
             config_path,
             chatgpt_auth_status,
             chatgpt_login,

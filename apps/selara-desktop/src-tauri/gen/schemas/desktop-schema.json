@@ -387,6 +387,12 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Report where the provider API key comes from (never the key itself)",
+          "type": "string",
+          "const": "allow-api-key-source",
+          "markdownDescription": "Report where the provider API key comes from (never the key itself)"
+        },
+        {
           "description": "Read ChatGPT / Codex CLI login status (Experimental)",
           "type": "string",
           "const": "allow-chatgpt-auth-status",
@@ -403,6 +409,12 @@
           "type": "string",
           "const": "allow-chatgpt-logout",
           "markdownDescription": "Log out of ChatGPT / Codex CLI (Experimental)"
+        },
+        {
+          "description": "Remove the provider API key from the OS keychain",
+          "type": "string",
+          "const": "allow-clear-api-key",
+          "markdownDescription": "Remove the provider API key from the OS keychain"
         },
         {
           "description": "Read config file path",
@@ -439,6 +451,12 @@
           "type": "string",
           "const": "allow-save-config-section",
           "markdownDescription": "Save one section of the Selara config, leaving the rest as on disk"
+        },
+        {
+          "description": "Store the provider API key in the OS keychain",
+          "type": "string",
+          "const": "allow-store-api-key",
+          "markdownDescription": "Store the provider API key in the OS keychain"
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
