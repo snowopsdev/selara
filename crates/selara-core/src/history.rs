@@ -2,9 +2,9 @@
 //! result (or the text it replaced) can be copied back later from Settings.
 //!
 //! One JSON object per line in `history.jsonl` next to the config file. The
-//! file holds selected text verbatim, so it is created owner-only (0600) and
-//! trimmed to the newest [`MAX_ENTRIES`] rows once it grows past
-//! [`TRIM_ABOVE`] lines.
+//! file holds selected text verbatim, so it is kept owner-only (0600) and
+//! trimmed back to the newest [`MAX_ENTRIES`] rows as soon as it grows past
+//! that many lines.
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
@@ -13,10 +13,9 @@ use std::path::{Path, PathBuf};
 use crate::commands::CommandKind;
 use crate::error::CoreError;
 
-/// Entries kept after a trim.
+/// Retention limit: the file never holds more than this many entries once an
+/// append has finished, which is the last-50 limit Settings advertises.
 pub const MAX_ENTRIES: usize = 50;
-/// Line count above which `append` trims the file back to `MAX_ENTRIES`.
-pub const TRIM_ABOVE: usize = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
@@ -50,7 +49,12 @@ fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    opts.open(path)
+    let file = opts.open(path)?;
+    // `mode` only applies when the file is created. One that already exists —
+    // restored from a backup, or made by hand — keeps whatever permissions it
+    // came with, so tighten it before more selected text is appended.
+    crate::config::restrict_to_owner(path);
+    Ok(file)
 }
 
 /// Write the whole file at once with owner-only permissions, via a sibling
@@ -102,8 +106,8 @@ fn read_lines(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(out)
 }
 
-/// Append one entry as a JSON line, then trim the file to the newest
-/// [`MAX_ENTRIES`] once it exceeds [`TRIM_ABOVE`] lines.
+/// Append one entry as a JSON line, then trim the file back to the newest
+/// [`MAX_ENTRIES`] as soon as it holds more than that.
 pub fn append(path: &Path, entry: &HistoryEntry) -> Result<(), CoreError> {
     let line = serde_json::to_string(entry)
         .map_err(|e| CoreError::Config(format!("history entry: {e}")))?;
@@ -113,7 +117,7 @@ pub fn append(path: &Path, entry: &HistoryEntry) -> Result<(), CoreError> {
         file.write_all(b"\n").map_err(io_err)?;
     }
     let lines = read_lines(path).map_err(io_err)?;
-    if lines.len() > TRIM_ABOVE {
+    if lines.len() > MAX_ENTRIES {
         let keep = &lines[lines.len() - MAX_ENTRIES..];
         rewrite(path, keep).map_err(io_err)?;
     }
@@ -217,31 +221,49 @@ mod tests {
     }
 
     #[test]
-    fn append_trims_to_newest_fifty_above_sixty() {
+    fn append_never_keeps_more_than_the_advertised_limit() {
         let dir = temp_dir();
         let path = dir.path().join("history.jsonl");
-        for i in 0..TRIM_ABOVE as u64 {
+        let max = MAX_ENTRIES as u64;
+        for i in 0..max {
             append(&path, &entry(i)).unwrap();
         }
         assert_eq!(
             load(&path).unwrap().len(),
-            TRIM_ABOVE,
-            "no trim at exactly the threshold"
+            MAX_ENTRIES,
+            "no trim at exactly the limit"
         );
-        append(&path, &entry(TRIM_ABOVE as u64)).unwrap();
-        let got = load(&path).unwrap();
-        assert_eq!(got.len(), MAX_ENTRIES);
-        assert_eq!(got[0], entry(TRIM_ABOVE as u64));
-        assert_eq!(
-            got[MAX_ENTRIES - 1],
-            entry((TRIM_ABOVE + 1 - MAX_ENTRIES) as u64)
-        );
+        // Every append past the limit trims: the file must stay at 50 rather
+        // than drift up to a looser threshold before the first trim.
+        for i in max..max + 12 {
+            append(&path, &entry(i)).unwrap();
+            let got = load(&path).unwrap();
+            assert_eq!(got.len(), MAX_ENTRIES, "after entry {i}");
+            assert_eq!(got[0], entry(i));
+            assert_eq!(got[MAX_ENTRIES - 1], entry(i + 1 - max));
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_tightens_a_preexisting_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir();
+        let path = dir.path().join("history.jsonl");
+        // A restored backup or a hand-made file: it already exists, so the
+        // create-time 0600 never applies to it.
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        append(&path, &entry(1)).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "history must be owner-only, got {mode:o}");
+        assert_eq!(load(&path).unwrap(), vec![entry(1)]);
     }
 
     #[test]

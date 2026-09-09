@@ -156,7 +156,7 @@ Every command that finishes while `serve` runs is recorded: the time, the comman
 
 Restoring is a clipboard copy on purpose: putting text back into the source app needs that app's focus and Accessibility, which the Settings window does not have. Right after a Replace, **Undo last replace** in the picker (or the `undo_hotkey`) still does that live.
 
-Privacy: the list lives in `history.jsonl` in the config directory (`~/.config/selara/` by default), is created readable only by you (mode 0600), holds the selected text and the results verbatim, and is trimmed to the newest 50 entries. Clear it from the tab, or delete the file, if you would rather not keep it around.
+Privacy: the list lives in `history.jsonl` in the config directory (`~/.config/selara/` by default), is kept readable only by you (mode 0600, re-applied on every append), holds the selected text and the results verbatim, and is trimmed to the newest 50 entries. Clear it from the tab, or delete the file, if you would rather not keep it around.
 
 ### Limits
 
