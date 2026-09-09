@@ -471,6 +471,16 @@ button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
 }
 .status-list li > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+.serve-log { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.serve-log summary { cursor: default; }
+.serve-log pre {
+  margin: 8px 0 0; max-height: 180px; overflow: auto; white-space: pre-wrap;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--text);
+  padding: 8px 10px; border-radius: var(--radius-control); background: var(--glass-strong); border: 1px solid var(--hairline);
+}
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 500; color: var(--text); }
+.check-row input[type="checkbox"] { width: auto; height: auto; margin: 0; box-shadow: none; }
+
 .soon {
   border: 1px dashed var(--hairline-strong); border-radius: var(--radius-control); padding: 12px;
   color: var(--muted); font-size: 13px;
@@ -582,7 +592,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
   // @selara-helpers-end
   const statusEl = () => $("#save-status");
-  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*)$/;
+  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*|Will start at login|Will not start at login)$/;
   const BAD_STATUS = /error|failed|required|before saving|not available|could not|enoent/i;
   function setStatus(msg) {
     const text = msg || "";
@@ -726,6 +736,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   // provider be reached, and which shortcuts are live. Read-only apart from
   // the two buttons; editing happens in the other tabs.
   let serveStatus = null;
+  let supervisor = null;
+  let serveLogLines = [];
   let axGranted = null;
 
   async function refreshStatusData() {
@@ -733,6 +745,17 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       serveStatus = await invoke("serve_status");
     } catch (e) {
       serveStatus = { running: false, pid: null, pidfile: "", error: String(e) };
+    }
+    try {
+      supervisor = await invoke("serve_supervisor_status");
+    } catch (_) {
+      supervisor = null;
+    }
+    try {
+      serveLogLines = await invoke("serve_log");
+      if (!Array.isArray(serveLogLines)) serveLogLines = [];
+    } catch (_) {
+      serveLogLines = [];
     }
     try {
       axGranted = await invoke("accessibility_status");
@@ -770,17 +793,39 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const auth = p.auth === "chatgpt" && kind === "open_ai_compatible" ? "chatgpt" : "api_key";
     const sv = serveStatus || {};
 
-    // 1. serve
-    const serveDot = sv.error ? "unknown" : (sv.running ? "ok" : "bad");
-    const serveState = sv.error ? "Unknown" : (sv.running ? "Running (pid " + sv.pid + ")" : "Not running");
+    // 1. serve (managed by this app, running elsewhere, or stopped)
+    const sup = supervisor || {};
+    const running = !!(sv.running || sup.managed);
+    const pid = sup.pid || sv.pid;
+    const serveDot = sv.error ? "unknown" : (running ? "ok" : "bad");
+    const serveState = sv.error
+      ? "Unknown"
+      : (sup.managed ? "Managed by the Settings app (pid " + pid + ")"
+        : (running ? "Running outside the app (pid " + pid + ")" : "Not running"));
+    const serveActions =
+      "<div class=\"actions\">" +
+      (running
+        ? (sup.managed
+          ? "<button type=\"button\" class=\"btn secondary\" id=\"serve-stop\">Stop</button>" +
+            "<button type=\"button\" class=\"btn secondary\" id=\"serve-restart\">Restart</button>"
+          : "<p class=\"field-hint\">Started outside the app; stop it with Ctrl+C in its terminal. The app will not start a second copy.</p>")
+        : "<button type=\"button\" class=\"btn\" id=\"serve-start\">Start</button>") +
+      "</div>";
+    const logLines = (serveLogLines || []).slice(-40);
+    const serveLog = logLines.length
+      ? "<details class=\"serve-log\"><summary>Recent output (" + logLines.length + " lines)</summary><pre>" + escapeHtml(logLines.join("\n")) + "</pre></details>"
+      : "";
     const serveBody =
       "<p class=\"field-hint\">" +
-      (sv.running
-        ? "The global hotkey is live. Stop it with Ctrl+C in the terminal that runs it."
-        : "Hotkeys only work while it runs. Start it from the repo with <code>cargo run -p selara -- serve</code>, or <code>selara serve</code> from an installed build.") +
+      (running
+        ? "The global hotkey is live."
+        : "Hotkeys only work while it runs. Start it here, or from a terminal with <code>cargo run -p selara -- serve</code> / <code>selara serve</code>.") +
       "</p>" +
+      serveActions +
       "<dl class=\"status-meta\"><dt>Pidfile</dt><dd>" + escapeHtml(sv.pidfile || "unknown") + "</dd></dl>" +
-      (sv.error ? "<p class=\"field-hint error\">" + escapeHtml(sv.error) + "</p>" : "");
+      (sup.last_error ? "<p class=\"field-hint error\">" + escapeHtml(sup.last_error) + "</p>" : "") +
+      (sv.error ? "<p class=\"field-hint error\">" + escapeHtml(sv.error) + "</p>" : "") +
+      serveLog;
 
     // 2. Accessibility
     const axKnown = typeof axGranted === "boolean";
@@ -832,6 +877,25 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       statusCard("accessibility", "Accessibility", axDot, axState, axBody) +
       statusCard("provider", "Provider", "unknown", "Not checked", providerBody) +
       statusCard("shortcuts", "Shortcuts", "", shortcutCount + (shortcutCount === 1 ? " shortcut" : " shortcuts"), shortcutsBody);
+
+    async function serveAction(cmd, busy) {
+      setStatus(busy);
+      try {
+        await invoke(cmd);
+        await new Promise((r) => setTimeout(r, 600));
+        await refreshStatusData();
+        renderStatus();
+        setStatus("Status refreshed");
+      } catch (e) {
+        setStatus(String(e));
+      }
+    }
+    const startBtn = $("#serve-start");
+    if (startBtn) startBtn.onclick = () => serveAction("serve_start", "Starting serve…");
+    const stopBtn = $("#serve-stop");
+    if (stopBtn) stopBtn.onclick = () => serveAction("serve_stop", "Stopping serve…");
+    const restartBtn = $("#serve-restart");
+    if (restartBtn) restartBtn.onclick = () => serveAction("serve_restart", "Restarting serve…");
 
     $("#status-refresh").onclick = async () => {
       setStatus("Refreshing status…");
@@ -924,8 +988,30 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<input id=\"undo-hotkey\" value=\"" + escapeAttr(config.undo_hotkey || "") + "\" placeholder=\"Optional, e.g. ctrl+shift+z\" autocomplete=\"off\" spellcheck=\"false\" />" +
       "<p class=\"field-hint\">Puts back the text the last Replace overwrote. The picker also has an Undo button.</p>" +
       "</div></div>" +
+      "<div class=\"section-label\">Startup</div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"autostart\">Start at login</label>" +
+      "<div class=\"control-stack\">" +
+      "<label class=\"check-row\" for=\"autostart\"><input type=\"checkbox\" id=\"autostart\" /> Open the Settings app (and start serve) when you log in</label>" +
+      "<p class=\"field-hint\" id=\"autostart-hint\">Applies immediately; no save needed.</p>" +
+      "</div></div>" +
       "</div>" +
       "<div class=\"general-save\"><button class=\"btn\" id=\"save-general\">Save changes</button></div>";
+    const autostart = $("#autostart");
+    invoke("plugin:autostart|is_enabled").then((on) => { autostart.checked = !!on; }).catch((e) => {
+      autostart.disabled = true;
+      const hint = $("#autostart-hint");
+      if (hint) hint.textContent = "Start at login is unavailable: " + String(e);
+    });
+    autostart.onchange = async () => {
+      try {
+        await invoke(autostart.checked ? "plugin:autostart|enable" : "plugin:autostart|disable");
+        setStatus(autostart.checked ? "Will start at login" : "Will not start at login");
+      } catch (e) {
+        autostart.checked = !autostart.checked;
+        setStatus(String(e));
+      }
+    };
     $("#save-general").onclick = async () => {
       await saveSection("general", {
         language: $("#language").value.trim() || "en",
