@@ -1840,6 +1840,11 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<input id=\"replace_warn\" type=\"number\" min=\"0\" value=\"" + (L.replace_warn_chars ?? 4000) + "\" />" +
       "<p class=\"field-hint\">Ask again before replacing a selection larger than this.</p>" +
       "</div></div>" +
+      "<div class=\"section-label\">Secrets</div>" +
+      "<div class=\"form-row\">" +
+      "<label class=\"check-row\" for=\"secret_guard\"><input type=\"checkbox\" id=\"secret_guard\"" + (L.secret_guard === false ? "" : " checked") + " /> Warn before sending secret-shaped text to a hosted provider</label>" +
+      "<p class=\"field-hint\">Looks for API keys, private key blocks, JWTs, and card numbers. Local servers (localhost, .local, private IPs) are exempt.</p>" +
+      "</div>" +
       "</div>" +
       "<div class=\"limits-actions\">" +
       "<button class=\"btn linkish\" id=\"reset-limits\">Reset to defaults</button>" +
@@ -1850,10 +1855,11 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         soft_warn_chars: num($("#soft_warn").value),
         hard_max_chars: num($("#hard_max").value),
         replace_warn_chars: num($("#replace_warn").value),
+        secret_guard: $("#secret_guard").checked,
       });
     };
     $("#reset-limits").onclick = async () => {
-      await saveSection("limits", { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000 });
+      await saveSection("limits", { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000, secret_guard: true });
       renderLimits();
     };
   }

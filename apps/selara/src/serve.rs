@@ -13,7 +13,8 @@ use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::Watcher;
 use selara_core::commands::{run_command_stream, CommandKind, PromptVars, WritingCommand};
-use selara_core::config::{app_is_excluded, serve_pidfile, AppConfig, LimitsConfig};
+use selara_core::config::{app_is_excluded, serve_pidfile, AppConfig, LimitsConfig, ProviderAuth};
+use selara_core::guard::{provider_is_hosted, scan_secrets, SecretHit, SecretKind};
 use selara_platform::macos::{
     accessibility_trusted, activate_pid, frontmost_app_name, frontmost_bundle_id, frontmost_pid,
     mouse_location, prompt_accessibility, screen_visible_frame_at, HotkeyAction, MacosHotkey,
@@ -163,9 +164,30 @@ fn clamp_selection(current: usize, len: usize) -> usize {
     current.min(len.saturating_sub(1))
 }
 
+/// Picker banner for a selection that looks like it holds secrets. Names each
+/// kind once (first preview only) and never the full value.
+fn secret_banner(hits: &[SecretHit]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut seen: Vec<SecretKind> = Vec::new();
+    for hit in hits {
+        if seen.contains(&hit.kind) {
+            continue;
+        }
+        seen.push(hit.kind);
+        parts.push(format!("{} ({})", hit.kind.with_article(), hit.preview));
+    }
+    let list = match parts.len() {
+        0 => "a secret".to_string(),
+        1 => parts[0].clone(),
+        n => format!("{} and {}", parts[..n - 1].join(", "), parts[n - 1]),
+    };
+    format!("Looks like it contains {list}. This goes to a hosted provider. Send anyway?")
+}
+
 /// Whether a picker row may run right now. Mirrors the rails on the buttons:
-/// the hard max and an unacknowledged soft warn block everything, and an
-/// unacknowledged replace caution blocks Replace commands only.
+/// the hard max, an unacknowledged soft warn, and an unacknowledged secret
+/// warn block everything, and an unacknowledged replace caution blocks
+/// Replace commands only.
 fn picker_row_enabled(
     is_replace: bool,
     hard_blocked: bool,
@@ -452,6 +474,9 @@ struct ServeApp {
     target_pid: Option<i32>,
     /// Soft-warn acknowledged for the current selection.
     soft_warn_acked: bool,
+    /// Secret-shaped values found in the captured text; cleared per capture.
+    secret_hits: Vec<SecretHit>,
+    secret_guard_acked: bool,
     /// Replace-size warn acknowledged for the current selection.
     replace_warn_acked: bool,
     /// Command fired by its own shortcut that is waiting on a picker confirmation.
@@ -535,6 +560,8 @@ impl ServeApp {
             captured_range: None,
             target_pid: None,
             soft_warn_acked: false,
+            secret_hits: Vec::new(),
+            secret_guard_acked: false,
             replace_warn_acked: false,
             pending_direct: None,
             settings_status: String::new(),
@@ -758,6 +785,8 @@ impl ServeApp {
         self.generation += 1;
         self.target_pid = frontmost_pid();
         self.soft_warn_acked = false;
+        self.secret_guard_acked = false;
+        self.secret_hits.clear();
         self.replace_warn_acked = false;
         self.pending_direct = None;
         self.picker_filter.clear();
@@ -770,6 +799,9 @@ impl ServeApp {
                 self.captured_text = snap.text;
                 self.captured_app = snap.app_name;
                 self.captured_range = snap.range;
+                if self.config.limits.secret_guard {
+                    self.secret_hits = scan_secrets(&self.captured_text);
+                }
                 Ok(true)
             }
             Ok(None) => Err(
@@ -821,6 +853,20 @@ impl ServeApp {
             );
         }
         excluded
+    }
+
+    /// Requests leave the machine: the ChatGPT/Codex path always does, and a
+    /// BYOK provider does unless its base URL points at a local server.
+    fn provider_hosted(&self) -> bool {
+        let p = &self.config.provider;
+        matches!(p.auth, ProviderAuth::ChatGpt) || provider_is_hosted(p.kind, &p.base_url)
+    }
+
+    fn needs_secret_warn(&self) -> bool {
+        self.config.limits.secret_guard
+            && !self.secret_hits.is_empty()
+            && !self.secret_guard_acked
+            && self.provider_hosted()
     }
 
     fn on_hotkey(&mut self, ctx: &egui::Context) {
@@ -914,6 +960,7 @@ Select text in another app, then press its shortcut again.",
     /// `start_command` and is never skippable.
     fn needs_confirmation(&self, cmd: &WritingCommand) -> bool {
         self.needs_soft_warn()
+            || self.needs_secret_warn()
             || (matches!(cmd.kind, CommandKind::Replace) && self.needs_replace_warn())
     }
 
@@ -985,6 +1032,15 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
                 message: format!(
                     "Large selection ({} chars) — confirm via the picker, or raise soft warn in Settings.",
                     self.selection_chars()
+                ),
+            };
+            return;
+        }
+        if self.needs_secret_warn() {
+            self.phase = UiPhase::Error {
+                message: format!(
+                    "{} Confirm via the picker, or turn the secret guard off in Settings.",
+                    secret_banner(&self.secret_hits)
                 ),
             };
             return;
@@ -1379,7 +1435,7 @@ impl eframe::App for ServeApp {
                 let enabled = picker_row_enabled(
                     matches!(cmd.kind, CommandKind::Replace),
                     self.over_hard_max(),
-                    self.needs_soft_warn(),
+                    self.needs_soft_warn() || self.needs_secret_warn(),
                     self.needs_replace_warn(),
                 );
                 if enabled {
@@ -1399,6 +1455,7 @@ impl eframe::App for ServeApp {
         let mut save_settings = false;
         let mut reset_limits = false;
         let mut ack_soft = false;
+        let mut ack_secret = false;
         let mut ack_replace = false;
         let mut undo = false;
         let mut write_back: Option<(WriteBack, String)> = None;
@@ -1406,6 +1463,7 @@ impl eframe::App for ServeApp {
         let mut save_adhoc = false;
 
         let soft_blocked = matches!(self.phase, UiPhase::Picker) && self.needs_soft_warn();
+        let secret_blocked = matches!(self.phase, UiPhase::Picker) && self.needs_secret_warn();
         let hard_blocked = matches!(self.phase, UiPhase::Picker) && self.over_hard_max();
         let replace_caution = matches!(self.phase, UiPhase::Picker) && self.needs_replace_warn();
         let popup_actions = popup_actions(self.over_hard_max(), self.needs_replace_warn());
@@ -1510,6 +1568,15 @@ impl eframe::App for ServeApp {
                                 self.config.limits.hard_max_chars
                             ),
                         );
+                    } else if secret_blocked {
+                        ui.add_space(6.0);
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 80, 80),
+                            secret_banner(&self.secret_hits),
+                        );
+                        if ui.button("Send anyway").clicked() {
+                            ack_secret = true;
+                        }
                     } else if soft_blocked {
                         ui.add_space(6.0);
                         ui.colored_label(
@@ -1640,7 +1707,7 @@ impl eframe::App for ServeApp {
                                 let enabled = picker_row_enabled(
                                     matches!(cmd.kind, CommandKind::Replace),
                                     hard_blocked,
-                                    soft_blocked,
+                                    soft_blocked || secret_blocked,
                                     replace_caution,
                                 );
                                 // 1–9 only work while the box is empty, so the
@@ -1848,6 +1915,9 @@ impl eframe::App for ServeApp {
         if ack_soft {
             self.soft_warn_acked = true;
         }
+        if ack_secret {
+            self.secret_guard_acked = true;
+        }
         if ack_replace {
             self.replace_warn_acked = true;
         }
@@ -1968,10 +2038,15 @@ pub fn run(config_path: PathBuf) -> Result<()> {
         println!("command shortcuts: {}", cmd_shortcuts.join(", "));
     }
     println!(
-        "limits: soft_warn={} hard_max={} replace_warn={}",
+        "limits: soft_warn={} hard_max={} replace_warn={} secret_guard={}",
         config.limits.soft_warn_chars,
         config.limits.hard_max_chars,
-        config.limits.replace_warn_chars
+        config.limits.replace_warn_chars,
+        if config.limits.secret_guard {
+            "on"
+        } else {
+            "off"
+        }
     );
     println!(
         "accessibility: {}",
@@ -2025,11 +2100,12 @@ mod tests {
         adhoc_command, clamp_selection, command_from_instruction, default_picker_row, ellipsize,
         filter_commands, format_thousands, history_step, insert_range, insert_text,
         instruction_label, next_selection, picker_row_enabled, picker_rows, place_near,
-        popup_actions, push_history, replace_progress, should_apply_job, slugify,
+        popup_actions, push_history, replace_progress, secret_banner, should_apply_job, slugify,
         unique_command_id, PickerRow, PopupActions, ADHOC_ID, HISTORY_CAP,
     };
 
     use selara_core::commands::{CommandKind, WritingCommand};
+    use selara_core::guard::{SecretHit, SecretKind};
 
     const SIZE: (f64, f64) = (380.0, 440.0);
     /// 1920×1080 display with a 25 pt menu bar and a 70 pt Dock, top-left origin.
@@ -2137,6 +2213,38 @@ mod tests {
         assert_eq!(clamp_selection(7, 3), 2);
         assert_eq!(clamp_selection(1, 3), 1);
         assert_eq!(clamp_selection(4, 0), 0);
+    }
+
+    #[test]
+    fn secret_banner_names_each_kind_once_with_a_preview() {
+        let hit = |kind, preview: &str| SecretHit {
+            kind,
+            preview: preview.into(),
+        };
+        let hits = vec![
+            hit(SecretKind::ApiKey, "sk-abc1…"),
+            hit(SecretKind::ApiKey, "sk-xyz9…"),
+            hit(SecretKind::CardNumber, "4111 1…"),
+        ];
+        assert_eq!(
+            secret_banner(&hits),
+            "Looks like it contains an API key (sk-abc1…) and a card number (4111 1…). This goes to a hosted provider. Send anyway?"
+        );
+        let one = vec![hit(SecretKind::PrivateKey, "-----B…")];
+        assert_eq!(
+            secret_banner(&one),
+            "Looks like it contains a private key (-----B…). This goes to a hosted provider. Send anyway?"
+        );
+        let three = vec![
+            hit(SecretKind::Jwt, "eyJhbG…"),
+            hit(SecretKind::ApiKey, "ghp_ab…"),
+            hit(SecretKind::CardNumber, "3782 8…"),
+        ];
+        assert!(secret_banner(&three).starts_with(
+            "Looks like it contains a JWT (eyJhbG…), an API key (ghp_ab…) and a card number"
+        ));
+        // The banner never echoes a full value: previews are what came in.
+        assert!(!secret_banner(&hits).contains("sk-abc1234"));
     }
 
     #[test]
