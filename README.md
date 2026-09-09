@@ -152,6 +152,17 @@ The list of prompts the picker offers. Each row shows whether the command replac
 
 Click a row to edit it. The editor holds the label, the replace-or-popup mode, the prompt itself, an optional hotkey that runs the command directly without the picker, and an optional model that overrides the provider's model for that command only (a cheap local model for Proofread, a frontier model for Rewrite; same provider and key). `⌘↩` saves.
 
+**Apps** narrows a command to the apps it belongs in: the picker offers it only when the selection came from one of them, and its shortcut says `“Reply” is not enabled for Xcode` instead of running. The field is comma-separated app names or bundle ids (a trailing `*` matches by prefix), and leaving it empty — the default for every built-in command — offers the command everywhere. Typing a free-form instruction in the picker always works, whatever the frontmost app.
+
+```toml
+[[commands]]
+id = "reply"
+label = "Draft reply"
+kind = "popup"
+prompt = "Draft a short reply to this message."
+apps = ["Mail", "com.apple.Notes"]
+```
+
 <img alt="Command editor sheet for Proofread showing the label, the Replace selection mode, the full prompt text, and the ctrl+shift+p shortcut" src="docs/screenshots/settings-command-editor.png" width="820">
 
 ### History
