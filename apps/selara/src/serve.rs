@@ -628,6 +628,20 @@ impl ServeApp {
         excluded
     }
 
+    /// The undo shortcut, guarded like the other two.
+    ///
+    /// Undo is not a read of the current selection, but it is still one of
+    /// Selara's hotkeys, and an excluded app must see nothing from Selara at
+    /// all: unguarded it pops our error window over the excluded app when there
+    /// is nothing to undo, and otherwise reactivates the earlier target app and
+    /// rewrites text there.
+    fn on_undo_hotkey(&mut self, ctx: &egui::Context) {
+        if self.frontmost_is_excluded("undo hotkey") {
+            return;
+        }
+        self.undo_last_replace(ctx);
+    }
+
     fn on_hotkey(&mut self, ctx: &egui::Context) {
         if self.frontmost_is_excluded("picker hotkey") {
             return;
@@ -1026,7 +1040,7 @@ impl eframe::App for ServeApp {
             match action {
                 HotkeyAction::Picker => self.on_hotkey(ctx),
                 HotkeyAction::Command(id) => self.on_command_hotkey(ctx, &id),
-                HotkeyAction::Undo => self.undo_last_replace(ctx),
+                HotkeyAction::Undo => self.on_undo_hotkey(ctx),
             }
         }
 
