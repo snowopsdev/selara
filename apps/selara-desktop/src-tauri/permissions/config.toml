@@ -57,3 +57,18 @@ commands.allow = ["list_chatgpt_models_cmd"]
 identifier = "allow-list-provider-models"
 description = "List models from the configured BYOK provider"
 commands.allow = ["list_provider_models_cmd"]
+
+[[permission]]
+identifier = "allow-serve-status"
+description = "Report whether `selara serve` is running (reads its pidfile)"
+commands.allow = ["serve_status"]
+
+[[permission]]
+identifier = "allow-accessibility-status"
+description = "Report whether macOS Accessibility is granted to this app"
+commands.allow = ["accessibility_status"]
+
+[[permission]]
+identifier = "allow-open-accessibility-settings"
+description = "Open System Settings on the Accessibility privacy pane"
+commands.allow = ["open_accessibility_settings"]

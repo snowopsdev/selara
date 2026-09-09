@@ -1,5 +1,5 @@
 use selara_core::codex_cli::{self, CodexLoginStatus};
-use selara_core::config::{ApiKeySource, AppConfig};
+use selara_core::config::{serve_pidfile, ApiKeySource, AppConfig};
 use selara_core::providers::{list_chatgpt_models, list_provider_models, ProviderKind};
 use selara_core::secrets;
 use tauri::{
@@ -125,6 +125,68 @@ async fn list_provider_models_cmd(
         .map_err(|e| e.to_string())
 }
 
+/// Whether `selara serve` is running, read from the `serve.pid` file it writes
+/// next to the config. Shown on the Settings app's Status tab.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ServeStatus {
+    running: bool,
+    pid: Option<u32>,
+    pidfile: String,
+}
+
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // Signal 0 checks existence without delivering anything.
+        pid > 0 && unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+#[tauri::command]
+fn serve_status() -> ServeStatus {
+    let pidfile = serve_pidfile(&AppConfig::default_path());
+    let pid = std::fs::read_to_string(&pidfile)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok());
+    ServeStatus {
+        running: pid.is_some_and(pid_alive),
+        pid,
+        pidfile: pidfile.display().to_string(),
+    }
+}
+
+/// Whether this process is trusted for macOS Accessibility. `serve` needs the
+/// same grant, but for the binary that runs it (Terminal, iTerm, or the app).
+#[tauri::command]
+fn accessibility_status() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        selara_platform::macos::accessibility_trusted()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Open System Settings on the Privacy & Security -> Accessibility pane.
+#[tauri::command]
+#[allow(deprecated)] // shell.open still ships with the shell plugin we already bundle
+fn open_accessibility_settings(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+    app.shell()
+        .open(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            None,
+        )
+        .map_err(|e| e.to_string())
+}
+
 fn show_settings<R: Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
@@ -148,7 +210,10 @@ pub fn run() {
             chatgpt_login,
             chatgpt_logout,
             list_chatgpt_models_cmd,
-            list_provider_models_cmd
+            list_provider_models_cmd,
+            serve_status,
+            accessibility_status,
+            open_accessibility_settings
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]

@@ -1,6 +1,7 @@
 //! macOS desktop shell: global hotkey → command picker → replace / popup.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::Watcher;
 use selara_core::commands::{run_command_with, CommandKind, PromptVars, WritingCommand};
-use selara_core::config::{AppConfig, LimitsConfig};
+use selara_core::config::{serve_pidfile, AppConfig, LimitsConfig};
 use selara_platform::macos::{
     accessibility_trusted, activate_pid, frontmost_pid, prompt_accessibility, HotkeyAction,
     MacosHotkey, MacosSelection,
@@ -109,6 +110,8 @@ enum UiPhase {
 struct ServeApp {
     config: AppConfig,
     config_path: PathBuf,
+    /// `serve.pid` next to the config file; removed in `on_exit`.
+    pidfile: PathBuf,
     selection: Arc<MacosSelection>,
     hotkey: MacosHotkey,
     config_mtime: Option<SystemTime>,
@@ -176,6 +179,7 @@ impl ServeApp {
         Ok(Self {
             status_line: Self::status_for(&config),
             config,
+            pidfile: serve_pidfile(&config_path),
             config_path,
             selection,
             hotkey,
@@ -764,6 +768,10 @@ impl ServeApp {
 }
 
 impl eframe::App for ServeApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        remove_pidfile(&self.pidfile);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.hotkey.poll();
         self.poll_config();
@@ -1123,8 +1131,60 @@ impl eframe::App for ServeApp {
     }
 }
 
+/// `kill(pid, 0)` succeeds only while a process with that id exists and is
+/// ours to signal; anything else means the pidfile is stale.
+fn pid_alive(pid: i32) -> bool {
+    pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Record our pid in `serve.pid` (owner-only) so the Settings app's Status tab
+/// can tell whether the shell is running. A leftover file from a crashed run
+/// is replaced; a live one is reported and replaced too, since two shells
+/// cannot both own the hotkeys.
+fn write_pidfile(path: &Path) -> Result<()> {
+    if let Ok(raw) = std::fs::read_to_string(path) {
+        match raw.trim().parse::<i32>() {
+            Ok(old) if pid_alive(old) => tracing::warn!(
+                "selara: {} names a live process (pid {old}); another serve may be running",
+                path.display()
+            ),
+            _ => tracing::info!("selara: removing stale pidfile {}", path.display()),
+        }
+        let _ = std::fs::remove_file(path);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(path)
+        .with_context(|| format!("create pidfile {}", path.display()))?;
+    writeln!(file, "{}", std::process::id())?;
+    tracing::info!(
+        "selara: pid {} recorded in {}",
+        std::process::id(),
+        path.display()
+    );
+    Ok(())
+}
+
+fn remove_pidfile(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => tracing::info!("selara: removed pidfile {}", path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!("selara: could not remove {}: {e}", path.display()),
+    }
+}
+
 pub fn run(config_path: PathBuf) -> Result<()> {
     let config = AppConfig::load_or_init(&config_path)?;
+    write_pidfile(&serve_pidfile(&config_path))?;
     println!("config: {}", config_path.display());
     println!("hotkey: {}", config.hotkey);
     let cmd_shortcuts: Vec<String> = config
