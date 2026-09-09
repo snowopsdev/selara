@@ -15,6 +15,7 @@ const END = "// @selara-helpers-end";
 const NAMES = [
   "escapeHtml", "escapeAttr", "num", "slug", "kindLabel",
   "maskEmail", "prettyHotkey", "commandMatches", "statusDotClass",
+  "relativeTime", "previewLine",
 ];
 
 function loadHelpers() {
@@ -156,4 +157,24 @@ test("statusDotClass distinguishes unknown, ok, and bad", () => {
   assert.equal(H.statusDotClass({ logged_in: false, message: "Not logged in" }), "unknown");
   assert.equal(H.statusDotClass({ logged_in: false }), "unknown");
   assert.equal(H.statusDotClass({ logged_in: false, message: "" }), "unknown");
+});
+
+test("relativeTime buckets seconds, minutes, hours, and days", () => {
+  const now = 1_700_000_000;
+  assert.equal(H.relativeTime(now - 10, now), "just now");
+  assert.equal(H.relativeTime(now - 180, now), "3 min ago");
+  assert.equal(H.relativeTime(now - 2 * 3600, now), "2 h ago");
+  assert.equal(H.relativeTime(now - 5 * 86400, now), "5 d ago");
+  assert.equal(H.relativeTime(now + 60, now), "just now", "future timestamps clamp to now");
+  assert.equal(H.relativeTime(0, now), "unknown time");
+  assert.equal(H.relativeTime("nope", now), "unknown time");
+});
+
+test("previewLine collapses whitespace and truncates with an ellipsis", () => {
+  assert.equal(H.previewLine("  a\n\n  b\tc  ", 100), "a b c");
+  assert.equal(H.previewLine("", 10), "(empty)");
+  assert.equal(H.previewLine(null, 10), "(empty)");
+  assert.equal(H.previewLine("abcdefghij", 10), "abcdefghij");
+  assert.equal(H.previewLine("abcdefghijk", 10), "abcdefghi\u2026");
+  assert.equal(H.previewLine("abcd efghijk", 10), "abcd efgh\u2026");
 });

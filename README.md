@@ -27,13 +27,14 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 - **Per-command hotkeys.** Give a command its own shortcut and it runs on the selection immediately, skipping the picker. If the selection trips a size limit, the picker opens with the warning and the command runs once you confirm.
 - **Excluded apps.** List password managers, terminals, or anything else by name or bundle id and the hotkeys do nothing there: no picker, no selection or clipboard read.
 - **Undo and cancel.** Pressing Escape while a command is running discards its result instead of pasting it later. After a Replace, **Undo last replace** in the picker (or an optional `undo_hotkey`) puts the original text back.
+- **History.** The last 50 transformations (original and result, which command, which app) are kept in `history.jsonl` next to the config, and the Settings app lists them with **Copy result** and **Copy original** buttons, so a result you overwrote or a popup you closed is not lost.
 - **Any provider.** OpenAI-compatible `/chat/completions` (OpenAI, Ollama, LM Studio, vLLM), the Anthropic Messages API, or OpenRouter. Leave the base URL blank for the provider default or point it at a local server.
 - **Model discovery.** Load the model list straight from the provider. A bad key or URL shows up right there, so it doubles as a connection test.
 - **ChatGPT via Codex (experimental).** Reuse an existing ChatGPT subscription by signing in with the Codex CLI. Tokens stay in Codex's own auth store, never in Selara's config.
 - **Size limits.** A soft warning, a replace caution, and a hard maximum, so a stray select-all never sends 100k characters to a metered API. They apply to picker and shortcut runs alike.
 - **Secret guard.** If the selection looks like it holds an API key, a private key block, a JWT, or a card number, the picker asks before sending it to a hosted provider; local servers are exempt.
 - **Live config.** Everything lives in one TOML file. The `serve` process watches the config directory for changes and re-registers hotkeys as soon as the Settings app saves (with a 5-second poll as a fallback), while staying idle otherwise.
-- **Menu-bar Settings app.** A Tauri tray app with Status, General, Models, Commands, and Limits tabs. The Status tab shows whether `serve` is running, whether Accessibility is granted, and whether the provider answers. No Dock icon, closes to the tray.
+- **Menu-bar Settings app.** A Tauri tray app with Status, General, Models, Commands, History, and Limits tabs. The Status tab shows whether `serve` is running, whether Accessibility is granted, and whether the provider answers. No Dock icon, closes to the tray.
 - **Scriptable CLI.** `selara init`, `selara list-commands`, `selara run <command>`, and `selara key set|clear|status` for pipelines and quick checks.
 - **Keys in the keychain.** API keys go into the OS credential store (macOS Keychain) by default; `config.toml` stays free of secrets unless you choose otherwise.
 
@@ -137,6 +138,14 @@ The list of prompts the picker offers. Each row shows whether the command replac
 Click a row to edit it. The editor holds the label, the replace-or-popup mode, the prompt itself, an optional hotkey that runs the command directly without the picker, and an optional model that overrides the provider's model for that command only (a cheap local model for Proofread, a frontier model for Rewrite; same provider and key). `⌘↩` saves.
 
 <img alt="Command editor sheet for Proofread showing the label, the Replace selection mode, the full prompt text, and the ctrl+shift+p shortcut" src="docs/screenshots/settings-command-editor.png" width="820">
+
+### History
+
+Every command that finishes while `serve` runs is recorded: the time, the command and whether it replaced the selection, opened a popup, or inserted below it, the app the selection came from, a preview of the original text and the result, and **Copy result** / **Copy original** buttons that put either back on the clipboard. **Clear history** deletes the whole list after a confirmation.
+
+Restoring is a clipboard copy on purpose: putting text back into the source app needs that app's focus and Accessibility, which the Settings window does not have. Right after a Replace, **Undo last replace** in the picker (or the `undo_hotkey`) still does that live.
+
+Privacy: the list lives in `history.jsonl` in the config directory (`~/.config/selara/` by default), is created readable only by you (mode 0600), holds the selected text and the results verbatim, and is trimmed to the newest 50 entries. Clear it from the tab, or delete the file, if you would rather not keep it around.
 
 ### Limits
 
