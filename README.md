@@ -68,11 +68,13 @@ The `serve` shell registers the hotkey, reads the selection, shows a small comma
 
 3. **Grant Accessibility.** System Settings → Privacy & Security → Accessibility, then enable Terminal or iTerm (whichever runs `cargo run`) or the `selara` binary itself. macOS may prompt on first launch, and starting `serve` also triggers the prompt.
 
-4. **Start the shell:**
+4. **Start the shell.** The Settings app (next section) starts `serve` for you, restarts it if it crashes, and can start at login (General → Start at login). From a terminal it also works on its own:
 
    ```bash
    cargo run -p selara -- serve
    ```
+
+   The app never starts a second copy while one is running elsewhere. Accessibility must be granted to whatever runs `serve`: the app bundle when it is managed, or the terminal / sidecar binary under `apps/selara-desktop/src-tauri/binaries/` during `tauri dev`.
 
 5. Select text in TextEdit, Notes, Mail, or anywhere else, press `ctrl+shift+space`, and pick **Proofread**.
 
@@ -209,7 +211,7 @@ Supported tokens: `ctrl`/`control`, `shift`, `alt`/`option`, `cmd`/`command`/`su
 - Some apps (Electron, browsers, certain rich-text fields) ignore the Accessibility write. The paste fallback usually still works if the original selection remains.
 - The picker steals focus. Selara re-activates the previous app before replacing.
 - Undo relies on the selection range Accessibility reported when the text was captured. In apps that only work through the clipboard fallback, Selara assumes the caret is right after the pasted text and refuses to undo if that does not hold; the app's own ⌘Z still works.
-- Global hotkeys need the `serve` process running. There is no LaunchAgent yet.
+- Global hotkeys need the `serve` process running. The Settings app keeps it running and can register itself as a login item; a bare terminal `serve` still stops when the terminal closes.
 - If a hotkey fails to register or never fires, pick another chord.
 
 ## CLI

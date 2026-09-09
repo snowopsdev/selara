@@ -7,6 +7,17 @@
     "core:default",
     "core:window:allow-start-dragging",
     "shell:allow-open",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [{ "name": "binaries/selara", "sidecar": true, "args": true }]
+    },
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [{ "name": "binaries/selara", "sidecar": true, "args": true }]
+    },
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
     "allow-get-config",
     "allow-save-config",
     "allow-save-config-section",
@@ -20,6 +31,11 @@
     "allow-list-chatgpt-models",
     "allow-list-provider-models",
     "allow-serve-status",
+    "allow-serve-start",
+    "allow-serve-stop",
+    "allow-serve-restart",
+    "allow-serve-log",
+    "allow-serve-supervisor-status",
     "allow-accessibility-status",
     "allow-open-accessibility-settings"
   ]

@@ -72,3 +72,28 @@ commands.allow = ["accessibility_status"]
 identifier = "allow-open-accessibility-settings"
 description = "Open System Settings on the Accessibility privacy pane"
 commands.allow = ["open_accessibility_settings"]
+
+[[permission]]
+identifier = "allow-serve-start"
+description = "Start the bundled `selara serve` sidecar under the app's supervisor"
+commands.allow = ["serve_start"]
+
+[[permission]]
+identifier = "allow-serve-stop"
+description = "Stop the `selara serve` sidecar the app started"
+commands.allow = ["serve_stop"]
+
+[[permission]]
+identifier = "allow-serve-restart"
+description = "Restart the `selara serve` sidecar the app started"
+commands.allow = ["serve_restart"]
+
+[[permission]]
+identifier = "allow-serve-log"
+description = "Read the last lines `selara serve` printed while supervised by the app"
+commands.allow = ["serve_log"]
+
+[[permission]]
+identifier = "allow-serve-supervisor-status"
+description = "Report whether the app manages `selara serve`, or an external one runs"
+commands.allow = ["serve_supervisor_status"]
