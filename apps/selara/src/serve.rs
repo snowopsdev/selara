@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use eframe::egui;
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::Watcher;
 use selara_core::commands::{run_command, CommandKind, WritingCommand};
 use selara_core::config::{AppConfig, LimitsConfig};
@@ -49,13 +50,51 @@ fn should_apply_job(job_generation: u64, current_generation: u64, waiting: bool)
     waiting && job_generation == current_generation
 }
 
-/// What the last successful Replace wrote, so it can be put back.
+/// What the last successful Replace (or Insert below) wrote, so it can be put back.
 #[derive(Debug, Clone)]
 struct LastReplace {
     pid: Option<i32>,
     original: String,
     replacement: String,
     range: Option<(i64, i64)>,
+}
+
+/// Which popup actions are clickable for the current selection.
+///
+/// The replace caution gates both write-back buttons until it is acknowledged;
+/// the hard max is never skippable, so the buttons stay enabled and the click
+/// explains the block instead (same as `start_command`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PopupActions {
+    replace_enabled: bool,
+    insert_enabled: bool,
+    show_caution: bool,
+}
+
+fn popup_actions(over_hard_max: bool, needs_replace_warn: bool) -> PopupActions {
+    let blocked_by_caution = needs_replace_warn && !over_hard_max;
+    PopupActions {
+        replace_enabled: !blocked_by_caution,
+        insert_enabled: !blocked_by_caution,
+        show_caution: blocked_by_caution,
+    }
+}
+
+/// Where "Insert below" writes: a zero-length range right after the selection.
+fn insert_range((loc, len): (i64, i64)) -> (i64, i64) {
+    (loc + len, 0)
+}
+
+/// What "Insert below" writes: the result separated from the selection by a blank line.
+fn insert_text(body: &str) -> String {
+    format!("\n\n{body}")
+}
+
+/// The two ways a popup result can be written back into the source app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteBack {
+    Replace,
+    InsertBelow,
 }
 
 enum UiPhase {
@@ -97,6 +136,9 @@ struct ServeApp {
     /// dismissed; results from an older generation are discarded.
     generation: u64,
     last_replace: Option<LastReplace>,
+    /// The command most recently started, so a popup can Retry it.
+    last_command: Option<WritingCommand>,
+    md_cache: CommonMarkCache,
     job_rx: Receiver<JobResult>,
     job_tx: Sender<JobResult>,
     runtime: tokio::runtime::Runtime,
@@ -153,6 +195,8 @@ impl ServeApp {
             settings_status: String::new(),
             generation: 0,
             last_replace: None,
+            last_command: None,
+            md_cache: CommonMarkCache::default(),
             job_rx,
             job_tx,
             runtime,
@@ -498,18 +542,23 @@ Select text in another app, then press its shortcut again.",
         }
     }
 
+    fn hard_max_error(&self) -> UiPhase {
+        let max = self.config.limits.hard_max_chars;
+        UiPhase::Error {
+            message: format!(
+                "Selection is {} characters — over your hard limit of {max}.\n\n\
+Shrink the selection, or raise / disable the limit in Settings (0 = unlimited).",
+                self.selection_chars()
+            ),
+        }
+    }
+
     fn start_command(&mut self, cmd: WritingCommand) {
         // Picking a command by hand supersedes any shortcut-triggered one.
         self.pending_direct = None;
+        self.last_command = Some(cmd.clone());
         if self.over_hard_max() {
-            let max = self.config.limits.hard_max_chars;
-            self.phase = UiPhase::Error {
-                message: format!(
-                    "Selection is {} characters — over your hard limit of {max}.\n\n\
-Shrink the selection, or raise / disable the limit in Settings (0 = unlimited).",
-                    self.selection_chars()
-                ),
-            };
+            self.phase = self.hard_max_error();
             return;
         }
         if self.needs_soft_warn() {
@@ -582,37 +631,93 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
                         body: text,
                     };
                 }
-                CommandKind::Replace => {
-                    // Hide first so macOS can restore focus to the source app,
-                    // then activate + paste. Pasting while we are still frontmost fails.
-                    let pid = self.target_pid;
-                    let original = self.captured_text.clone();
-                    let range = self.captured_range;
-                    self.hide(ctx);
-                    std::thread::sleep(std::time::Duration::from_millis(80));
-                    if let Some(pid) = pid {
-                        let _ = activate_pid(pid);
-                    } else {
-                        std::thread::sleep(std::time::Duration::from_millis(180));
-                    }
-                    match self.selection.replace_in_app(pid, &text, &original, range) {
-                        Ok(()) => {
-                            self.last_replace = Some(LastReplace {
-                                pid,
-                                original,
-                                replacement: text,
-                                range,
-                            });
-                        }
-                        Err(e) => {
-                            self.phase = UiPhase::Error {
-                                message: format!("Replace failed: {e}"),
-                            };
-                            self.show_window(ctx, true);
-                        }
-                    }
-                }
+                CommandKind::Replace => self.replace_selection_with(ctx, text),
             },
+        }
+    }
+
+    /// Hide, hand focus back to the source app, and write `text` over the
+    /// captured selection. Shared by Replace commands and the popup's
+    /// "Replace selection" button.
+    fn replace_selection_with(&mut self, ctx: &egui::Context, text: String) {
+        let pid = self.target_pid;
+        let original = self.captured_text.clone();
+        let range = self.captured_range;
+        self.refocus_target(ctx);
+        match self.selection.replace_in_app(pid, &text, &original, range) {
+            Ok(()) => {
+                self.last_replace = Some(LastReplace {
+                    pid,
+                    original,
+                    replacement: text,
+                    range,
+                });
+            }
+            Err(e) => {
+                self.phase = UiPhase::Error {
+                    message: format!("Replace failed: {e}"),
+                };
+                self.show_window(ctx, true);
+            }
+        }
+    }
+
+    /// Hide, hand focus back to the source app, and insert `body` after the
+    /// captured selection (separated by a blank line). Recorded as a
+    /// zero-length "replace" so Undo removes exactly what was inserted.
+    fn insert_below_selection(&mut self, ctx: &egui::Context, body: &str) {
+        let pid = self.target_pid;
+        let captured_range = self.captured_range;
+        let text = insert_text(body);
+        self.refocus_target(ctx);
+        match self
+            .selection
+            .insert_after_selection(pid, &text, captured_range)
+        {
+            Ok(()) => {
+                self.last_replace = Some(LastReplace {
+                    pid,
+                    original: String::new(),
+                    replacement: text,
+                    range: captured_range.map(insert_range),
+                });
+            }
+            Err(e) => {
+                self.phase = UiPhase::Error {
+                    message: format!("Insert failed: {e}"),
+                };
+                self.show_window(ctx, true);
+            }
+        }
+    }
+
+    /// Popup button handler: same rails as `start_command` for a Replace, then
+    /// write the result back. The caution disables the buttons until it is
+    /// acknowledged, so only the hard max needs re-checking here.
+    fn write_back_from_popup(&mut self, ctx: &egui::Context, body: String, how: WriteBack) {
+        if self.over_hard_max() {
+            self.phase = self.hard_max_error();
+            return;
+        }
+        if self.needs_replace_warn() {
+            return;
+        }
+        match how {
+            WriteBack::Replace => self.replace_selection_with(ctx, body),
+            WriteBack::InsertBelow => self.insert_below_selection(ctx, &body),
+        }
+    }
+
+    /// Hide first so macOS can restore focus to the source app, then activate
+    /// it. Pasting while we are still frontmost fails.
+    fn refocus_target(&mut self, ctx: &egui::Context) {
+        let pid = self.target_pid;
+        self.hide(ctx);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        if let Some(pid) = pid {
+            let _ = activate_pid(pid);
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(180));
         }
     }
 }
@@ -713,10 +818,14 @@ impl eframe::App for ServeApp {
         let mut ack_soft = false;
         let mut ack_replace = false;
         let mut undo = false;
+        let mut write_back: Option<(WriteBack, String)> = None;
+        let mut retry = false;
 
         let soft_blocked = matches!(self.phase, UiPhase::Picker) && self.needs_soft_warn();
         let hard_blocked = matches!(self.phase, UiPhase::Picker) && self.over_hard_max();
         let replace_caution = matches!(self.phase, UiPhase::Picker) && self.needs_replace_warn();
+        let popup_actions = popup_actions(self.over_hard_max(), self.needs_replace_warn());
+        let can_retry = self.last_command.is_some();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -889,10 +998,63 @@ impl eframe::App for ServeApp {
                     ui.heading(title);
                     ui.add_space(6.0);
                     egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                        ui.label(body);
+                        CommonMarkViewer::new().show(ui, &mut self.md_cache, body);
                     });
-                    if ui.button("Copy result").clicked() {
-                        ui.ctx().copy_text(body.clone());
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .button("Copy")
+                            .on_hover_text("Copy the result as markdown")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(body.clone());
+                        }
+                        if ui
+                            .add_enabled(
+                                popup_actions.replace_enabled,
+                                egui::Button::new("Replace selection"),
+                            )
+                            .on_hover_text("Write the result over the original selection")
+                            .clicked()
+                        {
+                            write_back = Some((WriteBack::Replace, body.clone()));
+                        }
+                        if ui
+                            .add_enabled(
+                                popup_actions.insert_enabled,
+                                egui::Button::new("Insert below"),
+                            )
+                            .on_hover_text(if self.captured_range.is_some() {
+                                "Insert the result after the selection"
+                            } else {
+                                "Insert the result after the selection (moves the caret with →, then pastes)"
+                            })
+                            .clicked()
+                        {
+                            write_back = Some((WriteBack::InsertBelow, body.clone()));
+                        }
+                        if ui
+                            .add_enabled(can_retry, egui::Button::new("Retry"))
+                            .on_hover_text("Run the same command again on the same selection")
+                            .clicked()
+                        {
+                            retry = true;
+                        }
+                    });
+                    if popup_actions.show_caution {
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 150, 40),
+                                format!(
+                                    "Replace caution ({}+ chars): paste-back can be flaky in some apps.",
+                                    self.config.limits.replace_warn_chars
+                                ),
+                            );
+                            if ui.button("Allow replace").clicked() {
+                                ack_replace = true;
+                            }
+                        });
                     }
                 }
                 UiPhase::Error { message } => {
@@ -936,6 +1098,16 @@ impl eframe::App for ServeApp {
         }
         if undo {
             self.undo_last_replace(ctx);
+            return;
+        }
+        if let Some((how, body)) = write_back {
+            self.write_back_from_popup(ctx, body, how);
+            return;
+        }
+        if retry {
+            if let Some(cmd) = self.last_command.clone() {
+                self.start_command(cmd);
+            }
             return;
         }
         if let Some(cmd) = clicked {
@@ -1016,7 +1188,7 @@ pub fn run(config_path: PathBuf) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::should_apply_job;
+    use super::{insert_range, insert_text, popup_actions, should_apply_job, PopupActions};
 
     #[test]
     fn current_generation_while_waiting_is_applied() {
@@ -1035,5 +1207,56 @@ mod tests {
         // generation was bumped; either condition alone must be enough.
         assert!(!should_apply_job(3, 3, false));
         assert!(!should_apply_job(3, 4, false));
+    }
+
+    #[test]
+    fn popup_actions_are_all_enabled_within_limits() {
+        assert_eq!(
+            popup_actions(false, false),
+            PopupActions {
+                replace_enabled: true,
+                insert_enabled: true,
+                show_caution: false,
+            }
+        );
+    }
+
+    #[test]
+    fn popup_actions_lock_write_back_until_caution_is_acknowledged() {
+        assert_eq!(
+            popup_actions(false, true),
+            PopupActions {
+                replace_enabled: false,
+                insert_enabled: false,
+                show_caution: true,
+            }
+        );
+    }
+
+    #[test]
+    fn popup_actions_over_hard_max_stay_clickable_so_the_click_can_explain() {
+        // The hard max cannot be acknowledged away, so no caution button is
+        // offered; the click path shows the hard-max error instead.
+        for needs_replace_warn in [false, true] {
+            assert_eq!(
+                popup_actions(true, needs_replace_warn),
+                PopupActions {
+                    replace_enabled: true,
+                    insert_enabled: true,
+                    show_caution: false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn insert_range_is_a_caret_at_the_end_of_the_selection() {
+        assert_eq!(insert_range((10, 5)), (15, 0));
+        assert_eq!(insert_range((0, 0)), (0, 0));
+    }
+
+    #[test]
+    fn insert_text_separates_the_result_with_a_blank_line() {
+        assert_eq!(insert_text("- a\n- b"), "\n\n- a\n- b");
     }
 }

@@ -218,6 +218,16 @@ fn clipboard_copy() -> Result<()> {
     cmd_keystroke(KeyCode::ANSI_C)
 }
 
+/// Collapse the selection to its end the way a user would: a plain → press.
+fn collapse_selection_right() -> Result<()> {
+    let flags = CGEventFlags::empty();
+    post_key(KeyCode::RIGHT_ARROW, flags, true)?;
+    thread::sleep(Duration::from_millis(20));
+    post_key(KeyCode::RIGHT_ARROW, flags, false)?;
+    thread::sleep(Duration::from_millis(60));
+    Ok(())
+}
+
 fn clipboard_paste() -> Result<()> {
     cmd_keystroke(KeyCode::ANSI_V)
 }
@@ -546,6 +556,48 @@ impl MacosSelection {
 }
 
 impl MacosSelection {
+    /// Insert `text` right after the selection that was captured, leaving the
+    /// selection itself untouched. Call after hiding our UI and re-activating
+    /// the target app.
+    ///
+    /// With a captured `range` the caret is moved to the end of the selection
+    /// through Accessibility and the text is written there (with the same
+    /// verify-then-paste fallback as a Replace). If the range cannot be applied,
+    /// or none was captured (clipboard fallback read the selection), a plain →
+    /// key press collapses the selection to its end and the text is pasted.
+    pub fn insert_after_selection(
+        &self,
+        pid: Option<i32>,
+        text: &str,
+        range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        if !accessibility_trusted() {
+            bail!(
+                "Accessibility permission missing. Enable Selara (or the Terminal/binary \
+                 you launched) under System Settings → Privacy & Security → Accessibility."
+            );
+        }
+
+        if let Some((loc, len)) = range {
+            let caret = loc + len;
+            let element = match pid {
+                Some(pid) => focused_element_for_pid(pid).or_else(|_| focused_element()),
+                None => focused_element(),
+            };
+            match element.and_then(|el| set_ax_selected_range(&el, caret, 0)) {
+                Ok(()) => {
+                    thread::sleep(Duration::from_millis(40));
+                    return self.replace_in_app(pid, text, "", Some((caret, 0)));
+                }
+                Err(e) => debug!("collapse selection via AX failed ({e}); using → + paste"),
+            }
+        }
+
+        collapse_selection_right()?;
+        self.replace_via_clipboard_fallback(text)
+            .context("clipboard insert fallback")
+    }
+
     /// Put `original` back where a previous Replace wrote `replacement`.
     ///
     /// `range` is the location of the original selection when it was captured
