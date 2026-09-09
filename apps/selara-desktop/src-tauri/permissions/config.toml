@@ -14,6 +14,21 @@ description = "Save one section of the Selara config, leaving the rest as on dis
 commands.allow = ["save_config_section"]
 
 [[permission]]
+identifier = "allow-api-key-source"
+description = "Report where the provider API key comes from (never the key itself)"
+commands.allow = ["api_key_source"]
+
+[[permission]]
+identifier = "allow-store-api-key"
+description = "Store the provider API key in the OS keychain"
+commands.allow = ["store_api_key"]
+
+[[permission]]
+identifier = "allow-clear-api-key"
+description = "Remove the provider API key from the OS keychain"
+commands.allow = ["clear_api_key"]
+
+[[permission]]
 identifier = "allow-config-path"
 description = "Read config file path"
 commands.allow = ["config_path"]
