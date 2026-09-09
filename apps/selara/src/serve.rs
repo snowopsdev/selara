@@ -14,6 +14,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::Watcher;
 use selara_core::commands::{run_command_stream, CommandKind, PromptVars, WritingCommand};
 use selara_core::config::{app_is_excluded, serve_pidfile, AppConfig, LimitsConfig};
+use selara_core::history::{self, HistoryEntry};
 use selara_platform::macos::{
     accessibility_trusted, activate_pid, frontmost_app_name, frontmost_bundle_id, frontmost_pid,
     mouse_location, prompt_accessibility, screen_visible_frame_at, HotkeyAction, MacosHotkey,
@@ -1109,6 +1110,7 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
                 }
                 match kind {
                     CommandKind::Popup => {
+                        self.record_history(CommandKind::Popup, self.captured_text.clone(), &text);
                         self.phase = UiPhase::Popup {
                             title: label,
                             body: text,
@@ -1190,6 +1192,7 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
         self.refocus_target(ctx);
         match self.selection.replace_in_app(pid, &text, &original, range) {
             Ok(()) => {
+                self.record_history(CommandKind::Replace, original.clone(), &text);
                 self.last_replace = Some(LastReplace {
                     pid,
                     original,
@@ -1219,6 +1222,7 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
             .insert_after_selection(pid, &text, captured_range)
         {
             Ok(()) => {
+                self.record_history(CommandKind::Replace, String::new(), body);
                 self.last_replace = Some(LastReplace {
                     pid,
                     original: String::new(),
@@ -1232,6 +1236,33 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
                 };
                 self.show_window(ctx, true);
             }
+        }
+    }
+
+    /// Best-effort append to `history.jsonl` next to the config. Covers every
+    /// successful outcome: a Replace written back, a popup shown, and a popup
+    /// result written back (Replace selection / Insert below, whose `original`
+    /// is empty). Failures are logged and never block the command.
+    fn record_history(&self, kind: CommandKind, original: String, result: &str) {
+        let Some(cmd) = self.last_command.as_ref() else {
+            return;
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let entry = HistoryEntry {
+            ts,
+            command_id: cmd.id.clone(),
+            label: cmd.label.clone(),
+            kind,
+            app: self.captured_app.clone(),
+            original,
+            result: result.to_string(),
+        };
+        let path = history::history_path(&self.config_path);
+        if let Err(e) = history::append(&path, &entry) {
+            tracing::warn!("history: could not append to {}: {e}", path.display());
         }
     }
 

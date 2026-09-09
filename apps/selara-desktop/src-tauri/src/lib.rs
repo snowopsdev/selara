@@ -3,6 +3,7 @@ use selara_core::commands::{
     merge_commands, parse_command_pack, render_command_pack, MergeMode, MergeReport,
 };
 use selara_core::config::{serve_pidfile, ApiKeySource, AppConfig};
+use selara_core::history::{self, HistoryEntry};
 use selara_core::providers::{list_chatgpt_models, list_provider_models, ProviderKind};
 use selara_core::secrets;
 use std::collections::VecDeque;
@@ -166,6 +167,24 @@ async fn import_commands(
 #[tauri::command]
 fn config_path() -> String {
     AppConfig::default_path().display().to_string()
+}
+
+/// Transformations `selara serve` recorded, newest first (see `selara_core::history`).
+#[tauri::command]
+fn history_list() -> Result<Vec<HistoryEntry>, String> {
+    history::load(&history::history_path(&AppConfig::default_path())).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn history_clear() -> Result<(), String> {
+    history::clear(&history::history_path(&AppConfig::default_path())).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn history_path() -> String {
+    history::history_path(&AppConfig::default_path())
+        .display()
+        .to_string()
 }
 
 /// Run a blocking `codex_cli` call off the main thread. Tauri 2 executes sync
@@ -899,6 +918,9 @@ pub fn run() {
             export_commands,
             import_commands,
             config_path,
+            history_list,
+            history_clear,
+            history_path,
             chatgpt_auth_status,
             chatgpt_login,
             chatgpt_logout,

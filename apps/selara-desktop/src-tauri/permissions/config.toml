@@ -44,6 +44,21 @@ description = "Read config file path"
 commands.allow = ["config_path"]
 
 [[permission]]
+identifier = "allow-history-list"
+description = "Read the transformation history `selara serve` keeps next to the config"
+commands.allow = ["history_list"]
+
+[[permission]]
+identifier = "allow-history-clear"
+description = "Delete the transformation history file"
+commands.allow = ["history_clear"]
+
+[[permission]]
+identifier = "allow-history-path"
+description = "Read the history file path"
+commands.allow = ["history_path"]
+
+[[permission]]
 identifier = "allow-chatgpt-auth-status"
 description = "Read ChatGPT / Codex CLI login status (Experimental)"
 commands.allow = ["chatgpt_auth_status"]
