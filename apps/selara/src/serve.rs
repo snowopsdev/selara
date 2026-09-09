@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::Watcher;
-use selara_core::commands::{run_command_with, CommandKind, PromptVars, WritingCommand};
+use selara_core::commands::{run_command_stream, CommandKind, PromptVars, WritingCommand};
 use selara_core::config::{serve_pidfile, AppConfig, LimitsConfig};
 use selara_platform::macos::{
     accessibility_trusted, activate_pid, frontmost_pid, mouse_location, prompt_accessibility,
@@ -21,6 +21,13 @@ use selara_platform::SelectionService;
 
 #[derive(Debug)]
 enum JobResult {
+    /// One raw text fragment of a reply still in progress; appended to the
+    /// `Working` phase's `partial` for display only. The finished text always
+    /// arrives separately in `Success`, so a Replace never writes fragments.
+    Delta {
+        generation: u64,
+        text: String,
+    },
     Success {
         generation: u64,
         kind: CommandKind,
@@ -36,9 +43,9 @@ enum JobResult {
 impl JobResult {
     fn generation(&self) -> u64 {
         match self {
-            JobResult::Success { generation, .. } | JobResult::Error { generation, .. } => {
-                *generation
-            }
+            JobResult::Delta { generation, .. }
+            | JobResult::Success { generation, .. }
+            | JobResult::Error { generation, .. } => *generation,
         }
     }
 }
@@ -196,6 +203,28 @@ fn take_digit(input: &mut egui::InputState) -> Option<usize> {
     Some(idx)
 }
 
+/// `1234567` → `1,234,567`, for the streaming progress counter.
+fn format_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Progress line shown while a Replace command streams. The text itself is
+/// held back until it is complete and cleaned, so only its size is shown.
+fn replace_progress(partial: &str) -> String {
+    format!(
+        "… {} chars so far",
+        format_thousands(partial.chars().count())
+    )
+}
+
 /// The two ways a popup result can be written back into the source app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriteBack {
@@ -207,9 +236,21 @@ enum UiPhase {
     Hidden,
     Picker,
     Settings,
-    Working { label: String },
-    Popup { title: String, body: String },
-    Error { message: String },
+    /// A command is running. `partial` accumulates the streamed fragments so
+    /// far: rendered as markdown for a Popup, summarised as a character count
+    /// for a Replace (whose text is only written back once complete).
+    Working {
+        label: String,
+        kind: CommandKind,
+        partial: String,
+    },
+    Popup {
+        title: String,
+        body: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 struct ServeApp {
@@ -737,6 +778,8 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
         let app_name = self.captured_app.clone();
         self.phase = UiPhase::Working {
             label: label.clone(),
+            kind: cmd.kind,
+            partial: String::new(),
         };
 
         self.runtime.spawn(async move {
@@ -746,7 +789,22 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
                     language: Some(&cfg.language),
                     app: app_name.as_deref(),
                 };
-                let out = run_command_with(provider.as_ref(), &cmd, &input, None, vars).await?;
+                // Every fragment goes straight to the UI thread; the channel
+                // is unbounded and the UI drains it once per frame, so no
+                // coalescing is needed. Fragments carry the generation so a
+                // stale stream (Escape, new hotkey) is dropped like a result.
+                let delta_tx = tx.clone();
+                let delta_wake = wake.clone();
+                let mut on_delta = move |text: &str| {
+                    let _ = delta_tx.send(JobResult::Delta {
+                        generation,
+                        text: text.to_string(),
+                    });
+                    delta_wake.request_repaint();
+                };
+                let out =
+                    run_command_stream(provider.as_ref(), &cmd, &input, None, vars, &mut on_delta)
+                        .await?;
                 Ok::<_, anyhow::Error>((cmd.kind, cmd.label, out))
             }
             .await;
@@ -771,6 +829,13 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
 
     fn apply_job(&mut self, ctx: &egui::Context, job: JobResult) {
         match job {
+            JobResult::Delta { text, .. } => {
+                // `should_apply_job` already checked the phase is Working for
+                // this generation; anything else means the fragment is stale.
+                if let UiPhase::Working { partial, .. } = &mut self.phase {
+                    partial.push_str(&text);
+                }
+            }
             JobResult::Error { message, .. } => {
                 self.phase = UiPhase::Error { message };
             }
@@ -1245,9 +1310,37 @@ impl eframe::App for ServeApp {
                     ui.add_space(8.0);
                     ui.small(format!("Config file: {}", self.config_path.display()));
                 }
-                UiPhase::Working { label } => {
-                    ui.label(format!("Running {label}…"));
-                    ui.spinner();
+                UiPhase::Working {
+                    label,
+                    kind,
+                    partial,
+                } => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!("Running {label}…"));
+                    });
+                    if !partial.is_empty() {
+                        ui.add_space(6.0);
+                        match kind {
+                            // Same viewer as the finished popup, so the text
+                            // does not re-flow when Success replaces it.
+                            CommandKind::Popup => {
+                                egui::ScrollArea::vertical()
+                                    .max_height(360.0)
+                                    .stick_to_bottom(true)
+                                    .show(ui, |ui| {
+                                        CommonMarkViewer::new().show(
+                                            ui,
+                                            &mut self.md_cache,
+                                            partial,
+                                        );
+                                    });
+                            }
+                            CommandKind::Replace => {
+                                ui.small(replace_progress(partial));
+                            }
+                        }
+                    }
                 }
                 UiPhase::Popup { title, body } => {
                     ui.heading(title);
@@ -1543,9 +1636,9 @@ pub fn run(config_path: PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_selection, filter_commands, insert_range, insert_text, next_selection,
-        picker_row_enabled, place_near, popup_actions, remove_pidfile, should_apply_job,
-        write_pidfile, PopupActions,
+        clamp_selection, filter_commands, format_thousands, insert_range, insert_text,
+        next_selection, picker_row_enabled, place_near, popup_actions, remove_pidfile,
+        replace_progress, should_apply_job, write_pidfile, PopupActions,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1826,5 +1919,18 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thousands_separator_groups_digits() {
+        assert_eq!(format_thousands(0), "0");
+        assert_eq!(format_thousands(999), "999");
+        assert_eq!(format_thousands(1_000), "1,000");
+        assert_eq!(format_thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn replace_progress_counts_characters_not_bytes() {
+        assert_eq!(replace_progress(&"é".repeat(1234)), "… 1,234 chars so far");
     }
 }

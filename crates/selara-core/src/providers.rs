@@ -355,9 +355,98 @@ pub struct CompletionRequest {
     pub user: String,
 }
 
+/// Receiver for streamed text fragments, see [`LlmProvider::complete_stream`].
+/// A named alias so the `&str` stays higher-ranked (`for<'a>`) through the
+/// `async_trait` rewrite, which would otherwise pin it to one lifetime.
+pub type DeltaSink<'a> = dyn FnMut(&str) + Send + 'a;
+
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError>;
+
+    /// Stream the reply; `on_delta` receives each text fragment in order.
+    /// Returns the full text.
+    ///
+    /// Fragments are forwarded exactly as the model sent them, before any
+    /// trimming or truncation check, so a caller may see fragments and then an
+    /// error; only the returned `String` is safe to write over a selection.
+    /// The default buffers [`complete`](Self::complete) and delivers it as one
+    /// fragment, so providers that cannot stream still fit the same call path.
+    async fn complete_stream(
+        &self,
+        req: CompletionRequest,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<String, CoreError> {
+        let out = self.complete(req).await?;
+        on_delta(&out);
+        Ok(out)
+    }
+}
+
+/// Read an SSE response body to the end and hand every complete event block
+/// to `on_event`, including a trailing block the server did not terminate
+/// with a blank line. Framing (`take_complete_sse_events`) and UTF-8
+/// reassembly live here so the three streaming providers only differ in how
+/// they interpret an event. An `Err` from `on_event` stops reading and is
+/// returned as-is.
+async fn for_each_sse_event(
+    resp: reqwest::Response,
+    mut on_event: impl FnMut(&str) -> Result<(), CoreError> + Send,
+) -> Result<(), CoreError> {
+    let mut stream = resp.bytes_stream();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = String::new();
+    while let Some(chunk) = stream.next().await {
+        pending.extend_from_slice(&chunk?);
+        drain_utf8(&mut pending, &mut buf);
+        for event in take_complete_sse_events(&mut buf) {
+            on_event(&event)?;
+        }
+    }
+    if !pending.is_empty() {
+        buf.push_str(&String::from_utf8_lossy(&pending));
+    }
+    if !buf.trim().is_empty() {
+        on_event(&buf)?;
+    }
+    Ok(())
+}
+
+/// Move the decodable prefix of `bytes` into `out`. A multi-byte character
+/// split across two network chunks is left in `bytes` until its tail arrives
+/// instead of being replaced with U+FFFD; genuinely invalid bytes are decoded
+/// lossily so a bad server cannot stall the stream.
+fn drain_utf8(bytes: &mut Vec<u8>, out: &mut String) {
+    let valid = match std::str::from_utf8(bytes) {
+        Ok(s) => {
+            out.push_str(s);
+            bytes.clear();
+            return;
+        }
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        Err(_) => bytes.len(),
+    };
+    out.push_str(&String::from_utf8_lossy(&bytes[..valid]));
+    bytes.drain(..valid);
+}
+
+/// `Content-Type` says JSON: a server that ignored `"stream": true` and sent
+/// one buffered reply (some OpenAI-compatible proxies do). Those responses are
+/// parsed the non-streaming way and delivered as a single fragment.
+fn is_json_response(resp: &reqwest::Response) -> bool {
+    resp.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.to_ascii_lowercase().contains("application/json"))
+}
+
+/// Shape a non-2xx reply exactly as the buffered providers do: the JSON error
+/// body when there is one, otherwise the raw text with the status kept.
+async fn http_error(resp: reqwest::Response) -> CoreError {
+    match json_or_raw(resp).await {
+        Ok((status, value)) => CoreError::Provider(format!("HTTP {status}: {value}")),
+        Err(e) => e,
+    }
 }
 
 pub struct OpenAiCompatibleProvider {
@@ -368,9 +457,12 @@ pub struct OpenAiCompatibleProvider {
     pub extra_headers: Vec<(String, String)>,
 }
 
-#[async_trait]
-impl LlmProvider for OpenAiCompatibleProvider {
-    async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+impl OpenAiCompatibleProvider {
+    fn request(
+        &self,
+        req: &CompletionRequest,
+        stream: bool,
+    ) -> Result<reqwest::RequestBuilder, CoreError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let client = http_client()?;
         let mut body = json!({
@@ -383,20 +475,25 @@ impl LlmProvider for OpenAiCompatibleProvider {
         if !is_reasoning_model(&self.model) {
             body["temperature"] = json!(0.2);
         }
+        if stream {
+            body["stream"] = json!(true);
+        }
 
         let mut builder = client.post(url).json(&body);
+        if stream {
+            builder = builder.header("Accept", "text/event-stream");
+        }
         if !self.api_key.is_empty() {
             builder = builder.bearer_auth(&self.api_key);
         }
         for (name, value) in &self.extra_headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
+        Ok(builder)
+    }
 
-        let resp = send_with_retry(builder, "chat completion", Idempotency::NonIdempotent).await?;
-        let (status, value) = json_or_raw(resp).await?;
-        if !status.is_success() {
-            return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
-        }
+    /// Text of a buffered Chat Completions reply, or the truncation error.
+    fn parse_response(value: &serde_json::Value) -> Result<String, CoreError> {
         if value
             .pointer("/choices/0/finish_reason")
             .and_then(|v| v.as_str())
@@ -404,9 +501,80 @@ impl LlmProvider for OpenAiCompatibleProvider {
         {
             return Err(truncation_error("finish_reason=length"));
         }
-
-        openai_message_content(&value)
+        openai_message_content(value)
             .ok_or_else(|| CoreError::Provider(format!("unexpected response: {value}")))
+    }
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiCompatibleProvider {
+    async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+        let builder = self.request(&req, false)?;
+        let resp = send_with_retry(builder, "chat completion", Idempotency::NonIdempotent).await?;
+        let (status, value) = json_or_raw(resp).await?;
+        if !status.is_success() {
+            return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        }
+        Self::parse_response(&value)
+    }
+
+    async fn complete_stream(
+        &self,
+        req: CompletionRequest,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<String, CoreError> {
+        let builder = self.request(&req, true)?;
+        let resp = send_with_retry(builder, "chat completion", Idempotency::NonIdempotent).await?;
+        if !resp.status().is_success() {
+            return Err(http_error(resp).await);
+        }
+        if is_json_response(&resp) {
+            let (_, value) = json_or_raw(resp).await?;
+            let out = Self::parse_response(&value)?;
+            on_delta(&out);
+            return Ok(out);
+        }
+
+        let mut out = String::new();
+        let mut truncated = false;
+        for_each_sse_event(resp, |event| {
+            let Some((_, value)) = parse_sse_event(event) else {
+                return Ok(());
+            };
+            if let Some(err) = value.get("error") {
+                return Err(CoreError::Provider(format!("stream error: {err}")));
+            }
+            // Role-only and keep-alive chunks carry `content: null`; skip them.
+            if let Some(text) = value
+                .pointer("/choices/0/delta/content")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                out.push_str(text);
+                on_delta(text);
+            }
+            if value
+                .pointer("/choices/0/finish_reason")
+                .and_then(|v| v.as_str())
+                == Some("length")
+            {
+                truncated = true;
+            }
+            Ok(())
+        })
+        .await?;
+        // Drain the whole stream first so the connection closes cleanly, but
+        // never hand back partial text: the caller would write it over the selection.
+        if truncated {
+            return Err(truncation_error("finish_reason=length"));
+        }
+        let trimmed = out.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(CoreError::Provider(
+                "unexpected response: the stream carried no content deltas".into(),
+            ));
+        }
+        Ok(trimmed)
     }
 }
 
@@ -416,13 +584,16 @@ pub struct AnthropicProvider {
     pub base_url: String,
 }
 
-#[async_trait]
-impl LlmProvider for AnthropicProvider {
-    async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+impl AnthropicProvider {
+    fn request(
+        &self,
+        req: &CompletionRequest,
+        stream: bool,
+    ) -> Result<reqwest::RequestBuilder, CoreError> {
         let base = anthropic_api_root(&self.base_url);
         let url = format!("{base}/v1/messages");
         let client = http_client()?;
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "max_tokens": anthropic_max_tokens(&self.model, req.user.chars().count()),
             "system": req.system,
@@ -430,17 +601,22 @@ impl LlmProvider for AnthropicProvider {
                 {"role": "user", "content": req.user}
             ]
         });
-        let builder = client
+        if stream {
+            body["stream"] = json!(true);
+        }
+        let mut builder = client
             .post(url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .json(&body);
-        let resp =
-            send_with_retry(builder, "anthropic messages", Idempotency::NonIdempotent).await?;
-        let (status, value) = json_or_raw(resp).await?;
-        if !status.is_success() {
-            return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        if stream {
+            builder = builder.header("Accept", "text/event-stream");
         }
+        Ok(builder)
+    }
+
+    /// Text of a buffered Messages reply, or the truncation error.
+    fn parse_response(value: &serde_json::Value) -> Result<String, CoreError> {
         if value.get("stop_reason").and_then(|v| v.as_str()) == Some("max_tokens") {
             return Err(truncation_error("stop_reason=max_tokens"));
         }
@@ -460,6 +636,91 @@ impl LlmProvider for AnthropicProvider {
     }
 }
 
+#[async_trait]
+impl LlmProvider for AnthropicProvider {
+    async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+        let builder = self.request(&req, false)?;
+        let resp =
+            send_with_retry(builder, "anthropic messages", Idempotency::NonIdempotent).await?;
+        let (status, value) = json_or_raw(resp).await?;
+        if !status.is_success() {
+            return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        }
+        Self::parse_response(&value)
+    }
+
+    async fn complete_stream(
+        &self,
+        req: CompletionRequest,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<String, CoreError> {
+        let builder = self.request(&req, true)?;
+        let resp =
+            send_with_retry(builder, "anthropic messages", Idempotency::NonIdempotent).await?;
+        if !resp.status().is_success() {
+            return Err(http_error(resp).await);
+        }
+        if is_json_response(&resp) {
+            let (_, value) = json_or_raw(resp).await?;
+            let out = Self::parse_response(&value)?;
+            on_delta(&out);
+            return Ok(out);
+        }
+
+        let mut out = String::new();
+        let mut truncated = false;
+        for_each_sse_event(resp, |event| {
+            let Some((event_name, value)) = parse_sse_event(event) else {
+                return Ok(());
+            };
+            let json_type = value.get("type").and_then(|v| v.as_str());
+            let kind = event_name.as_deref().or(json_type).unwrap_or("");
+            match kind {
+                "content_block_delta" => {
+                    if value.pointer("/delta/type").and_then(|v| v.as_str()) == Some("text_delta") {
+                        if let Some(text) = value.pointer("/delta/text").and_then(|v| v.as_str()) {
+                            out.push_str(text);
+                            on_delta(text);
+                        }
+                    }
+                }
+                "message_delta" => {
+                    if value.pointer("/delta/stop_reason").and_then(|v| v.as_str())
+                        == Some("max_tokens")
+                    {
+                        truncated = true;
+                    }
+                }
+                "error" => {
+                    let message = value
+                        .pointer("/error/message")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| value.to_string());
+                    return Err(CoreError::Provider(format!(
+                        "Anthropic stream error: {message}"
+                    )));
+                }
+                // message_start, content_block_start/stop, ping, message_stop:
+                // nothing to extract; the body ends after message_stop.
+                _ => {}
+            }
+            Ok(())
+        })
+        .await?;
+        if truncated {
+            return Err(truncation_error("stop_reason=max_tokens"));
+        }
+        let trimmed = out.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(CoreError::Provider(
+                "unexpected Anthropic response: the stream carried no text deltas".into(),
+            ));
+        }
+        Ok(trimmed)
+    }
+}
+
 /// Experimental: ChatGPT subscription via Codex CLI auth (`~/.codex/auth.json`).
 pub struct ChatGptCodexProvider {
     pub model: String,
@@ -474,7 +735,16 @@ impl ChatGptCodexProvider {
 
 #[async_trait]
 impl LlmProvider for ChatGptCodexProvider {
+    /// The Responses endpoint is always streamed; buffering is just a no-op sink.
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+        self.complete_stream(req, &mut |_: &str| {}).await
+    }
+
+    async fn complete_stream(
+        &self,
+        req: CompletionRequest,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<String, CoreError> {
         let mut auth = self.auth.clone();
         auth.ensure_fresh().await?;
 
@@ -523,27 +793,19 @@ impl LlmProvider for ChatGptCodexProvider {
             )));
         }
 
-        let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
         let mut out = String::new();
         let mut incomplete: Option<String> = None;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            for event in take_complete_sse_events(&mut buf) {
-                if let Some(delta) = parse_sse_output_text_delta(&event) {
-                    out.push_str(&delta);
-                }
-                incomplete = incomplete.or_else(|| sse_event_incomplete_reason(&event));
-            }
-        }
-        // Trailing event without final blank line
-        if !buf.trim().is_empty() {
-            if let Some(delta) = parse_sse_output_text_delta(&buf) {
+        for_each_sse_event(resp, |event| {
+            if let Some(delta) = parse_sse_output_text_delta(event) {
                 out.push_str(&delta);
+                on_delta(&delta);
             }
-            incomplete = incomplete.or_else(|| sse_event_incomplete_reason(&buf));
-        }
+            if incomplete.is_none() {
+                incomplete = sse_event_incomplete_reason(event);
+            }
+            Ok(())
+        })
+        .await?;
         // Drain the whole stream first so the connection closes cleanly, but
         // never hand back partial text: the caller would write it over the selection.
         if let Some(reason) = incomplete {
@@ -1686,5 +1948,272 @@ data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",
         let msg = err.to_string();
         assert!(msg.contains("401"), "{msg}");
         assert!(msg.contains("denied"), "{msg}");
+    }
+    /// Fake HTTP server that answers one request with a `Transfer-Encoding:
+    /// chunked` body, one HTTP chunk per entry in `chunks` with a short pause
+    /// between them, so SSE framing across network reads is exercised. Returns
+    /// the base URL and the captured request body.
+    fn spawn_http_chunked(
+        status: u16,
+        content_type: &str,
+        chunks: Vec<&str>,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let content_type = content_type.to_string();
+        let chunks: Vec<String> = chunks.into_iter().map(str::to_string).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request_body = read_http_request(&mut stream);
+            let _ = tx.send(request_body);
+            let head = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(head.as_bytes());
+            for chunk in chunks {
+                let framed = format!("{:x}\r\n{chunk}\r\n", chunk.len());
+                let _ = stream.write_all(framed.as_bytes());
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    fn openai_delta(content: &str) -> String {
+        format!("data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{content}}},\"finish_reason\":null}}]}}\n\n")
+    }
+
+    fn openai_finish(reason: &str) -> String {
+        format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"{reason}\"}}]}}\n\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn openai_stream_yields_deltas_in_order() {
+        let role = "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null},\"finish_reason\":null}]}\n\n";
+        let d1 = openai_delta("\"Hel\"");
+        let d2 = openai_delta("\"lo, \"");
+        let d3 = openai_delta("\"world\"");
+        let fin = openai_finish("stop");
+        let (base, rx) = spawn_http_chunked(
+            200,
+            "text/event-stream",
+            vec![role, &d1, &d2, &d3, &fin, "data: [DONE]\n\n"],
+        );
+        let mut seen: Vec<String> = Vec::new();
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |d: &str| seen.push(d.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(out, "Hello, world");
+        assert_eq!(seen, vec!["Hel", "lo, ", "world"]);
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["stream"], true, "{sent}");
+        assert_eq!(sent["temperature"], 0.2, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn openai_stream_finish_reason_length_is_an_error_after_draining() {
+        let d1 = openai_delta("\"partial\"");
+        let fin = openai_finish("length");
+        let (base, _rx) = spawn_http_chunked(
+            200,
+            "text/event-stream",
+            vec![&d1, &fin, "data: [DONE]\n\n"],
+        );
+        let mut seen = 0usize;
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |_: &str| seen += 1)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off"), "{msg}");
+        assert!(msg.contains("finish_reason=length"), "{msg}");
+        assert!(
+            !msg.contains("partial"),
+            "must not leak partial output: {msg}"
+        );
+        assert_eq!(seen, 1, "the delta before the cut-off is still forwarded");
+    }
+
+    #[tokio::test]
+    async fn openai_stream_http_error_keeps_status_and_body() {
+        let base = spawn_http(
+            401,
+            r#"{"error":{"message":"bad key"}}"#,
+            "application/json",
+        );
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("401") && msg.contains("bad key"), "{msg}");
+    }
+
+    /// A server that ignores `stream: true` and answers with one JSON body is
+    /// still usable: the reply is delivered as a single fragment.
+    #[tokio::test]
+    async fn openai_stream_accepts_buffered_json_reply() {
+        let base = spawn_http(200, OPENAI_OK, "application/json");
+        let mut seen: Vec<String> = Vec::new();
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |d: &str| seen.push(d.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+        assert_eq!(seen, vec!["ok"]);
+    }
+
+    fn anthropic_event(name: &str, data: &str) -> String {
+        format!("event: {name}\ndata: {data}\n\n")
+    }
+
+    fn anthropic_provider(base: String) -> AnthropicProvider {
+        AnthropicProvider {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url: base,
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_yields_text_deltas() {
+        let start = anthropic_event(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"m1","role":"assistant","content":[]}}"#,
+        );
+        let block_start = anthropic_event(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        );
+        let d1 = anthropic_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"claude"}}"#,
+        );
+        let d2 = anthropic_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-ok"}}"#,
+        );
+        let block_stop = anthropic_event(
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":0}"#,
+        );
+        let msg_delta = anthropic_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}"#,
+        );
+        let stop = anthropic_event("message_stop", r#"{"type":"message_stop"}"#);
+        let (base, rx) = spawn_http_chunked(
+            200,
+            "text/event-stream",
+            vec![
+                &start,
+                &block_start,
+                &d1,
+                &d2,
+                &block_stop,
+                &msg_delta,
+                &stop,
+            ],
+        );
+        let mut seen: Vec<String> = Vec::new();
+        let out = anthropic_provider(base)
+            .complete_stream(simple_req(), &mut |d: &str| seen.push(d.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(out, "claude-ok");
+        assert_eq!(seen, vec!["claude", "-ok"]);
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["stream"], true, "{sent}");
+        assert_eq!(sent["max_tokens"], 4096, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_max_tokens_is_an_error() {
+        let d1 = anthropic_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}"#,
+        );
+        let msg_delta = anthropic_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+        );
+        let stop = anthropic_event("message_stop", r#"{"type":"message_stop"}"#);
+        let (base, _rx) =
+            spawn_http_chunked(200, "text/event-stream", vec![&d1, &msg_delta, &stop]);
+        let err = anthropic_provider(base)
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off"), "{msg}");
+        assert!(msg.contains("stop_reason=max_tokens"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_error_event_is_an_error() {
+        let start = anthropic_event(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"m1"}}"#,
+        );
+        let error = anthropic_event(
+            "error",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        );
+        let (base, _rx) = spawn_http_chunked(200, "text/event-stream", vec![&start, &error]);
+        let err = anthropic_provider(base)
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Overloaded"), "{msg}");
+    }
+
+    /// A provider that only implements `complete` still streams: the default
+    /// `complete_stream` delivers the whole reply as one fragment.
+    #[tokio::test]
+    async fn default_complete_stream_delivers_one_fragment() {
+        struct Buffered;
+        #[async_trait]
+        impl LlmProvider for Buffered {
+            async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+                Ok(format!("echo:{}", req.user))
+            }
+        }
+        let mut seen: Vec<String> = Vec::new();
+        let out = Buffered
+            .complete_stream(simple_req(), &mut |d: &str| seen.push(d.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(out, "echo:u");
+        assert_eq!(seen, vec!["echo:u"]);
+    }
+
+    #[test]
+    fn drain_utf8_waits_for_a_split_multibyte_character() {
+        // "é" is 0xC3 0xA9; deliver the two bytes in separate chunks.
+        let mut pending = vec![b'a', 0xC3];
+        let mut out = String::new();
+        drain_utf8(&mut pending, &mut out);
+        assert_eq!(out, "a");
+        assert_eq!(pending, vec![0xC3]);
+        pending.push(0xA9);
+        pending.push(b'b');
+        drain_utf8(&mut pending, &mut out);
+        assert_eq!(out, "a\u{e9}b");
+        assert!(pending.is_empty());
+        // A truly invalid byte is decoded lossily rather than held forever.
+        let mut bad = vec![0xFF, b'x'];
+        let mut out = String::new();
+        drain_utf8(&mut bad, &mut out);
+        assert_eq!(out, "\u{fffd}x");
+        assert!(bad.is_empty());
     }
 }
