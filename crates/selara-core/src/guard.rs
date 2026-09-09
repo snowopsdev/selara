@@ -263,10 +263,15 @@ pub fn provider_is_hosted(kind: ProviderKind, base_url: &str) -> bool {
     if host.is_empty() {
         return true;
     }
-    let local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+    // Only an address that actually parses counts as loopback/private: a name
+    // like `127.0.0.1.evil.com` starts with "127." but resolves to a public
+    // host, and treating it as local would skip the warning entirely.
+    let local = host == "localhost"
         || host.ends_with(".local")
         || host.ends_with(".localhost")
-        || host.starts_with("127.")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
         || is_private_v4(&host);
     !local
 }
@@ -277,6 +282,40 @@ mod tests {
 
     fn kinds(text: &str) -> Vec<SecretKind> {
         scan_secrets(text).into_iter().map(|h| h.kind).collect()
+    }
+
+    #[test]
+    fn hosts_that_only_look_local_are_treated_as_hosted() {
+        // Names that merely start with a loopback or private prefix resolve
+        // through DNS to someone else's server.
+        for host in [
+            "http://127.0.0.1.evil.com/v1",
+            "http://10.0.0.1.evil.com/v1",
+            "http://192.168.1.1.attacker.test/v1",
+            "http://localhost.evil.com/v1",
+            "http://127-0-0-1.evil.com/v1",
+        ] {
+            assert!(
+                provider_is_hosted(ProviderKind::OpenAiCompatible, host),
+                "{host} must count as hosted"
+            );
+        }
+        for host in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://127.1.2.3:8000/v1",
+            "http://[::1]:8080/v1",
+            "http://0.0.0.0:9000/v1",
+            "http://10.1.2.3/v1",
+            "http://192.168.0.5/v1",
+            "http://172.20.0.1/v1",
+            "http://studio.local:1234/v1",
+        ] {
+            assert!(
+                !provider_is_hosted(ProviderKind::OpenAiCompatible, host),
+                "{host} must count as local"
+            );
+        }
     }
 
     #[test]
