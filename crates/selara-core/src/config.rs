@@ -285,20 +285,40 @@ impl AppConfig {
     /// When `provider.auth = "chatgpt"` and kind is OpenAI-compatible, uses the
     /// experimental ChatGPT Codex backend (tokens from `~/.codex/auth.json`).
     pub fn build_provider(&self) -> Result<Box<dyn LlmProvider>, CoreError> {
+        self.build_provider_with_model(&self.provider.model)
+    }
+
+    /// The model a command runs on: its own `model` override when set,
+    /// otherwise `provider.model`.
+    pub fn effective_model<'a>(&'a self, command: &'a WritingCommand) -> &'a str {
+        command
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .unwrap_or(&self.provider.model)
+    }
+
+    /// [`build_provider`](Self::build_provider) honouring the command's model override.
+    pub fn build_provider_for(
+        &self,
+        command: &WritingCommand,
+    ) -> Result<Box<dyn LlmProvider>, CoreError> {
+        self.build_provider_with_model(self.effective_model(command))
+    }
+
+    fn build_provider_with_model(&self, model: &str) -> Result<Box<dyn LlmProvider>, CoreError> {
         let use_chatgpt = matches!(self.provider.auth, ProviderAuth::ChatGpt)
             && matches!(self.provider.kind, ProviderKind::OpenAiCompatible);
         if use_chatgpt {
             let auth = ChatGptAuth::load()?;
-            return Ok(Box::new(ChatGptCodexProvider::new(
-                self.provider.model.clone(),
-                auth,
-            )));
+            return Ok(Box::new(ChatGptCodexProvider::new(model.to_string(), auth)));
         }
         let api_key = self.resolve_api_key()?;
         Ok(provider_from_config(
             self.provider.kind,
             &self.provider.base_url,
-            &self.provider.model,
+            model,
             &api_key,
         ))
     }
@@ -576,6 +596,44 @@ model = "gpt-4o-mini"
             .apply_section("limits", serde_json::json!({"soft_warn_chars": "many"}))
             .unwrap_err();
         assert!(err.to_string().contains("invalid `limits`"), "{err}");
+    }
+
+    #[test]
+    fn command_model_override_wins_over_provider_model() {
+        let cfg = AppConfig::default();
+        let mut cmd = cfg.commands[0].clone();
+        assert_eq!(cfg.effective_model(&cmd), "gpt-4o-mini");
+        cmd.model = Some("  gpt-4.1-mini ".into());
+        assert_eq!(cfg.effective_model(&cmd), "gpt-4.1-mini");
+        cmd.model = Some("   ".into());
+        assert_eq!(
+            cfg.effective_model(&cmd),
+            "gpt-4o-mini",
+            "blank override is ignored"
+        );
+
+        // Old TOML without the field loads; unset is not written back.
+        let raw = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            !raw.contains("model = \"gpt-4o-mini\"\n[[commands"),
+            "{raw}"
+        );
+        let with = r#"
+[provider]
+kind = "open_ai_compatible"
+base_url = ""
+model = "gpt-4o-mini"
+
+[[commands]]
+id = "x"
+label = "X"
+kind = "replace"
+prompt = "Do X."
+model = "llama3.1:8b"
+"#;
+        let cfg: AppConfig = toml::from_str(with).unwrap();
+        assert_eq!(cfg.commands[0].model.as_deref(), Some("llama3.1:8b"));
+        assert_eq!(cfg.effective_model(&cfg.commands[0]), "llama3.1:8b");
     }
 
     #[test]

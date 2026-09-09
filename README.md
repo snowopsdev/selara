@@ -114,7 +114,7 @@ The list of prompts the picker offers. Each row shows whether the command replac
 
 <img alt="Commands tab listing eight commands with Replace and Popup badges, a keyboard shortcut chip on Proofread, a search field, and a New command button" src="docs/screenshots/settings-commands.png" width="820">
 
-Click a row to edit it. The editor holds the label, the replace-or-popup mode, the prompt itself, and an optional hotkey that runs the command directly without the picker. `⌘↩` saves.
+Click a row to edit it. The editor holds the label, the replace-or-popup mode, the prompt itself, an optional hotkey that runs the command directly without the picker, and an optional model that overrides the provider's model for that command only (a cheap local model for Proofread, a frontier model for Rewrite; same provider and key). `⌘↩` saves.
 
 <img alt="Command editor sheet for Proofread showing the label, the Replace selection mode, the full prompt text, and the ctrl+shift+p shortcut" src="docs/screenshots/settings-command-editor.png" width="820">
 
