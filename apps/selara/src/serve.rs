@@ -1,12 +1,14 @@
 //! macOS desktop shell: global hotkey → command picker → replace / popup.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use eframe::egui;
+use notify::Watcher;
 use selara_core::commands::{run_command, CommandKind, WritingCommand};
 use selara_core::config::{AppConfig, LimitsConfig};
 use selara_platform::macos::{
@@ -18,11 +20,42 @@ use selara_platform::SelectionService;
 #[derive(Debug)]
 enum JobResult {
     Success {
+        generation: u64,
         kind: CommandKind,
         label: String,
         text: String,
     },
-    Error(String),
+    Error {
+        generation: u64,
+        message: String,
+    },
+}
+
+impl JobResult {
+    fn generation(&self) -> u64 {
+        match self {
+            JobResult::Success { generation, .. } | JobResult::Error { generation, .. } => {
+                *generation
+            }
+        }
+    }
+}
+
+/// A job result may only be applied when it belongs to the selection that is
+/// still current and the UI is still waiting for it. Escape, a new hotkey
+/// press, or a dismissed window all bump the generation, so a completion that
+/// arrives afterwards is dropped instead of pasted into whatever is focused.
+fn should_apply_job(job_generation: u64, current_generation: u64, waiting: bool) -> bool {
+    waiting && job_generation == current_generation
+}
+
+/// What the last successful Replace wrote, so it can be put back.
+#[derive(Debug, Clone)]
+struct LastReplace {
+    pid: Option<i32>,
+    original: String,
+    replacement: String,
+    range: Option<(i64, i64)>,
 }
 
 enum UiPhase {
@@ -40,6 +73,13 @@ struct ServeApp {
     selection: Arc<MacosSelection>,
     hotkey: MacosHotkey,
     config_mtime: Option<SystemTime>,
+    /// Set from the file-system watcher thread when the config directory
+    /// changes; drained once per frame. The watcher is kept alive here.
+    config_dirty: Arc<AtomicBool>,
+    _config_watcher: Option<notify::RecommendedWatcher>,
+    /// Fallback poll so a missed event (or no watcher) still reloads.
+    last_config_poll: Instant,
+    egui_ctx: egui::Context,
     phase: UiPhase,
     /// Text captured at hotkey time (before our window steals focus).
     captured_text: String,
@@ -53,6 +93,10 @@ struct ServeApp {
     /// Command fired by its own shortcut that is waiting on a picker confirmation.
     pending_direct: Option<WritingCommand>,
     settings_status: String,
+    /// Bumped whenever the captured selection changes or the window is
+    /// dismissed; results from an older generation are discarded.
+    generation: u64,
+    last_replace: Option<LastReplace>,
     job_rx: Receiver<JobResult>,
     job_tx: Sender<JobResult>,
     runtime: tokio::runtime::Runtime,
@@ -69,14 +113,17 @@ impl ServeApp {
         let hotkey = MacosHotkey::new();
         // Wake egui when the hotkey fires so a hidden window still updates.
         let egui_ctx = _cc.egui_ctx.clone();
+        let wake_ctx = egui_ctx.clone();
         hotkey.set_wake(move || {
-            egui_ctx.request_repaint();
+            wake_ctx.request_repaint();
         });
         // Must register on the main thread (eframe creation runs there).
         Self::register_hotkeys(&hotkey, &config)?;
         let config_mtime = std::fs::metadata(&config_path)
             .and_then(|m| m.modified())
             .ok();
+        let config_dirty = Arc::new(AtomicBool::new(false));
+        let config_watcher = Self::watch_config(&config_path, &config_dirty, &egui_ctx);
 
         let (job_tx, job_rx) = mpsc::channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -91,6 +138,10 @@ impl ServeApp {
             selection,
             hotkey,
             config_mtime,
+            config_dirty,
+            _config_watcher: config_watcher,
+            last_config_poll: Instant::now(),
+            egui_ctx,
             phase: UiPhase::Hidden,
             captured_text: String::new(),
             captured_app: None,
@@ -100,10 +151,48 @@ impl ServeApp {
             replace_warn_acked: false,
             pending_direct: None,
             settings_status: String::new(),
+            generation: 0,
+            last_replace: None,
             job_rx,
             job_tx,
             runtime,
         })
+    }
+
+    /// Watch the config's directory (not the file: atomic saves rename a new
+    /// inode into place) and flag a reload plus a repaint on any change. Returns
+    /// `None` when the watcher cannot be created; the periodic poll still runs.
+    fn watch_config(
+        config_path: &std::path::Path,
+        dirty: &Arc<AtomicBool>,
+        egui_ctx: &egui::Context,
+    ) -> Option<notify::RecommendedWatcher> {
+        let dir = config_path.parent()?.to_path_buf();
+        let dirty = dirty.clone();
+        let ctx = egui_ctx.clone();
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
+                Ok(_) => {
+                    dirty.store(true, Ordering::SeqCst);
+                    ctx.request_repaint();
+                }
+                Err(e) => tracing::warn!("config watcher error: {e}"),
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!("config watcher unavailable ({e}); polling every 5s instead");
+                    return None;
+                }
+            };
+        if let Err(e) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+            tracing::warn!(
+                "cannot watch {} ({e}); polling every 5s instead",
+                dir.display()
+            );
+            return None;
+        }
+        tracing::info!("selara: watching {} for config changes", dir.display());
+        Some(watcher)
     }
 
     fn show_window(&self, ctx: &egui::Context, visible: bool) {
@@ -138,13 +227,18 @@ impl ServeApp {
                     .map(|h| format!("{}={}", c.label, h))
             })
             .unwrap_or_else(|| "no cmd shortcuts".into());
+        let undo = config
+            .undo_hotkey
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(|h| format!(" · Undo: {h}"))
+            .unwrap_or_default();
         format!(
-            "Picker: {} · {} cmds · {} · Access: {}",
+            "Picker: {} · {} cmds · {}{undo} · Access: {}",
             config.hotkey,
             config.commands.len(),
-            if cmd_hk == 0 {
-                shortcut_hint
-            } else if cmd_hk == 1 {
+            if cmd_hk <= 1 {
                 shortcut_hint
             } else {
                 format!("{cmd_hk} shortcuts incl. {shortcut_hint}")
@@ -169,18 +263,36 @@ impl ServeApp {
                     .map(|h| (c.id.clone(), h))
             })
             .collect();
-        eprintln!(
+        tracing::info!(
             "selara: registering picker `{}` + {} command shortcut(s)",
             config.hotkey,
             cmd_keys.len()
         );
         for (id, spec) in &cmd_keys {
-            eprintln!("selara:   command `{id}` → `{spec}`");
+            tracing::info!("selara:   command `{id}` → `{spec}`");
+        }
+        let undo = config
+            .undo_hotkey
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty());
+        if let Some(undo) = undo {
+            tracing::info!("selara:   undo → `{undo}`");
         }
         hotkey
-            .reregister_all(&config.hotkey, &cmd_keys)
+            .reregister_all(&config.hotkey, &cmd_keys, undo)
             .with_context(|| format!("register hotkeys (picker `{}`)", config.hotkey))?;
         Ok(())
+    }
+
+    /// Reload when the watcher flagged a change, or every 5 s as a fallback.
+    fn poll_config(&mut self) {
+        let dirty = self.config_dirty.swap(false, Ordering::SeqCst);
+        if !dirty && self.last_config_poll.elapsed() < Duration::from_secs(5) {
+            return;
+        }
+        self.last_config_poll = Instant::now();
+        self.maybe_reload_config();
     }
 
     fn maybe_reload_config(&mut self) {
@@ -214,6 +326,8 @@ impl ServeApp {
     }
 
     fn capture_selection(&mut self) -> Result<bool, String> {
+        // A new selection supersedes any job still running for the old one.
+        self.generation += 1;
         self.target_pid = frontmost_pid();
         self.soft_warn_acked = false;
         self.replace_warn_acked = false;
@@ -303,14 +417,14 @@ then restart `selara serve`."
                 if self.needs_confirmation(&cmd) {
                     // Same rails as the picker: show it with the banner and run
                     // the command once the user confirms.
-                    eprintln!(
+                    tracing::info!(
                         "selara: command hotkey `{}` → waiting for confirmation",
                         cmd.id
                     );
                     self.pending_direct = Some(cmd);
                     self.phase = UiPhase::Picker;
                 } else {
-                    eprintln!("selara: command hotkey `{}` → running", cmd.id);
+                    tracing::info!("selara: command hotkey `{}` → running", cmd.id);
                     self.start_command(cmd);
                 }
             }
@@ -357,6 +471,9 @@ Select text in another app, then press its shortcut again.",
     }
 
     fn hide(&mut self, ctx: &egui::Context) {
+        // Dismissing the window (Escape, Close) cancels whatever is in flight:
+        // the request keeps running but its result is dropped on arrival.
+        self.generation += 1;
         self.pending_direct = None;
         self.phase = UiPhase::Hidden;
         self.show_window(ctx, false);
@@ -418,6 +535,8 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
         let cfg = self.config.clone();
         let tx = self.job_tx.clone();
         let label = cmd.label.clone();
+        let generation = self.generation;
+        let wake = self.egui_ctx.clone();
         self.phase = UiPhase::Working {
             label: label.clone(),
         };
@@ -432,19 +551,31 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
             .await;
 
             let msg = match result {
-                Ok((kind, label, text)) => JobResult::Success { kind, label, text },
-                Err(e) => JobResult::Error(e.to_string()),
+                Ok((kind, label, text)) => JobResult::Success {
+                    generation,
+                    kind,
+                    label,
+                    text,
+                },
+                Err(e) => JobResult::Error {
+                    generation,
+                    message: e.to_string(),
+                },
             };
             let _ = tx.send(msg);
+            // The UI may be idling at a slow tick; make it pick the result up now.
+            wake.request_repaint();
         });
     }
 
     fn apply_job(&mut self, ctx: &egui::Context, job: JobResult) {
         match job {
-            JobResult::Error(message) => {
+            JobResult::Error { message, .. } => {
                 self.phase = UiPhase::Error { message };
             }
-            JobResult::Success { kind, label, text } => match kind {
+            JobResult::Success {
+                kind, label, text, ..
+            } => match kind {
                 CommandKind::Popup => {
                     self.phase = UiPhase::Popup {
                         title: label,
@@ -465,7 +596,14 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
                         std::thread::sleep(std::time::Duration::from_millis(180));
                     }
                     match self.selection.replace_in_app(pid, &text, &original, range) {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            self.last_replace = Some(LastReplace {
+                                pid,
+                                original,
+                                replacement: text,
+                                range,
+                            });
+                        }
                         Err(e) => {
                             self.phase = UiPhase::Error {
                                 message: format!("Replace failed: {e}"),
@@ -479,45 +617,68 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
     }
 }
 
-fn block_on_ready<T>(fut: impl std::future::Future<Output = T>) -> T {
-    use std::task::{Context as TaskCtx, Poll, RawWaker, RawWakerVTable, Waker};
-
-    fn noop_raw_waker() -> RawWaker {
-        fn no_op(_: *const ()) {}
-        fn clone(_: *const ()) -> RawWaker {
-            noop_raw_waker()
+impl ServeApp {
+    /// Put the last replaced selection back. Works from the undo hotkey and the
+    /// picker button; the source app is re-activated first, like a Replace.
+    fn undo_last_replace(&mut self, ctx: &egui::Context) {
+        let Some(last) = self.last_replace.take() else {
+            self.phase = UiPhase::Error {
+                message: "Nothing to undo: no Replace has run since Selara started.".into(),
+            };
+            self.show_window(ctx, true);
+            return;
+        };
+        if !accessibility_trusted() {
+            self.on_hotkey(ctx);
+            return;
         }
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
-        RawWaker::new(std::ptr::null(), &VTABLE)
-    }
-
-    let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
-    let mut cx = TaskCtx::from_waker(&waker);
-    let mut fut = Box::pin(fut);
-    match fut.as_mut().poll(&mut cx) {
-        Poll::Ready(v) => v,
-        Poll::Pending => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime")
-            .block_on(fut),
+        self.hide(ctx);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        if let Some(pid) = last.pid {
+            let _ = activate_pid(pid);
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(180));
+        }
+        tracing::info!("selara: undo last replace ({} chars)", last.original.len());
+        if let Err(e) =
+            self.selection
+                .undo_replace(last.pid, &last.original, &last.replacement, last.range)
+        {
+            // Keep it so the user can retry after fixing focus.
+            self.last_replace = Some(last);
+            self.phase = UiPhase::Error {
+                message: format!("Undo failed: {e}"),
+            };
+            self.show_window(ctx, true);
+        }
     }
 }
 
 impl eframe::App for ServeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.hotkey.poll();
-        self.maybe_reload_config();
+        self.poll_config();
 
         if let Some(action) = self.hotkey.take_pending() {
             match action {
                 HotkeyAction::Picker => self.on_hotkey(ctx),
                 HotkeyAction::Command(id) => self.on_command_hotkey(ctx, &id),
+                HotkeyAction::Undo => self.undo_last_replace(ctx),
             }
         }
 
         while let Ok(job) = self.job_rx.try_recv() {
-            self.apply_job(ctx, job);
+            let waiting = matches!(self.phase, UiPhase::Working { .. });
+            if should_apply_job(job.generation(), self.generation, waiting) {
+                self.apply_job(ctx, job);
+            } else {
+                tracing::info!(
+                    job = job.generation(),
+                    current = self.generation,
+                    waiting,
+                    "selara: dropping stale job result"
+                );
+            }
         }
 
         if matches!(self.phase, UiPhase::Working { .. }) {
@@ -525,8 +686,10 @@ impl eframe::App for ServeApp {
         }
 
         if matches!(self.phase, UiPhase::Hidden) {
-            // Keep the event loop alive so hotkey.poll / wake still run after hide.
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            // Hotkeys, config changes, and job results all wake the loop
+            // explicitly; this slow tick only backs up `hotkey.poll()` and the
+            // 5 s config poll, so an idle `serve` stays near zero CPU.
+            ctx.request_repaint_after(Duration::from_secs(1));
             egui::CentralPanel::default().show(ctx, |_ui| {});
             return;
         }
@@ -549,6 +712,7 @@ impl eframe::App for ServeApp {
         let mut reset_limits = false;
         let mut ack_soft = false;
         let mut ack_replace = false;
+        let mut undo = false;
 
         let soft_blocked = matches!(self.phase, UiPhase::Picker) && self.needs_soft_warn();
         let hard_blocked = matches!(self.phase, UiPhase::Picker) && self.over_hard_max();
@@ -568,6 +732,18 @@ impl eframe::App for ServeApp {
                     }
                     if matches!(self.phase, UiPhase::Settings) && ui.button("Back").clicked() {
                         back_to_picker = true;
+                    }
+                    if self.last_replace.is_some()
+                        && matches!(
+                            self.phase,
+                            UiPhase::Picker | UiPhase::Error { .. } | UiPhase::Popup { .. }
+                        )
+                        && ui
+                            .button("Undo last replace")
+                            .on_hover_text("Put back the text the previous Replace overwrote")
+                            .clicked()
+                    {
+                        undo = true;
                     }
                 });
             });
@@ -758,6 +934,10 @@ impl eframe::App for ServeApp {
         if dismiss {
             self.hide(ctx);
         }
+        if undo {
+            self.undo_last_replace(ctx);
+            return;
+        }
         if let Some(cmd) = clicked {
             self.start_command(cmd);
         }
@@ -832,4 +1012,28 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_apply_job;
+
+    #[test]
+    fn current_generation_while_waiting_is_applied() {
+        assert!(should_apply_job(3, 3, true));
+    }
+
+    #[test]
+    fn stale_generation_is_dropped() {
+        // Hotkey pressed again (new capture) while the old request was running.
+        assert!(!should_apply_job(3, 4, true));
+    }
+
+    #[test]
+    fn result_after_escape_is_dropped() {
+        // Escape hides the window: phase is no longer Working and the
+        // generation was bumped; either condition alone must be enough.
+        assert!(!should_apply_job(3, 3, false));
+        assert!(!should_apply_job(3, 4, false));
+    }
 }

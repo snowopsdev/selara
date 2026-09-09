@@ -22,11 +22,12 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 - **Replace or popup.** Replace commands (Proofread, Rewrite, Friendly, Professional, Concise) write the result back over the selection. Popup commands (Summary, Key Points, Table) open a scrollable result window with a copy button.
 - **Your prompts.** Every command is a labeled prompt. Edit the built-ins, add your own, duplicate one to make a variation, and search the list.
 - **Per-command hotkeys.** Give a command its own shortcut and it runs on the selection immediately, skipping the picker. If the selection trips a size limit, the picker opens with the warning and the command runs once you confirm.
+- **Undo and cancel.** Pressing Escape while a command is running discards its result instead of pasting it later. After a Replace, **Undo last replace** in the picker (or an optional `undo_hotkey`) puts the original text back.
 - **Any provider.** OpenAI-compatible `/chat/completions` (OpenAI, Ollama, LM Studio, vLLM), the Anthropic Messages API, or OpenRouter. Leave the base URL blank for the provider default or point it at a local server.
 - **Model discovery.** Load the model list straight from the provider. A bad key or URL shows up right there, so it doubles as a connection test.
 - **ChatGPT via Codex (experimental).** Reuse an existing ChatGPT subscription by signing in with the Codex CLI. Tokens stay in Codex's own auth store, never in Selara's config.
 - **Size limits.** A soft warning, a replace caution, and a hard maximum, so a stray select-all never sends 100k characters to a metered API. They apply to picker and shortcut runs alike.
-- **Live config.** Everything lives in one TOML file. The `serve` process watches it and re-registers hotkeys within about a second of a save from the Settings app.
+- **Live config.** Everything lives in one TOML file. The `serve` process watches the config directory for changes and re-registers hotkeys as soon as the Settings app saves (with a 5-second poll as a fallback), while staying idle otherwise.
 - **Menu-bar Settings app.** A Tauri tray app with General, Models, Commands, and Limits tabs. No Dock icon, closes to the tray.
 - **Scriptable CLI.** `selara init`, `selara list-commands`, and `selara run <command>` for pipelines and quick checks.
 
@@ -90,7 +91,7 @@ Every tab writes to the same `config.toml`. If `serve` is running, saved changes
 
 ### General
 
-The global shortcut that opens the picker, plus a preferred language code. The language is added to every prompt as a hint: the model replies in that language unless the command itself names an output language (a "Translate to French" command wins) or the selected text is clearly written in another one, in which case it keeps the text's language.
+The global shortcut that opens the picker, an optional undo shortcut, plus a preferred language code. The language is added to every prompt as a hint: the model replies in that language unless the command itself names an output language (a "Translate to French" command wins) or the selected text is clearly written in another one, in which case it keeps the text's language.
 
 <img alt="General tab with the Language field set to en and the Shortcut field set to ctrl+shift+space" src="docs/screenshots/settings-general.png" width="820">
 
@@ -130,7 +131,7 @@ Guard rails for large selections. Set any value to `0` to disable it. The soft w
 
 ## Providers and config
 
-Default config path: `~/.config/selara/config.toml`.
+Default config path: `~/.config/selara/config.toml`. The file is written atomically (temp file + rename) with owner-only permissions (`0600`), and the Settings app saves one tab at a time, so a change made in `serve`'s Limits page is never overwritten by a save in another tab. A `schema_version` key records the file format (currently `1`).
 
 | `kind` | Wire format | Default `base_url` |
 |---|---|---|
@@ -176,6 +177,7 @@ Default is `ctrl+shift+space`. Plain `ctrl+space` often conflicts with macOS Inp
 ```toml
 hotkey = "option+space"
 # or: "cmd+shift+w", "ctrl+shift+space", …
+undo_hotkey = "ctrl+shift+z"   # optional; restores the last replaced text
 ```
 
 Supported tokens: `ctrl`/`control`, `shift`, `alt`/`option`, `cmd`/`command`/`super`, plus a key (`space`, `a`–`z`, `0`–`9`, `enter`, `tab`, `escape`). The same grammar applies to per-command hotkeys.
@@ -190,6 +192,7 @@ Supported tokens: `ctrl`/`control`, `shift`, `alt`/`option`, `cmd`/`command`/`su
 - The clipboard restore can race if you copy something else during that window.
 - Some apps (Electron, browsers, certain rich-text fields) ignore the Accessibility write. The paste fallback usually still works if the original selection remains.
 - The picker steals focus. Selara re-activates the previous app before replacing.
+- Undo relies on the selection range Accessibility reported when the text was captured. In apps that only work through the clipboard fallback, Selara assumes the caret is right after the pasted text and refuses to undo if that does not hold; the app's own ⌘Z still works.
 - Global hotkeys need the `serve` process running. There is no LaunchAgent yet.
 - If a hotkey fails to register or never fires, pick another chord.
 

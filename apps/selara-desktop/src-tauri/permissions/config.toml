@@ -9,6 +9,11 @@ description = "Save Selara config"
 commands.allow = ["save_config"]
 
 [[permission]]
+identifier = "allow-save-config-section"
+description = "Save one section of the Selara config, leaving the rest as on disk"
+commands.allow = ["save_config_section"]
+
+[[permission]]
 identifier = "allow-config-path"
 description = "Read config file path"
 commands.allow = ["config_path"]

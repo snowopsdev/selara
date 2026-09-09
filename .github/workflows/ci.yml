@@ -32,10 +32,10 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
-      # Without -D warnings: current tree has known clippy / objc cfg noise on
-      # macOS FFI paths and a few existing lints. Tighten later once cleaned up.
+      # Warnings are errors: the tree is lint-clean and the objc cfg noise on
+      # macOS FFI paths is declared via check-cfg in selara-platform.
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --exclude selara-desktop
+        run: cargo clippy --workspace --all-targets --exclude selara-desktop -- -D warnings
 
       - name: cargo test
         run: cargo test --workspace --exclude selara-desktop
