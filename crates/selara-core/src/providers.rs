@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -16,11 +17,90 @@ use crate::error::CoreError;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Statuses worth one more try: rate limiting and upstream/gateway hiccups.
+/// A 500 is deliberately absent because it usually means the request itself
+/// is bad and would fail again.
+const RETRYABLE_STATUSES: [u16; 4] = [429, 502, 503, 504];
+/// Honour `Retry-After` only when it is short; anything longer is treated as
+/// a normal transient wait so a hostile header cannot stall the hotkey.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(1000);
+const RETRY_JITTER_MS: u64 = 500;
+
+/// One process-wide client so every provider call shares the connection pool
+/// and the TLS configuration instead of rebuilding both per request. A build
+/// failure is cached as the error text and returned on every call rather than
+/// panicking; `reqwest::Error` is not `Clone`, hence the `String`.
+static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+
 pub(crate) fn http_client() -> Result<reqwest::Client, CoreError> {
-    Ok(reqwest::Client::builder()
-        .connect_timeout(HTTP_CONNECT_TIMEOUT)
-        .read_timeout(HTTP_READ_IDLE_TIMEOUT)
-        .build()?)
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                .read_timeout(HTTP_READ_IDLE_TIMEOUT)
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .clone()
+        .map_err(|e| CoreError::Provider(format!("HTTP client: {e}")))
+}
+
+/// Send a request and retry it once on a transient failure: a connect or
+/// timeout error, or a 429/502/503/504 response. Requests whose body cannot be
+/// cloned (streams) are sent once. The second attempt's result is returned
+/// as-is so callers keep shaping errors exactly as they did without retry.
+pub(crate) async fn send_with_retry(
+    builder: reqwest::RequestBuilder,
+    what: &str,
+) -> Result<reqwest::Response, CoreError> {
+    let Some(retry) = builder.try_clone() else {
+        return Ok(builder.send().await?);
+    };
+    let delay = match builder.send().await {
+        Ok(resp) if RETRYABLE_STATUSES.contains(&resp.status().as_u16()) => {
+            let status = resp.status();
+            let delay = retry_delay(retry_after(&resp));
+            tracing::warn!(%what, %status, ?delay, "retrying after transient HTTP status");
+            delay
+        }
+        Ok(resp) => return Ok(resp),
+        Err(e) if e.is_connect() || e.is_timeout() => {
+            let delay = retry_delay(None);
+            tracing::warn!(%what, error = %e, ?delay, "retrying after request error");
+            delay
+        }
+        Err(e) => return Err(e.into()),
+    };
+    tokio::time::sleep(delay).await;
+    Ok(retry.send().await?)
+}
+
+/// `Retry-After` in delay-seconds form, when present and no longer than
+/// [`MAX_RETRY_AFTER`]. HTTP-date form is ignored (falls back to the default).
+fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
+    let secs = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let wait = Duration::from_secs(secs);
+    (wait <= MAX_RETRY_AFTER).then_some(wait)
+}
+
+/// The server's hint if usable, else the base delay plus 0..500 ms of jitter
+/// taken from the clock so simultaneous retries do not line up.
+fn retry_delay(hint: Option<Duration>) -> Duration {
+    hint.unwrap_or_else(|| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0);
+        RETRY_BASE_DELAY + Duration::from_millis(nanos % RETRY_JITTER_MS)
+    })
 }
 
 /// Read the body as text, then JSON. Non-JSON error pages keep the HTTP status.
@@ -211,7 +291,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             builder = builder.header(name.as_str(), value.as_str());
         }
 
-        let resp = builder.send().await?;
+        let resp = send_with_retry(builder, "chat completion").await?;
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
@@ -249,13 +329,12 @@ impl LlmProvider for AnthropicProvider {
                 {"role": "user", "content": req.user}
             ]
         });
-        let resp = client
+        let builder = client
             .post(url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&body)
-            .send()
-            .await?;
+            .json(&body);
+        let resp = send_with_retry(builder, "anthropic messages").await?;
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
@@ -326,7 +405,9 @@ impl LlmProvider for ChatGptCodexProvider {
             builder = builder.header("ChatGPT-Account-ID", account_id);
         }
 
-        let resp = builder.send().await?;
+        // Only the initial POST is retried; once the SSE stream is open a
+        // failure mid-stream surfaces to the caller as before.
+        let resp = send_with_retry(builder, "chatgpt codex responses").await?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -457,7 +538,7 @@ pub async fn list_chatgpt_models() -> Result<Vec<String>, CoreError> {
     if let Some(account_id) = auth.account_id_header() {
         builder = builder.header("ChatGPT-Account-ID", account_id);
     }
-    let resp = builder.send().await?;
+    let resp = send_with_retry(builder, "list models").await?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -598,7 +679,7 @@ async fn send_json(
     builder: reqwest::RequestBuilder,
     what: &str,
 ) -> Result<serde_json::Value, CoreError> {
-    let resp = builder.send().await?;
+    let resp = send_with_retry(builder, what).await?;
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
@@ -823,6 +904,112 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"ab\"}\n";
         http_client().expect("client should build");
     }
 
+    /// The shared client is built once; every call hands back a usable clone.
+    #[tokio::test]
+    async fn http_client_is_shared_and_reusable() {
+        let first = http_client().expect("first client");
+        let second = http_client().expect("second client");
+        let (base, served) = spawn_http_sequence(vec![(200, "{}"), (200, "{}")]);
+        let a = first.get(format!("{base}/a")).send().await.unwrap();
+        assert_eq!(a.status().as_u16(), 200);
+        let b = second.get(format!("{base}/b")).send().await.unwrap();
+        assert_eq!(b.status().as_u16(), 200);
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn retry_delay_uses_short_hint_or_jittered_base() {
+        assert_eq!(
+            retry_delay(Some(Duration::from_secs(3))),
+            Duration::from_secs(3)
+        );
+        for _ in 0..8 {
+            let d = retry_delay(None);
+            assert!(d >= RETRY_BASE_DELAY, "{d:?}");
+            assert!(
+                d < RETRY_BASE_DELAY + Duration::from_millis(RETRY_JITTER_MS),
+                "{d:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_once_after_503_then_succeeds() {
+        let (base, served) =
+            spawn_http_sequence(vec![(503, r#"{"error":"busy"}"#), (200, OPENAI_OK)]);
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_429_honouring_retry_after_zero() {
+        let started = std::time::Instant::now();
+        let (base, served) = spawn_http_sequence_with_headers(vec![
+            (429, "Retry-After: 0\r\n", r#"{"error":"rate limited"}"#),
+            (200, "", OPENAI_OK),
+        ]);
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            started.elapsed() < RETRY_BASE_DELAY,
+            "Retry-After: 0 should skip the default backoff, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_500() {
+        let (base, served) =
+            spawn_http_sequence(vec![(500, r#"{"error":"boom"}"#), (200, OPENAI_OK)]);
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("500"), "{msg}");
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn gives_up_after_second_503() {
+        let (base, served) = spawn_http_sequence(vec![
+            (503, r#"{"error":"busy"}"#),
+            (503, r#"{"error":"still busy"}"#),
+            (200, OPENAI_OK),
+        ]);
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("503"), "{msg}");
+        assert!(
+            msg.contains("still busy"),
+            "second attempt's body expected: {msg}"
+        );
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn list_models_retries_transient_status() {
+        let models = r#"{"data":[{"id":"gpt-4o-mini"}]}"#;
+        let (base, served) =
+            spawn_http_sequence(vec![(504, "<html>timeout</html>"), (200, models)]);
+        let ids = list_provider_models(ProviderKind::OpenAiCompatible, &base, "k")
+            .await
+            .unwrap();
+        assert_eq!(ids, vec!["gpt-4o-mini"]);
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn sse_framing_splits_crlf_and_lf_events() {
         let mut buf = String::from(
@@ -883,7 +1070,7 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
         body: &str,
         content_type: &str,
     ) -> (String, std::sync::mpsc::Receiver<String>) {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -892,41 +1079,7 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut raw = Vec::new();
-            let mut chunk = [0u8; 4096];
-            let header_end = loop {
-                let n = stream.read(&mut chunk).unwrap_or(0);
-                if n == 0 {
-                    break None;
-                }
-                raw.extend_from_slice(&chunk[..n]);
-                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                    break Some(pos + 4);
-                }
-            };
-            let request_body = match header_end {
-                Some(end) => {
-                    let head = String::from_utf8_lossy(&raw[..end]).to_string();
-                    let len = head
-                        .lines()
-                        .find_map(|l| {
-                            let (k, v) = l.split_once(':')?;
-                            k.eq_ignore_ascii_case("content-length")
-                                .then(|| v.trim().parse::<usize>().ok())
-                                .flatten()
-                        })
-                        .unwrap_or(0);
-                    while raw.len() < end + len {
-                        let n = stream.read(&mut chunk).unwrap_or(0);
-                        if n == 0 {
-                            break;
-                        }
-                        raw.extend_from_slice(&chunk[..n]);
-                    }
-                    String::from_utf8_lossy(&raw[end..raw.len().min(end + len)]).to_string()
-                }
-                None => String::new(),
-            };
+            let request_body = read_http_request(&mut stream);
             let _ = tx.send(request_body);
             let resp = format!(
                 "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -935,6 +1088,94 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
             let _ = stream.write_all(resp.as_bytes());
         });
         (format!("http://{addr}"), rx)
+    }
+
+    /// Read one HTTP/1.1 request (headers, then `Content-Length` bytes of
+    /// body) from the stream and return the body.
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let header_end = loop {
+            let n = stream.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                break None;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                break Some(pos + 4);
+            }
+        };
+        let Some(end) = header_end else {
+            return String::new();
+        };
+        let head = String::from_utf8_lossy(&raw[..end]).to_string();
+        let len = head
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case("content-length")
+                    .then(|| v.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        while raw.len() < end + len {
+            let n = stream.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&raw[end..raw.len().min(end + len)]).to_string()
+    }
+
+    /// Fake HTTP server that answers N sequential connections, one canned
+    /// JSON response each, in order. Returns the base URL and a counter of
+    /// requests actually served, so tests can assert how many attempts the
+    /// retry logic made. Every response closes its connection.
+    fn spawn_http_sequence(
+        responses: Vec<(u16, &str)>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        spawn_http_sequence_with_headers(
+            responses
+                .into_iter()
+                .map(|(status, body)| (status, "", body))
+                .collect(),
+        )
+    }
+
+    /// Like [`spawn_http_sequence`] with extra raw header lines per response
+    /// (each terminated by `\r\n`, e.g. `"Retry-After: 0\r\n"`).
+    fn spawn_http_sequence_with_headers(
+        responses: Vec<(u16, &str, &str)>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let responses: Vec<(u16, String, String)> = responses
+            .into_iter()
+            .map(|(s, h, b)| (s, h.to_string(), b.to_string()))
+            .collect();
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&served);
+        std::thread::spawn(move || {
+            for (status, extra_headers, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let _ = read_http_request(&mut stream);
+                counter.fetch_add(1, Ordering::SeqCst);
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), served)
     }
 
     fn openai_provider(base: &str, model: &str) -> OpenAiCompatibleProvider {
@@ -1116,7 +1357,12 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n";
 
     #[tokio::test]
     async fn html_error_page_keeps_http_status() {
-        let base = spawn_http(502, "<html>bad gateway</html>", "text/html");
+        // 502 is retried once, so serve it twice: the error shape must
+        // survive retry exhaustion.
+        let (base, served) = spawn_http_sequence(vec![
+            (502, "<html>bad gateway</html>"),
+            (502, "<html>bad gateway</html>"),
+        ]);
         let provider = OpenAiCompatibleProvider {
             base_url: format!("{base}/v1"),
             api_key: "k".into(),
@@ -1139,6 +1385,7 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n";
             !msg.to_lowercase().contains("error decoding"),
             "must not hide status behind a JSON decode error: {msg}"
         );
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
