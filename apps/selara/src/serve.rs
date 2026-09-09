@@ -180,6 +180,21 @@ fn picker_row_enabled(
 /// never written to the config: "Save as command" derives a real id first.
 const ADHOC_ID: &str = "adhoc";
 
+/// Where the command that is running (or just ran) came from.
+///
+/// This is tracked alongside the command rather than inferred from its id.
+/// Command ids are free-form — a hand-edited `config.toml` or an imported
+/// command pack can perfectly well contain `id = "adhoc"` — so a predicate on
+/// the id would file that configured command's prompt into instruction history
+/// and offer "Save as command…" for something already saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandOrigin {
+    /// A command that already exists in the config.
+    Configured,
+    /// One-off text typed into the picker's filter box; in memory only.
+    Instruction,
+}
+
 /// How many instructions the picker remembers for ↑ recall.
 const HISTORY_CAP: usize = 10;
 
@@ -199,10 +214,6 @@ fn adhoc_command(text: &str, popup: bool) -> WritingCommand {
         hotkey: None,
         model: None,
     }
-}
-
-fn is_adhoc(cmd: &WritingCommand) -> bool {
-    cmd.id == ADHOC_ID
 }
 
 /// Label for a saved instruction: its first four words.
@@ -463,6 +474,8 @@ struct ServeApp {
     last_replace: Option<LastReplace>,
     /// The command most recently started, so a popup can Retry it.
     last_command: Option<WritingCommand>,
+    /// Origin of `last_command`; see `CommandOrigin`.
+    last_origin: CommandOrigin,
     md_cache: CommonMarkCache,
     job_rx: Receiver<JobResult>,
     job_tx: Sender<JobResult>,
@@ -541,6 +554,7 @@ impl ServeApp {
             generation: 0,
             last_replace: None,
             last_command: None,
+            last_origin: CommandOrigin::Configured,
             md_cache: CommonMarkCache::default(),
             job_rx,
             job_tx,
@@ -902,7 +916,7 @@ then restart `selara serve`."
                     self.phase = UiPhase::Picker;
                 } else {
                     tracing::info!("selara: command hotkey `{}` → running", cmd.id);
-                    self.start_command(cmd);
+                    self.start_command(cmd, CommandOrigin::Configured);
                 }
             }
             Ok(false) => {
@@ -942,7 +956,8 @@ Select text in another app, then press its shortcut again.",
             .is_some_and(|cmd| !self.over_hard_max() && !self.needs_confirmation(cmd));
         if ready {
             if let Some(cmd) = self.pending_direct.take() {
-                self.start_command(cmd);
+                // A shortcut always names a command that is in the config.
+                self.start_command(cmd, CommandOrigin::Configured);
             }
         }
     }
@@ -986,10 +1001,11 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
         }
     }
 
-    fn start_command(&mut self, cmd: WritingCommand) {
+    fn start_command(&mut self, cmd: WritingCommand, origin: CommandOrigin) {
         // Picking a command by hand supersedes any shortcut-triggered one.
         self.pending_direct = None;
         self.last_command = Some(cmd.clone());
+        self.last_origin = origin;
         if self.over_hard_max() {
             self.phase = self.hard_max_error();
             return;
@@ -1088,7 +1104,7 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
             } => {
                 // A finished instruction is offered for saving: from the
                 // popup right away, or from the picker's banner next time.
-                if self.last_command.as_ref().is_some_and(is_adhoc) {
+                if self.last_origin == CommandOrigin::Instruction {
                     self.last_adhoc = self.last_command.clone();
                 }
                 match kind {
@@ -1106,8 +1122,8 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
 
     /// Run a command picked in the picker. An ad-hoc instruction is also
     /// remembered for ↑ recall.
-    fn run_picked(&mut self, cmd: WritingCommand) {
-        if is_adhoc(&cmd) {
+    fn run_picked(&mut self, cmd: WritingCommand, origin: CommandOrigin) {
+        if origin == CommandOrigin::Instruction {
             push_history(&mut self.instruction_history, &cmd.prompt);
             tracing::info!(
                 "selara: running instruction ({} chars) as {:?}",
@@ -1115,7 +1131,7 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
                 cmd.kind
             );
         }
-        self.start_command(cmd);
+        self.start_command(cmd, origin);
     }
 
     /// Append the last finished instruction to the config as a real command
@@ -1125,12 +1141,31 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
         let Some(adhoc) = self.last_adhoc.take() else {
             return;
         };
-        let existing: Vec<String> = self.config.commands.iter().map(|c| c.id.clone()).collect();
+        // Re-read the file first. The Settings app is a separate process and
+        // saves a section by reloading and merging for exactly this reason;
+        // writing our whole in-memory `config` would silently drop anything it
+        // saved since this frame's config poll. Only the new command is added
+        // to whatever is on disk now, and the merged result becomes our copy.
+        let mut latest = match AppConfig::load_or_init(&self.config_path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.last_adhoc = Some(adhoc);
+                self.picker_notice = format!("Save failed: could not re-read the config: {e}");
+                return;
+            }
+        };
+        let existing: Vec<String> = latest.commands.iter().map(|c| c.id.clone()).collect();
         let cmd = command_from_instruction(&adhoc.prompt, adhoc.kind, &existing);
         let (id, label) = (cmd.id.clone(), cmd.label.clone());
-        self.config.commands.push(cmd);
-        match self.config.save(&self.config_path) {
+        latest.commands.push(cmd);
+        match latest.save(&self.config_path) {
             Ok(()) => {
+                self.config = latest;
+                // The merged config can carry hotkey changes the Settings app
+                // made while this instruction was running, so re-register.
+                if let Err(e) = Self::register_hotkeys(&self.hotkey, &self.config) {
+                    tracing::warn!("selara: hotkey reload after saving `{id}` failed: {e}");
+                }
                 self.config_mtime = std::fs::metadata(&self.config_path)
                     .and_then(|m| m.modified())
                     .ok();
@@ -1139,7 +1174,6 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
                 tracing::info!("selara: saved instruction as command `{id}`");
             }
             Err(e) => {
-                self.config.commands.pop();
                 self.last_adhoc = Some(adhoc);
                 self.picker_notice = format!("Save failed: {e}");
             }
@@ -1332,7 +1366,7 @@ impl eframe::App for ServeApp {
         // an empty box recalls the previous instruction. The keys are consumed
         // here, before the panel renders, so the filter box never sees them
         // (Enter would otherwise drop its focus).
-        let mut key_run: Option<WritingCommand> = None;
+        let mut key_run: Option<(WritingCommand, CommandOrigin)> = None;
         let mut selection_moved = false;
         if matches!(self.phase, UiPhase::Picker) {
             let filter_empty = self.picker_filter.trim().is_empty();
@@ -1388,9 +1422,12 @@ impl eframe::App for ServeApp {
                 digit.and_then(|d| rows.get(d)).map(|r| (*r, false))
             };
             if let Some((row, popup)) = target {
-                let cmd = match row {
-                    PickerRow::Instruction => adhoc_command(&self.picker_filter, popup),
-                    PickerRow::Command(cmd) => cmd.clone(),
+                let (cmd, origin) = match row {
+                    PickerRow::Instruction => (
+                        adhoc_command(&self.picker_filter, popup),
+                        CommandOrigin::Instruction,
+                    ),
+                    PickerRow::Command(cmd) => (cmd.clone(), CommandOrigin::Configured),
                 };
                 let enabled = picker_row_enabled(
                     matches!(cmd.kind, CommandKind::Replace),
@@ -1399,7 +1436,7 @@ impl eframe::App for ServeApp {
                     self.needs_replace_warn(),
                 );
                 if enabled {
-                    key_run = Some(cmd);
+                    key_run = Some((cmd, origin));
                 }
             }
             self.picker_selected = selected;
@@ -1408,7 +1445,7 @@ impl eframe::App for ServeApp {
             && std::mem::take(&mut self.focus_filter_next_frame);
 
         // Collect click target without holding a borrow across mutation.
-        let mut clicked: Option<WritingCommand> = key_run;
+        let mut clicked: Option<(WritingCommand, CommandOrigin)> = key_run;
         let mut dismiss = false;
         let mut open_settings = false;
         let mut back_to_picker = false;
@@ -1429,7 +1466,7 @@ impl eframe::App for ServeApp {
         // The popup shows "Save as command…" only for the instruction it
         // displays, not for a configured command run after an instruction.
         let popup_from_adhoc =
-            self.last_adhoc.is_some() && self.last_command.as_ref().is_some_and(is_adhoc);
+            self.last_adhoc.is_some() && self.last_origin == CommandOrigin::Instruction;
         let filter_caret_to_end = std::mem::take(&mut self.filter_caret_to_end);
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -1623,7 +1660,8 @@ impl eframe::App for ServeApp {
                                             resp.scroll_to_me(None);
                                         }
                                         if resp.clicked() {
-                                            clicked = Some(adhoc_command(&filter_text, false));
+                                            clicked =
+                                                Some((adhoc_command(&filter_text, false), CommandOrigin::Instruction));
                                         }
                                         ui.horizontal_wrapped(|ui| {
                                             ui.small(
@@ -1639,7 +1677,10 @@ impl eframe::App for ServeApp {
                                                 )
                                                 .clicked()
                                             {
-                                                clicked = Some(adhoc_command(&filter_text, true));
+                                                clicked = Some((
+                                                    adhoc_command(&filter_text, true),
+                                                    CommandOrigin::Instruction,
+                                                ));
                                             }
                                         });
                                         if no_command_matches {
@@ -1682,7 +1723,7 @@ impl eframe::App for ServeApp {
                                     resp.scroll_to_me(None);
                                 }
                                 if resp.clicked() {
-                                    clicked = Some(cmd.clone());
+                                    clicked = Some((cmd.clone(), CommandOrigin::Configured));
                                 }
                             }
                         });
@@ -1914,12 +1955,13 @@ impl eframe::App for ServeApp {
         }
         if retry {
             if let Some(cmd) = self.last_command.clone() {
-                self.start_command(cmd);
+                // Retry re-runs the same command, so it keeps its origin.
+                self.start_command(cmd, self.last_origin);
             }
             return;
         }
-        if let Some(cmd) = clicked {
-            self.run_picked(cmd);
+        if let Some((cmd, origin)) = clicked {
+            self.run_picked(cmd, origin);
         }
         if matches!(self.phase, UiPhase::Picker) {
             self.run_pending_if_ready();
