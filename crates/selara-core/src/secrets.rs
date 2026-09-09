@@ -64,6 +64,16 @@ pub fn use_mock_store() {
     });
 }
 
+/// Install the mock store and take the crate-wide guard for it. The store is
+/// process-global, so every test that sets or deletes an account must hold
+/// this or `cargo test`'s parallel threads will clobber each other's entries.
+#[cfg(test)]
+pub(crate) fn lock_mock_store() -> std::sync::MutexGuard<'static, ()> {
+    static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use_mock_store();
+    STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 mod memory {
     use std::any::Any;
     use std::collections::HashMap;
@@ -140,7 +150,7 @@ mod tests {
 
     #[test]
     fn set_get_delete_round_trip() {
-        use_mock_store();
+        let _store = lock_mock_store();
         let kind = ProviderKind::OpenRouter;
         keychain_delete(kind).unwrap();
         assert_eq!(keychain_get(kind).unwrap(), None);
@@ -156,14 +166,14 @@ mod tests {
 
     #[test]
     fn empty_key_is_rejected() {
-        use_mock_store();
+        let _store = lock_mock_store();
         let err = keychain_set(ProviderKind::Anthropic, "   ").unwrap_err();
         assert!(err.to_string().contains("empty"), "{err}");
     }
 
     #[test]
     fn accounts_are_distinct_per_kind() {
-        use_mock_store();
+        let _store = lock_mock_store();
         keychain_set(ProviderKind::Anthropic, "a").unwrap();
         keychain_set(ProviderKind::OpenAiCompatible, "b").unwrap();
         assert_eq!(

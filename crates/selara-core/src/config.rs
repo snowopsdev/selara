@@ -331,10 +331,11 @@ pub fn serve_pidfile(config_path: &Path) -> PathBuf {
 }
 
 fn env_api_key() -> Option<String> {
+    // Filter inside the closure: an empty SELARA_API_KEY must not stop the
+    // search before the legacy variable is examined.
     ["SELARA_API_KEY", "WRITING_TOOLS_API_KEY"]
         .iter()
-        .find_map(|var| std::env::var(var).ok())
-        .filter(|k| !k.trim().is_empty())
+        .find_map(|var| std::env::var(var).ok().filter(|k| !k.trim().is_empty()))
 }
 
 fn temp_sibling(path: &Path) -> PathBuf {
@@ -783,7 +784,7 @@ auth = "chatgpt"
     #[test]
     fn keychain_sits_between_env_and_config() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        secrets::use_mock_store();
+        let _store = secrets::lock_mock_store();
         let prev_selara = std::env::var_os("SELARA_API_KEY");
         let prev_wt = std::env::var_os("WRITING_TOOLS_API_KEY");
         std::env::remove_var("SELARA_API_KEY");
@@ -820,9 +821,31 @@ auth = "chatgpt"
     }
 
     #[test]
+    fn empty_preferred_env_falls_back_to_legacy_var() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _store = secrets::lock_mock_store();
+
+        let prev_selara = std::env::var_os("SELARA_API_KEY");
+        let prev_wt = std::env::var_os("WRITING_TOOLS_API_KEY");
+        std::env::set_var("SELARA_API_KEY", "   ");
+        std::env::set_var("WRITING_TOOLS_API_KEY", "legacy-key");
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.api_key_source(), ApiKeySource::Env);
+        assert_eq!(cfg.resolve_api_key().unwrap(), "legacy-key");
+        match prev_selara {
+            Some(v) => std::env::set_var("SELARA_API_KEY", v),
+            None => std::env::remove_var("SELARA_API_KEY"),
+        }
+        match prev_wt {
+            Some(v) => std::env::set_var("WRITING_TOOLS_API_KEY", v),
+            None => std::env::remove_var("WRITING_TOOLS_API_KEY"),
+        }
+    }
+
+    #[test]
     fn resolve_api_key_prefers_selara_env() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        secrets::use_mock_store();
+        let _store = secrets::lock_mock_store();
 
         let prev_selara = std::env::var_os("SELARA_API_KEY");
         let prev_wt = std::env::var_os("WRITING_TOOLS_API_KEY");

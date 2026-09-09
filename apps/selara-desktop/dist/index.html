@@ -1342,11 +1342,19 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       const typedKey = ($("#api_key") && $("#api_key").value.trim()) || "";
       const useKeychain = !!($("#store-keychain") && $("#store-keychain").checked);
       let fileKey = typedKey || null;
-      if (a === "api_key" && typedKey && useKeychain) {
+      if (a === "api_key" && typedKey) {
         try {
-          await invoke("store_api_key", { kind: kind, apiKey: typedKey });
-          fileKey = null;
-          $("#api_key").value = "";
+          if (useKeychain) {
+            await invoke("store_api_key", { kind: kind, apiKey: typedKey });
+            fileKey = null;
+            $("#api_key").value = "";
+          } else {
+            // resolve_api_key prefers the keychain over config.toml, so an
+            // existing entry would keep shadowing the plaintext key just
+            // typed. Every OpenAI-compatible preset shares one keychain
+            // account, so the shadowing key can even be another vendor's.
+            await invoke("clear_api_key", { kind: kind });
+          }
         } catch (e) {
           setStatus(String(e));
           return;
