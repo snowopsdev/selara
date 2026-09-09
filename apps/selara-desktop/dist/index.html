@@ -561,6 +561,20 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       keyPlaceholder: "sk-...",
       modelPlaceholder: "gpt-4o-mini",
       keyHint: "Works with OpenAI, Ollama, LM Studio, or any /chat/completions endpoint.",
+      // Known OpenAI-compatible servers. Picking one fills the base URL and hints;
+      // it never changes provider.kind, and "custom" leaves the URL alone.
+      presets: [
+        { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", keyPlaceholder: "sk-...", keyHint: "Create a key at platform.openai.com.", modelPlaceholder: "gpt-4o-mini" },
+        { id: "ollama", label: "Ollama (local)", baseUrl: "http://localhost:11434/v1", keyPlaceholder: "ollama", keyHint: "Any placeholder key works for a local Ollama server.", modelPlaceholder: "llama3.1:8b" },
+        { id: "lmstudio", label: "LM Studio (local)", baseUrl: "http://localhost:1234/v1", keyPlaceholder: "lm-studio", keyHint: "Any placeholder key works; start the local server in LM Studio.", modelPlaceholder: "local-model" },
+        { id: "vllm", label: "vLLM (local)", baseUrl: "http://localhost:8000/v1", keyPlaceholder: "token", keyHint: "Use the --api-key you started vLLM with, or any placeholder.", modelPlaceholder: "meta-llama/Llama-3.1-8B-Instruct" },
+        { id: "groq", label: "Groq", baseUrl: "https://api.groq.com/openai/v1", keyPlaceholder: "gsk_...", keyHint: "Create a key at console.groq.com.", modelPlaceholder: "llama-3.3-70b-versatile" },
+        { id: "mistral", label: "Mistral", baseUrl: "https://api.mistral.ai/v1", keyPlaceholder: "...", keyHint: "Create a key at console.mistral.ai.", modelPlaceholder: "mistral-small-latest" },
+        { id: "gemini", label: "Google Gemini (OpenAI-compatible)", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", keyPlaceholder: "AIza...", keyHint: "Create a key in Google AI Studio.", modelPlaceholder: "gemini-2.5-flash" },
+        { id: "together", label: "Together AI", baseUrl: "https://api.together.xyz/v1", keyPlaceholder: "...", keyHint: "Create a key at api.together.ai.", modelPlaceholder: "meta-llama/Llama-3.3-70B-Instruct-Turbo" },
+        { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", keyPlaceholder: "sk-...", keyHint: "Create a key at platform.deepseek.com.", modelPlaceholder: "deepseek-chat" },
+        { id: "custom", label: "Custom endpoint", baseUrl: "", keyPlaceholder: "...", keyHint: "Any server that speaks OpenAI /chat/completions.", modelPlaceholder: "model-id" },
+      ],
     },
     anthropic: {
       label: "Anthropic",
@@ -578,6 +592,18 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     },
   };
   function providerMeta(kind) { return PROVIDERS[kind] || PROVIDERS.open_ai_compatible; }
+  // Which OpenAI-compatible preset a base URL belongs to. Blank means the
+  // OpenAI default (core falls back to it); anything unknown is "custom".
+  function presetForBaseUrl(baseUrl) {
+    const list = PROVIDERS.open_ai_compatible.presets;
+    const b = String(baseUrl || "").trim().replace(/\/+$/, "");
+    if (!b) return list[0];
+    return list.find((p) => p.baseUrl && p.baseUrl.replace(/\/+$/, "") === b) || list.find((p) => p.id === "custom");
+  }
+  function presetById(id) {
+    const list = PROVIDERS.open_ai_compatible.presets;
+    return list.find((p) => p.id === id) || list[list.length - 1];
+  }
 
   const EYE_SVG =
     "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">" +
@@ -809,7 +835,16 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
           "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>") +
       "</div>";
 
+    const presetOptions = PROVIDERS.open_ai_compatible.presets.map((pr) =>
+      "<option value=\"" + escapeAttr(pr.id) + "\">" + escapeHtml(pr.label) + "</option>"
+    ).join("");
     const byokInner =
+      "<div class=\"form-row\" id=\"preset-field\">" +
+      "<label for=\"provider-preset\">Preset</label>" +
+      "<div class=\"control-stack\">" +
+      "<select id=\"provider-preset\">" + presetOptions + "</select>" +
+      "<p class=\"field-hint\">Fills the base URL and key hint for a known server. Pick Custom endpoint for anything else.</p>" +
+      "</div></div>" +
       "<div class=\"form-row\" id=\"model-byok-wrap\">" +
       "<label for=\"model\">Model</label>" +
       "<div class=\"control-stack\">" +
@@ -911,18 +946,54 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         $("#provider-auth").value = "api_key";
         $("#provider-auth").dispatchEvent(new Event("change"));
       }
+      const presetField = $("#preset-field");
+      if (presetField) presetField.style.display = isOpenAi ? "" : "none";
+      const presetSel = $("#provider-preset");
+      const preset = isOpenAi && presetSel ? presetById(presetSel.value) : null;
+      // With a preset selected, its placeholders and hints win over the kind's defaults.
+      const active = preset || meta;
       const key = $("#api_key");
-      if (key) key.placeholder = meta.keyPlaceholder;
+      if (key) key.placeholder = active.keyPlaceholder;
       const model = $("#model");
-      if (model) model.placeholder = meta.modelPlaceholder;
+      if (model) model.placeholder = active.modelPlaceholder;
       const base = $("#base_url");
-      if (base) base.placeholder = meta.baseUrl;
+      if (base) base.placeholder = active.baseUrl || meta.baseUrl;
       const baseHint = $("#base-url-hint");
-      if (baseHint) baseHint.textContent = "Leave blank to use " + meta.baseUrl + ".";
+      if (baseHint) {
+        if (!preset || preset.id === "openai") {
+          baseHint.textContent = "Leave blank to use " + meta.baseUrl + ".";
+        } else if (preset.baseUrl) {
+          baseHint.textContent = "Filled from the " + preset.label + " preset. Edit it if your server runs elsewhere.";
+        } else {
+          baseHint.textContent = "Enter the /v1 base URL of your server.";
+        }
+      }
       const hint = $("#auth-hint");
       if (hint && $("#provider-auth").value !== "chatgpt") {
-        hint.textContent = meta.keyHint + " Stored in ~/.config/selara/config.toml, or set SELARA_API_KEY.";
+        hint.textContent = active.keyHint + " Stored in ~/.config/selara/config.toml, or set SELARA_API_KEY.";
       }
+    }
+
+    // Preset select follows the base URL, and a chosen preset fills the base URL.
+    function syncPresetFromBaseUrl() {
+      const presetSel = $("#provider-preset");
+      const base = $("#base_url");
+      if (presetSel && base) presetSel.value = presetForBaseUrl(base.value).id;
+    }
+    const presetSelect = $("#provider-preset");
+    if (presetSelect) {
+      presetSelect.onchange = () => {
+        const preset = presetById(presetSelect.value);
+        const base = $("#base_url");
+        if (base && preset.id !== "custom") base.value = preset.baseUrl;
+        const list = $("#model-options");
+        if (list) list.innerHTML = "";
+        const modelsHint = $("#byok-models-hint");
+        if (modelsHint) modelsHint.textContent = "Type a model id, or load the list from the provider to check the connection.";
+        syncProviderUi();
+      };
+      const baseInput = $("#base_url");
+      if (baseInput) baseInput.addEventListener("input", () => { syncPresetFromBaseUrl(); syncProviderUi(); });
     }
 
     let lastKind = initialKind;
@@ -941,10 +1012,12 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       const modelsHint = $("#byok-models-hint");
       if (modelsHint) modelsHint.textContent = "Type a model id, or load the list from the provider to check the connection.";
       lastKind = kind;
+      syncPresetFromBaseUrl();
       syncProviderUi();
     };
 
     syncAuthUi();
+    syncPresetFromBaseUrl();
     syncProviderUi();
     $("#provider-auth").onchange = () => { syncAuthUi(); syncProviderUi(); };
 
