@@ -5,13 +5,19 @@ use selara_core::commands::{
 use selara_core::config::{serve_pidfile, ApiKeySource, AppConfig};
 use selara_core::providers::{list_chatgpt_models, list_provider_models, ProviderKind};
 use selara_core::secrets;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, Runtime, WindowEvent,
+    AppHandle, Emitter, Manager, RunEvent, Runtime, WindowEvent, Wry,
 };
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent, TerminatedPayload};
+use tauri_plugin_shell::ShellExt;
 
 /// Serializes every read-modify-write of config.toml in this process.
 ///
@@ -281,6 +287,322 @@ fn open_accessibility_settings(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// serve supervisor
+//
+// The Settings app bundles the `selara` CLI as a Tauri sidecar and runs
+// `selara serve` itself, so a user no longer needs a terminal open for the
+// hotkey. A `serve` started by hand (for example `cargo run -p selara --
+// serve`) is detected through its pidfile and left alone.
+// ---------------------------------------------------------------------------
+
+/// Lines of `serve` output kept for the Status tab's log panel.
+const LOG_LINES: usize = 200;
+/// Give up restarting when `serve` exits this many times within the window.
+const MAX_RESTARTS: usize = 5;
+const RESTART_WINDOW: Duration = Duration::from_secs(60);
+/// How long `stop_serve` waits for SIGTERM before SIGKILL.
+const STOP_GRACE: Duration = Duration::from_secs(2);
+
+#[derive(Default)]
+struct Supervisor {
+    /// The sidecar we spawned, if any. `None` while stopped or external.
+    child: Mutex<Option<CommandChild>>,
+    /// When the last few automatic restarts happened (crash-loop guard).
+    restarts: Mutex<VecDeque<Instant>>,
+    /// Last `LOG_LINES` lines of stdout/stderr plus supervisor notes.
+    log: Mutex<VecDeque<String>>,
+    /// Whether the user wants `serve` running; a `Terminated` event only
+    /// restarts while this is true.
+    desired: AtomicBool,
+    /// Bumped on every spawn and stop so a reader task for an old child
+    /// cannot restart over a newer one.
+    generation: AtomicU64,
+    /// Why the last start or restart did not happen, for the UI.
+    last_error: Mutex<Option<String>>,
+}
+
+/// A poisoned lock only means a panic elsewhere; the data is still usable.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl Supervisor {
+    fn push_log(&self, line: impl Into<String>) {
+        let line = line.into();
+        let mut log = lock(&self.log);
+        if log.len() >= LOG_LINES {
+            log.pop_front();
+        }
+        log.push_back(line);
+    }
+
+    fn set_error(&self, err: Option<String>) {
+        *lock(&self.last_error) = err;
+    }
+
+    fn managed_pid(&self) -> Option<u32> {
+        lock(&self.child).as_ref().map(|c| c.pid())
+    }
+}
+
+/// Tray items whose enabled/checked state follows the supervisor.
+struct TrayMenu {
+    start: MenuItem<Wry>,
+    stop: MenuItem<Wry>,
+    restart: MenuItem<Wry>,
+    login: CheckMenuItem<Wry>,
+}
+
+/// Re-sync the tray items and tell the Settings window something changed.
+fn notify(app: &AppHandle) {
+    if let Some(menu) = app.try_state::<TrayMenu>() {
+        let managed = app.state::<Supervisor>().managed_pid().is_some();
+        let external = !managed && serve_status().running;
+        let _ = menu.start.set_enabled(!managed && !external);
+        let _ = menu.stop.set_enabled(managed);
+        let _ = menu.restart.set_enabled(managed);
+        let _ = menu
+            .login
+            .set_checked(app.autolaunch().is_enabled().unwrap_or(false));
+    }
+    let _ = app.emit("serve-changed", ());
+}
+
+/// Spawn the `serve` sidecar unless one (ours or external) already runs.
+fn start_serve(app: &AppHandle) -> Result<(), String> {
+    let sup = app.state::<Supervisor>();
+    if sup.managed_pid().is_some() {
+        return Ok(());
+    }
+    let status = serve_status();
+    if status.running {
+        let pid = status.pid.unwrap_or(0);
+        sup.push_log(format!(
+            "external serve running (pid {pid}); not starting a second instance"
+        ));
+        sup.desired.store(false, Ordering::SeqCst);
+        sup.set_error(None);
+        notify(app);
+        return Ok(());
+    }
+
+    let spawned = app
+        .shell()
+        .sidecar("selara")
+        .and_then(|cmd| cmd.args(["serve"]).spawn());
+    let (mut rx, child) = match spawned {
+        Ok(pair) => pair,
+        Err(e) => {
+            let msg = format!("could not start serve: {e}");
+            sup.push_log(msg.clone());
+            sup.set_error(Some(msg.clone()));
+            sup.desired.store(false, Ordering::SeqCst);
+            notify(app);
+            return Err(msg);
+        }
+    };
+    let pid = child.pid();
+    let generation = sup.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    sup.desired.store(true, Ordering::SeqCst);
+    sup.set_error(None);
+    *lock(&sup.child) = Some(child);
+    sup.push_log(format!("started serve (pid {pid})"));
+    notify(app);
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let sup = app.state::<Supervisor>();
+            match event {
+                CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
+                    let line = String::from_utf8_lossy(&bytes);
+                    let line = line.trim_end();
+                    if !line.is_empty() {
+                        sup.push_log(line.to_string());
+                    }
+                }
+                CommandEvent::Error(e) => sup.push_log(format!("[supervisor] {e}")),
+                CommandEvent::Terminated(payload) => {
+                    on_terminated(&app, generation, payload);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Called from the reader task when our child exits. Restarts with backoff
+/// while `desired`, unless it keeps dying (`MAX_RESTARTS` in `RESTART_WINDOW`).
+fn on_terminated(app: &AppHandle, generation: u64, payload: TerminatedPayload) {
+    let sup = app.state::<Supervisor>();
+    if sup.generation.load(Ordering::SeqCst) != generation {
+        // stop_serve or a newer start already took over this slot.
+        return;
+    }
+    *lock(&sup.child) = None;
+    let why = match (payload.code, payload.signal) {
+        (Some(code), _) => format!("exit code {code}"),
+        (None, Some(sig)) => format!("signal {sig}"),
+        (None, None) => "unknown reason".to_string(),
+    };
+    sup.push_log(format!("serve exited ({why})"));
+    if !sup.desired.load(Ordering::SeqCst) {
+        notify(app);
+        return;
+    }
+
+    let now = Instant::now();
+    let attempt = {
+        let mut restarts = lock(&sup.restarts);
+        while restarts
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > RESTART_WINDOW)
+        {
+            restarts.pop_front();
+        }
+        if restarts.len() >= MAX_RESTARTS {
+            None
+        } else {
+            restarts.push_back(now);
+            Some(restarts.len())
+        }
+    };
+    match attempt {
+        None => {
+            sup.desired.store(false, Ordering::SeqCst);
+            let msg = format!(
+                "serve exited {MAX_RESTARTS} times within {}s (last: {why}); not restarting. Check the log below, then press Start.",
+                RESTART_WINDOW.as_secs()
+            );
+            sup.push_log(msg.clone());
+            sup.set_error(Some(msg));
+            notify(app);
+        }
+        Some(n) => {
+            // 1, 2, 4, 8, 16 seconds.
+            let delay = Duration::from_secs(1 << (n - 1).min(4));
+            sup.push_log(format!(
+                "restarting serve in {}s (attempt {n} of {MAX_RESTARTS})",
+                delay.as_secs()
+            ));
+            notify(app);
+            let app = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let sup = app.state::<Supervisor>();
+                if sup.desired.load(Ordering::SeqCst)
+                    && sup.generation.load(Ordering::SeqCst) == generation
+                {
+                    let _ = start_serve(&app);
+                }
+            });
+        }
+    }
+}
+
+/// Stop the managed `serve`. SIGTERM first so it can clean up, SIGKILL if it
+/// is still around after `STOP_GRACE`. Waits until the pid is gone so a
+/// following `start_serve` does not mistake the corpse for an external serve.
+fn stop_serve(app: &AppHandle) -> Result<(), String> {
+    let sup = app.state::<Supervisor>();
+    sup.desired.store(false, Ordering::SeqCst);
+    sup.generation.fetch_add(1, Ordering::SeqCst);
+    let Some(child) = lock(&sup.child).take() else {
+        notify(app);
+        return Ok(());
+    };
+    let pid = child.pid();
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + STOP_GRACE;
+    while pid_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut result = Ok(());
+    if pid_alive(pid) {
+        result = child
+            .kill()
+            .map_err(|e| format!("could not kill serve (pid {pid}): {e}"));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while pid_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    sup.push_log(format!("stopped serve (pid {pid})"));
+    notify(app);
+    result
+}
+
+fn restart_serve(app: &AppHandle) -> Result<(), String> {
+    stop_serve(app)?;
+    lock(&app.state::<Supervisor>().restarts).clear();
+    start_serve(app)
+}
+
+/// Run a supervisor action off the main thread: `stop_serve` can wait up to
+/// three seconds, which must not freeze the Settings window or the tray.
+async fn supervise<F>(app: AppHandle, f: F) -> Result<(), String>
+where
+    F: FnOnce(&AppHandle) -> Result<(), String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || f(&app))
+        .await
+        .map_err(|e| format!("supervisor task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn serve_start(app: AppHandle) -> Result<(), String> {
+    supervise(app, start_serve).await
+}
+
+#[tauri::command]
+async fn serve_stop(app: AppHandle) -> Result<(), String> {
+    supervise(app, stop_serve).await
+}
+
+#[tauri::command]
+async fn serve_restart(app: AppHandle) -> Result<(), String> {
+    supervise(app, restart_serve).await
+}
+
+#[tauri::command]
+fn serve_log(app: AppHandle) -> Vec<String> {
+    lock(&app.state::<Supervisor>().log)
+        .iter()
+        .cloned()
+        .collect()
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SupervisorStatus {
+    /// The app spawned the running `serve`.
+    managed: bool,
+    /// Pid of the running `serve`, managed or external.
+    pid: Option<u32>,
+    /// A `serve` started outside the app is running (we will not spawn one).
+    external: bool,
+    last_error: Option<String>,
+}
+
+#[tauri::command]
+fn serve_supervisor_status(app: AppHandle) -> SupervisorStatus {
+    let sup = app.state::<Supervisor>();
+    let managed = sup.managed_pid();
+    let last_error = lock(&sup.last_error).clone();
+    let status = serve_status();
+    SupervisorStatus {
+        managed: managed.is_some(),
+        pid: managed.or(status.running.then_some(status.pid).flatten()),
+        external: managed.is_none() && status.running,
+        last_error,
+    }
+}
+
 fn show_settings<R: Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
@@ -293,6 +615,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .manage(Supervisor::default())
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
@@ -309,6 +636,11 @@ pub fn run() {
             list_chatgpt_models_cmd,
             list_provider_models_cmd,
             serve_status,
+            serve_start,
+            serve_stop,
+            serve_restart,
+            serve_log,
+            serve_supervisor_status,
             accessibility_status,
             open_accessibility_settings
         ])
@@ -318,14 +650,74 @@ pub fn run() {
 
             let handle = app.handle().clone();
             let show_i = MenuItem::with_id(app, "show", "Open Settings", true, None::<&str>)?;
+            let start_i = MenuItem::with_id(app, "serve-start", "Start serve", true, None::<&str>)?;
+            let stop_i = MenuItem::with_id(app, "serve-stop", "Stop serve", false, None::<&str>)?;
+            let restart_i =
+                MenuItem::with_id(app, "serve-restart", "Restart serve", false, None::<&str>)?;
+            let login_checked = app.autolaunch().is_enabled().unwrap_or(false);
+            let login_i = CheckMenuItem::with_id(
+                app,
+                "login",
+                "Start at login",
+                true,
+                login_checked,
+                None::<&str>,
+            )?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &show_i,
+                    &PredefinedMenuItem::separator(app)?,
+                    &start_i,
+                    &stop_i,
+                    &restart_i,
+                    &PredefinedMenuItem::separator(app)?,
+                    &login_i,
+                    &PredefinedMenuItem::separator(app)?,
+                    &quit_i,
+                ],
+            )?;
+            app.manage(TrayMenu {
+                start: start_i,
+                stop: stop_i,
+                restart: restart_i,
+                login: login_i,
+            });
 
             let mut tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .tooltip("Selara")
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => show_settings(app),
+                    "serve-start" | "serve-stop" | "serve-restart" => {
+                        // Off the main thread: stopping waits for the child.
+                        let action: fn(&AppHandle) -> Result<(), String> = match event.id.as_ref() {
+                            "serve-start" => start_serve,
+                            "serve-stop" => stop_serve,
+                            _ => restart_serve,
+                        };
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            if let Err(e) = action(&app) {
+                                app.state::<Supervisor>().set_error(Some(e));
+                                notify(&app);
+                            }
+                        });
+                    }
+                    "login" => {
+                        let al = app.autolaunch();
+                        let result = if al.is_enabled().unwrap_or(false) {
+                            al.disable()
+                        } else {
+                            al.enable()
+                        };
+                        if let Err(e) = result {
+                            app.state::<Supervisor>()
+                                .push_log(format!("[supervisor] start at login: {e}"));
+                        }
+                        notify(app);
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -371,6 +763,20 @@ pub fn run() {
             let _ = get_config();
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Selara desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Selara desktop")
+        .run(|app, event| match event {
+            // The event loop is up: start `serve` unless one already runs.
+            RunEvent::Ready => {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let _ = start_serve(&app);
+                });
+            }
+            // Take the sidecar down with us so no orphan keeps the hotkey.
+            RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                let _ = stop_serve(app);
+            }
+            _ => {}
+        });
 }
