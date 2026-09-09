@@ -12,7 +12,10 @@ use anyhow::{Context, Result};
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::Watcher;
-use selara_core::commands::{run_command_stream, CommandKind, PromptVars, WritingCommand};
+use selara_core::commands::{
+    command_applies_to, commands_for_app, run_command_stream, CommandKind, PromptVars,
+    WritingCommand,
+};
 use selara_core::config::{app_is_excluded, serve_pidfile, AppConfig, LimitsConfig, ProviderAuth};
 use selara_core::guard::{provider_is_hosted, scan_secrets, SecretHit, SecretKind};
 use selara_core::history::{self, HistoryEntry};
@@ -221,6 +224,7 @@ fn adhoc_command(text: &str, popup: bool) -> WritingCommand {
         prompt: text.trim().to_string(),
         hotkey: None,
         model: None,
+        apps: Vec::new(),
     }
 }
 
@@ -300,6 +304,7 @@ fn command_from_instruction(text: &str, kind: CommandKind, existing: &[String]) 
         prompt,
         hotkey: None,
         model: None,
+        apps: Vec::new(),
     }
 }
 
@@ -471,6 +476,9 @@ struct ServeApp {
     /// Text captured at hotkey time (before our window steals focus).
     captured_text: String,
     captured_app: Option<String>,
+    /// Bundle id of the app the selection came from, e.g. `com.apple.mail`.
+    /// Matched against each command's `apps` alongside the name.
+    captured_bundle_id: Option<String>,
     captured_range: Option<(i64, i64)>,
     target_pid: Option<i32>,
     /// Soft-warn acknowledged for the current selection.
@@ -558,6 +566,7 @@ impl ServeApp {
             phase: UiPhase::Hidden,
             captured_text: String::new(),
             captured_app: None,
+            captured_bundle_id: None,
             captured_range: None,
             target_pid: None,
             soft_warn_acked: false,
@@ -799,6 +808,7 @@ impl ServeApp {
             Ok(Some(snap)) => {
                 self.captured_text = snap.text;
                 self.captured_app = snap.app_name;
+                self.captured_bundle_id = snap.bundle_id;
                 self.captured_range = snap.range;
                 if self.config.limits.secret_guard {
                     self.secret_hits = scan_secrets(&self.captured_text);
@@ -854,6 +864,33 @@ impl ServeApp {
             );
         }
         excluded
+    }
+
+    /// The commands offered for the app the current selection came from.
+    /// A command with an empty `apps` list is offered everywhere; one that
+    /// names apps only shows up in those. The free-form instruction row is
+    /// never filtered — it is not a configured command.
+    fn commands_for_captured_app(&self) -> Vec<WritingCommand> {
+        commands_for_app(
+            &self.config.commands,
+            self.captured_app.as_deref(),
+            self.captured_bundle_id.as_deref(),
+        )
+        .into_iter()
+        .cloned()
+        .collect()
+    }
+
+    /// Name to show for the app a selection came from: its app name, its
+    /// bundle id when the name is unavailable, else a neutral placeholder.
+    fn captured_app_label(&self) -> String {
+        self.captured_app
+            .as_deref()
+            .or(self.captured_bundle_id.as_deref())
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .unwrap_or("this app")
+            .to_string()
     }
 
     /// Requests leave the machine: the ChatGPT/Codex path always does, and a
@@ -921,6 +958,31 @@ then restart `selara serve`."
             self.show_window_near_cursor(ctx);
             return;
         };
+        // A shortcut must respect the command's own Apps list: pressing it in
+        // an app the command is not enabled for says so instead of running.
+        let front_name = frontmost_app_name();
+        let front_bundle = frontmost_bundle_id();
+        if !command_applies_to(&cmd, front_name.as_deref(), front_bundle.as_deref()) {
+            let app = front_name
+                .as_deref()
+                .or(front_bundle.as_deref())
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .unwrap_or("this app")
+                .to_string();
+            tracing::info!(
+                "selara: command hotkey `{}` ignored, not enabled for {app}",
+                cmd.id
+            );
+            self.phase = UiPhase::Error {
+                message: format!(
+                    "`{}` is not enabled for {app}.\n\nEdit the command's Apps field in Settings to add {app}, or clear it to enable the command everywhere.",
+                    cmd.label
+                ),
+            };
+            self.show_window_near_cursor(ctx);
+            return;
+        }
         match self.capture_selection() {
             Ok(true) => {
                 self.show_window_near_cursor(ctx);
@@ -1435,7 +1497,8 @@ impl eframe::App for ServeApp {
                 // A recalled instruction is meant to run as one.
                 self.picker_selected = 0;
             }
-            let rows = picker_rows(&self.config.commands, &self.picker_filter);
+            let key_commands = self.commands_for_captured_app();
+            let rows = picker_rows(&key_commands, &self.picker_filter);
             let len = rows.len();
             let mut selected = clamp_selection(self.picker_selected, len);
             if !walking_history {
@@ -1653,9 +1716,19 @@ impl eframe::App for ServeApp {
                     let filter_changed = filter.response.changed();
                     ui.add_space(4.0);
 
-                    let commands = self.config.commands.clone();
+                    let commands = self.commands_for_captured_app();
                     let filter_text = self.picker_filter.clone();
                     let rows = picker_rows(&commands, &filter_text);
+                    if commands.is_empty() {
+                        ui.small(format!(
+                            "No commands enabled for {}.",
+                            self.captured_app_label()
+                        ));
+                        ui.small(
+                            "Type an instruction to run it anyway, or add this app to a command's Apps field in Settings (empty = every app).",
+                        );
+                        ui.add_space(4.0);
+                    }
                     if filter_changed {
                         // Typing over a recalled instruction ends the walk.
                         self.history_cursor = None;
@@ -2136,7 +2209,7 @@ mod tests {
         unique_command_id, PickerRow, PopupActions, ADHOC_ID, HISTORY_CAP,
     };
 
-    use selara_core::commands::{CommandKind, WritingCommand};
+    use selara_core::commands::{commands_for_app, CommandKind, WritingCommand};
     use selara_core::guard::{SecretHit, SecretKind};
 
     const SIZE: (f64, f64) = (380.0, 440.0);
@@ -2180,6 +2253,7 @@ mod tests {
             prompt: prompt.into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         }
     }
 
@@ -2453,6 +2527,31 @@ mod tests {
         assert_eq!(history_step(Some(0), 3, -1), None);
         assert_eq!(history_step(None, 3, -1), None);
         assert_eq!(history_step(Some(1), 3, 0), Some(1));
+    }
+
+    #[test]
+    fn the_picker_lists_only_the_commands_enabled_for_the_captured_app() {
+        let mut all = sample();
+        all[1].apps = vec!["Mail".into()];
+        let for_slack: Vec<WritingCommand> =
+            commands_for_app(&all, Some("Slack"), Some("com.tinyspeck.slackmacgap"))
+                .into_iter()
+                .cloned()
+                .collect();
+        assert_eq!(
+            labels(&for_slack.iter().collect::<Vec<_>>()),
+            vec!["Proofread", "Professional"]
+        );
+        assert_eq!(picker_rows(&for_slack, "").len(), 2);
+    }
+
+    #[test]
+    fn the_instruction_row_survives_an_app_with_no_enabled_commands() {
+        let none: Vec<WritingCommand> = Vec::new();
+        assert!(picker_rows(&none, "  ").is_empty());
+        let rows = picker_rows(&none, "make it rhyme");
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0], PickerRow::Instruction));
     }
 
     #[test]

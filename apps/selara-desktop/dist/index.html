@@ -631,6 +631,11 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const hay = [c.label, c.prompt, c.hotkey || "", kindLabel(c.kind)].join(" ").toLowerCase();
     return hay.includes(q);
   }
+  // `Mail, com.apple.Notes , , Xcode*` -> ["Mail", "com.apple.Notes", "Xcode*"].
+  // An empty list means the command is offered in every app.
+  function parseAppList(text) {
+    return String(text || "").split(",").map((a) => a.trim()).filter(Boolean);
+  }
   function statusDotClass(st) {
     if (!st) return "unknown";
     if (st.logged_in) return "ok";
@@ -1694,7 +1699,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       const badges =
         "<span class=\"badge\">" + escapeHtml(kindLabel(c.kind)) + "</span>" +
         (c.model ? "<span class=\"badge key\" title=\"Runs on this model\">" + escapeHtml(c.model) + "</span>" : "") +
-        (c.hotkey ? "<span class=\"badge key\" title=\"" + escapeAttr(c.hotkey) + "\">" + escapeHtml(prettyHotkey(c.hotkey)) + "</span>" : "");
+        (c.hotkey ? "<span class=\"badge key\" title=\"" + escapeAttr(c.hotkey) + "\">" + escapeHtml(prettyHotkey(c.hotkey)) + "</span>" : "") +
+        ((c.apps && c.apps.length) ? "<span class=\"badge\" title=\"Only in " + escapeAttr(c.apps.join(", ")) + "\">" + c.apps.length + (c.apps.length === 1 ? " app" : " apps") + "</span>" : "");
       return (
         "<div class=\"cmd-item\" data-id=\"" + escapeAttr(c.id) + "\" role=\"button\" tabindex=\"0\" aria-label=\"Edit " + escapeAttr(c.label) + "\">" +
         "<div class=\"cmd-main\"><h3><span class=\"cmd-name\">" + escapeHtml(c.label) + "</span>" + badges + "</h3>" +
@@ -1873,6 +1879,12 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<input id=\"cmd-model\" list=\"model-options\" value=\"" + escapeAttr((editing && editing.model) || "") + "\" placeholder=\"Optional, defaults to " + escapeAttr((config.provider && config.provider.model) || "the provider model") + "\" autocomplete=\"off\" spellcheck=\"false\" />" +
       "<p class=\"field-hint\">Override the provider's model for this command only (same provider and key). Load models on the Models tab to get suggestions.</p>" +
       "</div></div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"cmd-apps\">Apps</label>" +
+      "<div class=\"control-stack\">" +
+      "<input id=\"cmd-apps\" value=\"" + escapeAttr(((editing && editing.apps) || []).join(", ")) + "\" placeholder=\"Mail, com.tinyspeck.slackmacgap, Xcode*\" autocomplete=\"off\" spellcheck=\"false\" />" +
+      "<p class=\"field-hint\">Comma-separated app names or bundle ids. Leave empty to offer this command in every app. A trailing * matches by prefix.</p>" +
+      "</div></div>" +
       "<div class=\"sheet-foot\">" +
       (editing ? "<button type=\"button\" class=\"btn linkish danger-text\" id=\"cmd-delete\">Delete command</button>" : "") +
       "<span class=\"spacer\"></span>" +
@@ -1909,6 +1921,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       const hotkey = hotkeyRaw ? hotkeyRaw : null;
       const modelRaw = $("#cmd-model").value.trim();
       const cmdModel = modelRaw ? modelRaw : null;
+      const apps = parseAppList($("#cmd-apps").value);
       if (!label || !prompt) {
         setStatus("Label and prompt are required");
         (!label ? $("#cmd-label") : $("#cmd-prompt")).focus();
@@ -1916,10 +1929,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       }
       if (editingId) {
         const i = config.commands.findIndex((c) => c.id === editingId);
-        if (i >= 0) config.commands[i] = Object.assign({}, config.commands[i], { label, prompt, kind, hotkey, model: cmdModel });
+        if (i >= 0) config.commands[i] = Object.assign({}, config.commands[i], { label, prompt, kind, hotkey, model: cmdModel, apps });
       } else {
         const newId = slug(label) + "-" + Math.random().toString(36).slice(2, 7);
-        config.commands.push({ id: newId, label, prompt, kind, hotkey, model: cmdModel });
+        config.commands.push({ id: newId, label, prompt, kind, hotkey, model: cmdModel, apps });
       }
       await saveSection("commands", config.commands);
       closeCommandSheet();
