@@ -3,8 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, whatever its base branch, so stacked PRs that target
+  # a parent branch still get checked.
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
