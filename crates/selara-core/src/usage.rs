@@ -5,8 +5,9 @@
 //! path, are appended as one JSON line each to `usage.jsonl` next to the
 //! config file (owner-only). Nothing here talks to the network; the numbers
 //! never leave the machine. [`summary`] aggregates the file into per-model
-//! totals plus `today` / `last_30_days` / `all_time` buckets with an
-//! estimated cost from [`price_per_million`] where the model is known.
+//! totals plus `today` (the user's local calendar day) / `last_30_days` /
+//! `all_time` buckets, with an estimated cost from [`price_per_million`]
+//! where the model is known *and* the request went to that vendor's own API.
 
 use crate::error::CoreError;
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,12 @@ pub struct UsageEvent {
     pub ts: u64,
     pub kind: String,
     pub model: String,
+    /// Host the request went to (`api.openai.com`, `localhost`). The provider
+    /// label alone cannot tell OpenAI apart from an Ollama or vLLM server
+    /// speaking the same protocol, and only the host decides whether a list
+    /// price applies. `None` when the base URL had no host to take.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     pub input: u64,
     pub output: u64,
 }
@@ -104,14 +111,37 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Record one request. Appends to memory and, when a store is set, to the
-/// ledger file. Write failures are logged and otherwise ignored: usage
-/// accounting must never fail a completion.
-pub fn record(kind: &str, model: &str, usage: TokenUsage) {
+/// Host of a URL, lowercased, with no scheme, userinfo, port, or path.
+/// `http://user@[::1]:8080/v1` -> `::1`; `localhost:11434` -> `localhost`.
+fn url_host(url: &str) -> String {
+    let no_scheme = match url.find("://") {
+        Some(idx) => &url[idx + 3..],
+        None => url,
+    };
+    let authority = no_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else if authority.matches(':').count() > 1 {
+        // Bare IPv6 without brackets: no port to strip.
+        authority
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    host.trim().to_ascii_lowercase()
+}
+
+/// Record one request against the endpoint `base_url` addressed. Appends to
+/// memory and, when a store is set, to the ledger file. Write failures are
+/// logged and otherwise ignored: usage accounting must never fail a
+/// completion.
+pub fn record(kind: &str, model: &str, base_url: &str, usage: TokenUsage) {
+    let host = url_host(base_url);
     let event = UsageEvent {
         ts: now_secs(),
         kind: kind.to_string(),
         model: model.to_string(),
+        endpoint: (!host.is_empty()).then_some(host),
         input: usage.input,
         output: usage.output,
     };
@@ -185,10 +215,35 @@ pub fn summary(path: &Path) -> Result<UsageSummary, CoreError> {
     Ok(summarize(path, &events, now_secs()))
 }
 
-/// Aggregate `events` as of `now` (Unix seconds). "Today" is the UTC day
-/// containing `now`; "last 30 days" is the trailing 30 × 24 h window.
+/// Unix seconds at midnight of the local calendar day containing `now`, using
+/// the machine's UTC offset at that instant. Both the Status card and the CLI
+/// label this bucket "Today", so a UTC boundary would put an evening request
+/// west of Greenwich in tomorrow's bucket and split the user's own day. Falls
+/// back to the UTC day if the timestamp is out of chrono's range.
+fn local_day_start(now: u64) -> u64 {
+    use chrono::Offset;
+    let Some(dt) = chrono::DateTime::from_timestamp(now as i64, 0) else {
+        return now - now % DAY_SECS;
+    };
+    // The offset at `now` rather than a resolved local midnight: midnight does
+    // not exist on every day in every zone (spring-forward skips it), and this
+    // stays total. On the two DST days a year the boundary is off by the shift.
+    let offset = i64::from(
+        dt.with_timezone(&chrono::Local)
+            .offset()
+            .fix()
+            .local_minus_utc(),
+    );
+    let shifted = now as i64 + offset;
+    let start = shifted - shifted.rem_euclid(DAY_SECS as i64) - offset;
+    u64::try_from(start).unwrap_or(0)
+}
+
+/// Aggregate `events` as of `now` (Unix seconds). "Today" is the local
+/// calendar day containing `now`; "last 30 days" is the trailing 30 × 24 h
+/// window.
 pub fn summarize(path: &Path, events: &[UsageEvent], now: u64) -> UsageSummary {
-    let day_start = now - now % DAY_SECS;
+    let day_start = local_day_start(now);
     let month_start = now.saturating_sub(30 * DAY_SECS);
     let mut out = UsageSummary {
         path: path.display().to_string(),
@@ -232,8 +287,30 @@ impl UsageBucket {
     }
 }
 
-/// Estimated USD for one event, if the model is priced.
+/// Domains whose own published list prices [`price_per_million`] quotes.
+const PRICED_DOMAINS: [&str; 3] = ["openai.com", "anthropic.com", "openrouter.ai"];
+
+/// Whether list prices apply to where this request actually went. The table
+/// quotes each vendor's own paid API, so a model id served by Ollama, LM
+/// Studio, vLLM, or any other custom endpoint stays unpriced even when it is
+/// aliased to a well-known name — the request was never billed at that rate.
+/// A ChatGPT subscription (`chatgpt.com`) is not per-token either, so it is
+/// unpriced by the same rule rather than by a special case.
+fn endpoint_is_priced(e: &UsageEvent) -> bool {
+    let Some(host) = e.endpoint.as_deref() else {
+        return false;
+    };
+    PRICED_DOMAINS
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+}
+
+/// Estimated USD for one event, if the model is priced and the request went
+/// to that vendor's own API. `None` means the UI shows no cost for it.
 pub fn event_cost(e: &UsageEvent) -> Option<f64> {
+    if !endpoint_is_priced(e) {
+        return None;
+    }
     let (input, output) = price_per_million(&e.model)?;
     Some((e.input as f64 * input + e.output as f64 * output) / 1_000_000.0)
 }
@@ -278,11 +355,18 @@ pub fn price_per_million(model: &str) -> Option<(f64, f64)> {
 mod tests {
     use super::*;
 
+    /// An event from OpenAI's own API, so the price table applies.
     fn ev(ts: u64, model: &str, input: u64, output: u64) -> UsageEvent {
+        at(ts, model, "api.openai.com", input, output)
+    }
+
+    /// An event from an arbitrary endpoint.
+    fn at(ts: u64, model: &str, host: &str, input: u64, output: u64) -> UsageEvent {
         UsageEvent {
             ts,
             kind: "openai_compatible".into(),
             model: model.into(),
+            endpoint: Some(host.into()),
             input,
             output,
         }
@@ -313,13 +397,15 @@ mod tests {
 
     #[test]
     fn summary_buckets_by_window_and_model() {
-        let now = 1_800_000_000; // some UTC instant
-        let day_start = now - now % DAY_SECS;
+        // Offset a couple of minutes into a UTC hour so no whole- or
+        // quarter-hour zone puts local midnight exactly on `now`.
+        let now = 1_800_000_123;
+        let day_start = local_day_start(now);
         let events = vec![
-            ev(now - 10, "gpt-4o-mini", 1_000_000, 1_000_000), // today: $0.75
-            ev(day_start.saturating_sub(1), "gpt-4o-mini", 100, 10), // yesterday
-            ev(now - 40 * DAY_SECS, "llama3.1:8b", 5, 5),      // older than 30d, unpriced
-            ev(now - 2 * DAY_SECS, "llama3.1:8b", 7, 3),       // this month, unpriced
+            ev(day_start + 5, "gpt-4o-mini", 1_000_000, 1_000_000), // today: $0.75
+            ev(day_start - 1, "gpt-4o-mini", 100, 10),              // yesterday
+            ev(now - 40 * DAY_SECS, "llama3.1:8b", 5, 5),           // older than 30d, unpriced
+            ev(now - 2 * DAY_SECS, "llama3.1:8b", 7, 3),            // this month, unpriced
         ];
         let s = summarize(Path::new("/x/usage.jsonl"), &events, now);
         assert_eq!(s.path, "/x/usage.jsonl");
@@ -345,6 +431,88 @@ mod tests {
         let llama = s.models.iter().find(|m| m.model == "llama3.1:8b").unwrap();
         assert_eq!(llama.totals.cost_usd, None);
         assert_eq!(llama.totals.unpriced, 2);
+    }
+
+    #[test]
+    fn local_and_custom_endpoints_are_never_priced() {
+        // The same well-known model id, served by something that is not the
+        // vendor's own API: the UI promises n/a, so no cost may be invented.
+        for host in [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "studio.local",
+            "192.168.1.20",
+            "my-proxy.example.com",
+            "chatgpt.com",
+            "notopenai.com",
+            "openai.com.evil.test",
+        ] {
+            let e = at(1_800_000_000, "gpt-4o-mini", host, 1_000_000, 1_000_000);
+            assert_eq!(event_cost(&e), None, "{host} must be unpriced");
+        }
+        // The vendors' own hosts still price.
+        for host in ["api.openai.com", "api.anthropic.com", "openrouter.ai"] {
+            let e = at(1_800_000_000, "gpt-4o-mini", host, 1_000_000, 1_000_000);
+            assert!(event_cost(&e).is_some(), "{host} must be priced");
+        }
+        // A ledger line with no host recorded is not attributable either.
+        let mut e = at(1_800_000_000, "gpt-4o-mini", "api.openai.com", 10, 10);
+        e.endpoint = None;
+        assert_eq!(event_cost(&e), None);
+    }
+
+    #[test]
+    fn a_local_alias_shows_as_unpriced_in_the_summary() {
+        let now = 1_800_000_123;
+        let events = vec![at(
+            now - 10,
+            "gpt-4o-mini",
+            "localhost",
+            1_000_000,
+            1_000_000,
+        )];
+        let s = summarize(Path::new("/x"), &events, now);
+        assert_eq!(s.all_time.requests, 1);
+        assert_eq!(s.all_time.cost_usd, None, "a local alias has no cost");
+        assert_eq!(s.all_time.unpriced, 1);
+        assert_eq!(s.models[0].totals.cost_usd, None);
+    }
+
+    #[test]
+    fn record_stores_the_endpoint_host() {
+        assert_eq!(url_host("http://localhost:11434/v1"), "localhost");
+        assert_eq!(
+            url_host("https://user:pw@API.openai.com/v1"),
+            "api.openai.com"
+        );
+        assert_eq!(url_host("http://[fd00::1]:11434/v1"), "fd00::1");
+        assert_eq!(url_host(""), "");
+    }
+
+    #[test]
+    fn today_follows_the_local_calendar_day() {
+        let now = 1_800_000_123;
+        let start = local_day_start(now);
+        assert!(start <= now, "the day starts at or before now");
+        assert!(now - start < DAY_SECS, "a day is at most 24 h long");
+        // One second before the boundary is yesterday; the boundary itself is
+        // today. Under a UTC boundary this fails wherever the offset is not 0.
+        let before = summarize(Path::new("/x"), &[ev(start - 1, "gpt-4o", 1, 1)], now);
+        assert_eq!(before.today.requests, 0);
+        let after = summarize(Path::new("/x"), &[ev(start, "gpt-4o", 1, 1)], now);
+        assert_eq!(after.today.requests, 1);
+        // The boundary is midnight in the local offset, not in UTC.
+        use chrono::Offset;
+        let offset = i64::from(
+            chrono::DateTime::from_timestamp(now as i64, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .offset()
+                .fix()
+                .local_minus_utc(),
+        );
+        assert_eq!((start as i64 + offset) % DAY_SECS as i64, 0);
     }
 
     #[test]

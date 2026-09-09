@@ -519,7 +519,7 @@ impl OpenAiCompatibleProvider {
 
     fn record_usage(&self, value: &serde_json::Value) {
         if let Some(u) = parse_openai_usage(value) {
-            usage::record(self.usage_kind(), &self.model, u);
+            usage::record(self.usage_kind(), &self.model, &self.base_url, u);
         }
     }
 }
@@ -621,7 +621,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         })
         .await?;
         if let Some(u) = used {
-            usage::record(self.usage_kind(), &self.model, u);
+            usage::record(self.usage_kind(), &self.model, &self.base_url, u);
         }
         // Drain the whole stream first so the connection closes cleanly, but
         // never hand back partial text: the caller would write it over the selection.
@@ -710,7 +710,7 @@ impl LlmProvider for AnthropicProvider {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
         }
         if let Some(u) = parse_anthropic_usage(&value) {
-            usage::record(usage::KIND_ANTHROPIC, &self.model, u);
+            usage::record(usage::KIND_ANTHROPIC, &self.model, &self.base_url, u);
         }
         Self::parse_response(&value)
     }
@@ -729,7 +729,7 @@ impl LlmProvider for AnthropicProvider {
         if is_json_response(&resp) {
             let (_, value) = json_or_raw(resp).await?;
             if let Some(u) = parse_anthropic_usage(&value) {
-                usage::record(usage::KIND_ANTHROPIC, &self.model, u);
+                usage::record(usage::KIND_ANTHROPIC, &self.model, &self.base_url, u);
             }
             let out = Self::parse_response(&value)?;
             on_delta(&out);
@@ -798,7 +798,7 @@ impl LlmProvider for AnthropicProvider {
         })
         .await?;
         if let Some(u) = used {
-            usage::record(usage::KIND_ANTHROPIC, &self.model, u);
+            usage::record(usage::KIND_ANTHROPIC, &self.model, &self.base_url, u);
         }
         if truncated {
             return Err(truncation_error("stop_reason=max_tokens"));
@@ -908,7 +908,12 @@ impl LlmProvider for ChatGptCodexProvider {
         })
         .await?;
         if let Some(u) = used {
-            usage::record(usage::KIND_CHATGPT_CODEX, &self.model, u);
+            usage::record(
+                usage::KIND_CHATGPT_CODEX,
+                &self.model,
+                CODEX_RESPONSES_URL,
+                u,
+            );
         }
         // Drain the whole stream first so the connection closes cleanly, but
         // never hand back partial text: the caller would write it over the selection.
