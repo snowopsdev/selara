@@ -165,7 +165,6 @@ jobs:
       - name: Package DMG
         env:
           VERSION: ${{ needs.release-please.outputs.version }}
-          SIGNED: ${{ secrets.APPLE_SIGNING_IDENTITY != '' && 'signed' || 'unsigned' }}
         run: |
           set -euo pipefail
           ARCH=$(uname -m)
@@ -174,10 +173,24 @@ jobs:
           mkdir -p dist
           cp "$SRC" "dist/${NAME}"
           shasum -a 256 "dist/${NAME}" > "dist/${NAME}.sha256"
+
+          # The Gatekeeper caveat in the cask must be dropped only when the
+          # download will actually open without one, and that is decided by
+          # notarization, not by signing. A Developer ID identity with any of
+          # APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID missing still produces a
+          # signed-but-unnotarized DMG that macOS blocks. So ask the artifact
+          # itself: `stapler validate` succeeds only when Apple issued a ticket
+          # and Tauri stapled it to the DMG.
+          if xcrun stapler validate "dist/${NAME}" >/dev/null 2>&1; then
+            SIGNED=signed
+          else
+            SIGNED=unsigned
+          fi
+
           echo "DMG=dist/${NAME}" >> "$GITHUB_ENV"
           echo "DMG_SHA=$(cut -d' ' -f1 "dist/${NAME}.sha256")" >> "$GITHUB_ENV"
           echo "SIGNED=${SIGNED}" >> "$GITHUB_ENV"
-          echo "Built ${NAME} (${SIGNED})"
+          echo "Built ${NAME} (notarization: ${SIGNED})"
 
       - name: Fetch CLI tarball checksum
         env:
@@ -199,8 +212,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          # A release asset is named after the file's basename, so uploading
+          # Casks/selara.rb and Formula/selara.rb together would ask for the
+          # same asset name twice — GitHub requires them to be unique, and
+          # --clobber replaces an asset of the same name rather than keeping
+          # the directory apart. Copy them to distinct names first. The tap
+          # push below still reads the originals under dist/homebrew.
+          cp dist/homebrew/Casks/selara.rb dist/selara-cask.rb
+          cp dist/homebrew/Formula/selara.rb dist/selara-formula.rb
           gh release upload "${{ needs.release-please.outputs.tag_name }}" \
-            "$DMG" "$DMG.sha256" dist/homebrew/Casks/selara.rb dist/homebrew/Formula/selara.rb --clobber
+            "$DMG" "$DMG.sha256" dist/selara-cask.rb dist/selara-formula.rb --clobber
 
       # Publish to the tap when a token is configured; otherwise the rendered
       # files on the release are enough for `brew install --cask <url>`.
