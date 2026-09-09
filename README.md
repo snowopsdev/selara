@@ -221,4 +221,4 @@ cargo run -p selara -- run summary --text "$(pbpaste)"
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
 - [LICENSE](LICENSE) — MIT
 
-CI runs on Linux. macOS Accessibility, global hotkeys, `serve`, and the Tauri UI need local macOS testing when those areas change.
+CI runs tests on Linux and compiles the macOS shell on `macos-latest`. macOS Accessibility, global hotkeys, `serve`, and the Tauri UI still need local macOS testing when those areas change.

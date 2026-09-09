@@ -32,18 +32,18 @@ cd apps/selara-desktop && npx tauri dev
 
 (`serve` / hotkeys still need a separate `cargo run -p selara -- serve`.)
 
-CI on GitHub Actions runs fmt/clippy/test on Linux (`ubuntu-latest`), excluding the Tauri `selara-desktop` package. Clippy is currently **not** run with `-D warnings` because of known noise (including `objc`-related `cfg` warnings on macOS code paths and a few existing lints). Prefer leaving the tree warning-clean when you can.
+CI on GitHub Actions runs four jobs: fmt/clippy/test on Linux (`ubuntu-latest`, excluding the Tauri `selara-desktop` package), a `macos-latest` job that builds and lints the `selara` CLI/`serve` shell and `selara-platform` so the `cfg(target_os = "macos")` code is at least compiled, a check that `apps/selara-desktop/dist/index.html` matches `npm run build`, and the unit tests for the Python helpers under `.cursor/skills/e2e-qa-orchestrator`. Clippy is currently **not** run with `-D warnings` because of known noise (including `objc`-related `cfg` warnings on macOS code paths and a few existing lints). Prefer leaving the tree warning-clean when you can.
 
 ### Platform notes
 
-| Area | CI (Linux) | Local macOS |
-| --- | --- | --- |
-| `selara-core` | Covered | Covered |
-| `selara-platform` traits | Covered | Covered |
-| macOS Accessibility / hotkey / clipboard backends | Compile stubs / cfg-gated; no real AX coverage | Needs local testing |
-| `selara` CLI | Covered | Covered |
-| `selara` `serve` (egui picker) | Not exercised on Linux | Needs local macOS testing |
-| `selara-desktop` (Tauri) | Excluded from Linux CI | Needs local macOS testing |
+| Area | CI (Linux) | CI (macOS) | Local macOS |
+| --- | --- | --- | --- |
+| `selara-core` | Tested | Not run | Covered |
+| `selara-platform` traits | Tested | Built + clippy | Covered |
+| macOS Accessibility / hotkey / clipboard backends | cfg-gated out | Compiled only; no AX at runtime | Needs local testing |
+| `selara` CLI | Tested | Built | Covered |
+| `selara` `serve` (egui picker) | cfg-gated out | Compiled only | Needs local macOS testing |
+| `selara-desktop` (Tauri) | `dist/index.html` freshness only | Not built | Needs local macOS testing |
 
 If you change hotkeys, selection replace, Accessibility behavior, or the Settings UI, please verify on macOS locally and attach screenshots when UI changes.
 
