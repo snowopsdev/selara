@@ -137,27 +137,55 @@ pub async fn run_command(
         })
         .await?;
     Ok(match command.kind {
-        CommandKind::Replace => clean_replace_output(&out),
+        CommandKind::Replace => clean_replace_output(&out, input),
         CommandKind::Popup => out,
     })
 }
 
 /// Strip the chat framing models add around `Replace` output: an outer code
 /// fence, a single leading "Here is the corrected text:" style line, and one
-/// pair of wrapping quotes. Internal whitespace and line breaks are preserved;
-/// only leading and trailing newlines are trimmed at the end.
-pub fn clean_replace_output(raw: &str) -> String {
-    let mut text = raw.trim_start_matches(['\n', '\r']);
-    if let Some(inner) = unwrap_code_fence(text) {
-        text = inner;
+/// pair of wrapping quotes.
+///
+/// `input` is the original selection, and it decides what counts as framing:
+/// a selection that is itself fenced, quoted, or opens with a "Here is ...:"
+/// line round-trips unchanged through a compliant model, so removing that
+/// layer would corrupt the user's own text. Each layer is therefore only
+/// stripped when the selection did not already have it.
+///
+/// Internal whitespace and line breaks are preserved, and the result carries
+/// the selection's own leading and trailing newlines, so a paragraph that was
+/// selected with its terminating newline is pasted back with it.
+pub fn clean_replace_output(raw: &str, input: &str) -> String {
+    let mut text = raw;
+    if unwrap_code_fence(input).is_none() {
+        if let Some(inner) = unwrap_code_fence(text.trim_start_matches(['\n', '\r'])) {
+            text = inner;
+        }
     }
-    if let Some(rest) = strip_preamble_line(text) {
-        text = rest;
+    if strip_preamble_line(input).is_none() {
+        if let Some(rest) = strip_preamble_line(text.trim_start_matches(['\n', '\r'])) {
+            text = rest;
+        }
     }
-    if let Some(inner) = strip_wrapping_quotes(text) {
-        text = inner;
+    if strip_wrapping_quotes(input).is_none() {
+        if let Some(inner) = strip_wrapping_quotes(text.trim_start_matches(['\n', '\r'])) {
+            text = inner;
+        }
     }
-    text.trim_matches(['\n', '\r']).to_string()
+    let (lead, trail) = boundary_newlines(input);
+    let body = text.trim_matches(['\n', '\r']);
+    format!("{lead}{body}{trail}")
+}
+
+/// The runs of newline characters that open and close `text`. Blank input has
+/// no boundaries to restore, so both are empty rather than the same run twice.
+fn boundary_newlines(text: &str) -> (&str, &str) {
+    if text.trim_matches(['\n', '\r']).is_empty() {
+        return ("", "");
+    }
+    let lead_end = text.len() - text.trim_start_matches(['\n', '\r']).len();
+    let trail_start = text.trim_end_matches(['\n', '\r']).len();
+    (&text[..lead_end], &text[trail_start..])
 }
 
 /// If the whole text is a single fenced block (first line "```" plus an
@@ -335,42 +363,41 @@ mod tests {
         assert!(lang < extra);
     }
 
+    /// Existing-behaviour helper: a plain selection with no framing of its own.
+    fn clean(raw: &str) -> String {
+        clean_replace_output(raw, "The selection.")
+    }
+
     #[test]
     fn clean_unwraps_fence_with_language_tag() {
+        assert_eq!(clean("```text\nFixed sentence.\n```"), "Fixed sentence.");
         assert_eq!(
-            clean_replace_output("```text\nFixed sentence.\n```"),
-            "Fixed sentence."
-        );
-        assert_eq!(
-            clean_replace_output("```markdown\n# Title\n\nBody.\n```\n"),
+            clean("```markdown\n# Title\n\nBody.\n```\n"),
             "# Title\n\nBody."
         );
     }
 
     #[test]
     fn clean_unwraps_fence_without_tag() {
-        assert_eq!(
-            clean_replace_output("```\nFixed sentence.\n```"),
-            "Fixed sentence."
-        );
+        assert_eq!(clean("```\nFixed sentence.\n```"), "Fixed sentence.");
     }
 
     #[test]
     fn clean_leaves_partial_fences_alone() {
         let opening_only = "```\nnot closed";
-        assert_eq!(clean_replace_output(opening_only), opening_only);
+        assert_eq!(clean(opening_only), opening_only);
         let fence_in_prose = "Use ``` to open a block.";
-        assert_eq!(clean_replace_output(fence_in_prose), fence_in_prose);
+        assert_eq!(clean(fence_in_prose), fence_in_prose);
     }
 
     #[test]
     fn clean_strips_here_is_preamble() {
         assert_eq!(
-            clean_replace_output("Here is the corrected text:\nI have two cats."),
+            clean("Here is the corrected text:\nI have two cats."),
             "I have two cats."
         );
         assert_eq!(
-            clean_replace_output("Here's the revised version:\n\nI have two cats."),
+            clean("Here's the revised version:\n\nI have two cats."),
             "I have two cats."
         );
     }
@@ -378,11 +405,11 @@ mod tests {
     #[test]
     fn clean_strips_sure_preamble() {
         assert_eq!(
-            clean_replace_output("Sure! Here's a rewrite:\nWe should leave now."),
+            clean("Sure! Here's a rewrite:\nWe should leave now."),
             "We should leave now."
         );
         assert_eq!(
-            clean_replace_output("Certainly, here is a friendlier take:\nHi there!"),
+            clean("Certainly, here is a friendlier take:\nHi there!"),
             "Hi there!"
         );
     }
@@ -390,34 +417,28 @@ mod tests {
     #[test]
     fn clean_only_strips_one_preamble_at_the_start() {
         let body = "Here is the plan:\nStep one.";
-        assert_eq!(
-            clean_replace_output(&format!("Sure, here you go:\n{body}")),
-            body
-        );
+        assert_eq!(clean(&format!("Sure, here you go:\n{body}")), body);
         let mid = "Step one.\nHere is the plan:\nStep two.";
-        assert_eq!(clean_replace_output(mid), mid);
+        assert_eq!(clean(mid), mid);
     }
 
     #[test]
     fn clean_keeps_colon_lines_that_are_content() {
         let list = "Ingredients:\n- eggs\n- milk";
-        assert_eq!(clean_replace_output(list), list);
+        assert_eq!(clean(list), list);
         let lone = "Here is the text:";
-        assert_eq!(clean_replace_output(lone), lone);
+        assert_eq!(clean(lone), lone);
     }
 
     #[test]
     fn clean_strips_straight_quote_wrapper() {
-        assert_eq!(
-            clean_replace_output("\"I have two cats.\""),
-            "I have two cats."
-        );
+        assert_eq!(clean("\"I have two cats.\""), "I have two cats.");
     }
 
     #[test]
     fn clean_strips_curly_quote_wrapper() {
         assert_eq!(
-            clean_replace_output("\u{201C}I have two cats.\u{201D}"),
+            clean("\u{201C}I have two cats.\u{201D}"),
             "I have two cats."
         );
     }
@@ -425,42 +446,39 @@ mod tests {
     #[test]
     fn clean_keeps_quoted_phrase_inside_sentence() {
         let text = "She called it \"the best day ever\" and meant it.";
-        assert_eq!(clean_replace_output(text), text);
+        assert_eq!(clean(text), text);
         let dialogue = "\"Stop,\" she said. \"Now.\"";
-        assert_eq!(clean_replace_output(dialogue), dialogue);
+        assert_eq!(clean(dialogue), dialogue);
     }
 
     #[test]
     fn clean_keeps_text_that_only_starts_with_a_quote() {
         let text = "\"Quoted opener\" followed by prose.";
-        assert_eq!(clean_replace_output(text), text);
+        assert_eq!(clean(text), text);
         let curly = "\u{201C}Quoted opener\u{201D} followed by prose.";
-        assert_eq!(clean_replace_output(curly), curly);
+        assert_eq!(clean(curly), curly);
     }
 
     #[test]
     fn clean_keeps_internal_blank_lines() {
         let body = "First paragraph.\n\nSecond paragraph.\n\n  Indented third.";
-        assert_eq!(clean_replace_output(body), body);
-        assert_eq!(
-            clean_replace_output(&format!("Here is the rewrite:\n{body}\n")),
-            body
-        );
-        assert_eq!(clean_replace_output(&format!("```\n{body}\n```")), body);
+        assert_eq!(clean(body), body);
+        assert_eq!(clean(&format!("Here is the rewrite:\n{body}\n")), body);
+        assert_eq!(clean(&format!("```\n{body}\n```")), body);
     }
 
     #[test]
     fn clean_returns_plain_text_identical() {
         let plain = "Nothing to see here, just a sentence.";
-        assert_eq!(clean_replace_output(plain), plain);
+        assert_eq!(clean(plain), plain);
         let indented = "  leading spaces are content";
-        assert_eq!(clean_replace_output(indented), indented);
+        assert_eq!(clean(indented), indented);
     }
 
     #[test]
     fn clean_applies_fence_then_preamble_then_quotes() {
         assert_eq!(
-            clean_replace_output("```\nHere is the corrected text:\n\"Two cats.\"\n```\n"),
+            clean("```\nHere is the corrected text:\n\"Two cats.\"\n```\n"),
             "Two cats."
         );
     }
@@ -491,16 +509,106 @@ mod tests {
         assert_eq!(out, "hello");
     }
 
+    struct FixedProvider(&'static str);
+
+    #[async_trait::async_trait]
+    impl LlmProvider for FixedProvider {
+        async fn complete(&self, _req: CompletionRequest) -> Result<String, CoreError> {
+            Ok(self.0.to_string())
+        }
+    }
+
     #[tokio::test]
     async fn run_command_cleans_replace_but_not_popup() {
         let fenced = "```\nHere is the corrected text:\nTwo cats.\n```";
-        let replaced = run_command(&EchoProvider, &cmd(), fenced, None, None)
+        let provider = FixedProvider(fenced);
+        let replaced = run_command(&provider, &cmd(), "Two cats!", None, None)
             .await
             .unwrap();
         assert_eq!(replaced, "Two cats.");
-        let popup = run_command(&EchoProvider, &popup_cmd(), fenced, None, None)
+        let popup = run_command(&provider, &popup_cmd(), "Two cats!", None, None)
             .await
             .unwrap();
         assert_eq!(popup, fenced);
+    }
+
+    #[tokio::test]
+    async fn run_command_keeps_framing_the_selection_already_had() {
+        // A compliant provider returns the selection unchanged; none of it is
+        // framing the cleaner may remove.
+        for selection in [
+            "```rust\nfn main() {}\n```",
+            "\"I have two cats.\"",
+            "Here is the plan:\nStep one.",
+        ] {
+            let out = run_command(&EchoProvider, &cmd(), selection, None, None)
+                .await
+                .unwrap();
+            assert_eq!(out, selection, "selection round-tripped wrong");
+        }
+    }
+
+    #[test]
+    fn clean_keeps_a_fenced_selection_intact() {
+        let selection = "```rust\nfn main() {}\n```";
+        assert_eq!(clean_replace_output(selection, selection), selection);
+        // A fence the model added around a plain selection is still stripped.
+        assert_eq!(
+            clean_replace_output("```\nplain text\n```", "plain text"),
+            "plain text"
+        );
+    }
+
+    #[test]
+    fn clean_keeps_a_quoted_selection_intact() {
+        let selection = "\"I have two cats.\"";
+        assert_eq!(clean_replace_output(selection, selection), selection);
+        let curly = "\u{201C}I have two cats.\u{201D}";
+        assert_eq!(clean_replace_output(curly, curly), curly);
+    }
+
+    #[test]
+    fn clean_keeps_a_selection_that_opens_with_a_colon_line() {
+        let selection = "Here is the plan:\nStep one.";
+        assert_eq!(clean_replace_output(selection, selection), selection);
+    }
+
+    #[test]
+    fn clean_preserves_the_selections_trailing_newline() {
+        assert_eq!(
+            clean_replace_output("A paragraph.\n", "A paragraph.\n"),
+            "A paragraph.\n"
+        );
+        // Also when the raw reply's newline is only a fence delimiter.
+        assert_eq!(
+            clean_replace_output("```\nA paragraph.\n```\n", "A paragraph.\n"),
+            "A paragraph.\n"
+        );
+        // ...and restored when the model dropped it.
+        assert_eq!(
+            clean_replace_output("A paragraph.", "A paragraph.\n\n"),
+            "A paragraph.\n\n"
+        );
+    }
+
+    #[test]
+    fn clean_preserves_the_selections_leading_newline() {
+        assert_eq!(
+            clean_replace_output("\nA paragraph.", "\nA paragraph."),
+            "\nA paragraph."
+        );
+        // A selection without one does not gain one from the reply.
+        assert_eq!(
+            clean_replace_output("\n\nA paragraph.\n", "A paragraph."),
+            "A paragraph."
+        );
+    }
+
+    #[test]
+    fn clean_keeps_leading_indentation_of_the_first_line() {
+        assert_eq!(
+            clean_replace_output("```\n    indented line\n```", "    indented line\n"),
+            "    indented line\n"
+        );
     }
 }
