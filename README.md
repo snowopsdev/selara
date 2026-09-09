@@ -19,6 +19,7 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 ## Features
 
 - **Works everywhere you can select text.** A global hotkey (default `ctrl+shift+space`) reads the selection through macOS Accessibility, with a clipboard fallback for apps that do not expose it.
+- **Runs on the clipboard when nothing is selected.** Press the hotkey with an empty selection and Selara picks up whatever is on the clipboard instead of showing an error; the picker header says **From clipboard** so it is never a surprise, and a Replace pastes the result at the caret.
 - **Keyboard-first picker.** The picker opens next to the mouse cursor on whichever display it is on, clear of the menu bar and Dock. Type to filter the commands, use ↑/↓ to choose, ⏎ to run, or press 1–9 to run a row directly. Clicking still works.
 - **Free-form instruction.** Type anything into the picker's box and press ⌘⏎ (or ⏎ when no command matches) to run it as a one-off Replace, ⇧⏎ for a Popup. The picker remembers the last ten instructions (↑ in the empty box recalls them) and offers **Save as command…** afterwards, which adds the instruction to your commands.
 - **Replace or popup.** Replace commands (Proofread, Rewrite, Friendly, Professional, Concise) write the result back over the selection. Popup commands (Summary, Key Points, Table) open a scrollable result window that renders the markdown (headings, lists, tables) and offers Copy, Replace selection, Insert below, and Retry.
@@ -230,6 +231,7 @@ Supported tokens: `ctrl`/`control`, `shift`, `alt`/`option`, `cmd`/`command`/`su
 - The paste fallback snapshots the whole pasteboard (every type, images included) and only restores it if nothing else was copied in between, so a copy you make during that window wins and the pre-Selara clipboard is dropped.
 - Some apps (Electron, browsers, certain rich-text fields) ignore the Accessibility write. The paste fallback usually still works if the original selection remains.
 - The picker steals focus. Selara re-activates the previous app before replacing.
+- Clipboard mode has no selection to write over, so a Replace pastes at the caret of the app that was frontmost when the hotkey fired. Put the caret where you want the text before pressing the hotkey; **Undo last replace** takes the pasted text back out.
 - Undo relies on the selection range Accessibility reported when the text was captured. In apps that only work through the clipboard fallback, Selara assumes the caret is right after the pasted text and refuses to undo if that does not hold; the app's own ⌘Z still works.
 - Global hotkeys need the `serve` process running. The Settings app keeps it running and can register itself as a login item; a bare terminal `serve` still stops when the terminal closes.
 - If a hotkey fails to register or never fires, pick another chord.
