@@ -556,6 +556,12 @@ impl ServeApp {
     /// Put the last replaced selection back. Works from the undo hotkey and the
     /// picker button; the source app is re-activated first, like a Replace.
     fn undo_last_replace(&mut self, ctx: &egui::Context) {
+        // Check permission before taking the record: an early return here used
+        // to drop it, so re-granting Accessibility left nothing to undo.
+        if !accessibility_trusted() {
+            self.on_hotkey(ctx);
+            return;
+        }
         let Some(last) = self.last_replace.take() else {
             self.phase = UiPhase::Error {
                 message: "Nothing to undo: no Replace has run since Selara started.".into(),
@@ -563,10 +569,6 @@ impl ServeApp {
             self.show_window(ctx, true);
             return;
         };
-        if !accessibility_trusted() {
-            self.on_hotkey(ctx);
-            return;
-        }
         self.hide(ctx);
         std::thread::sleep(std::time::Duration::from_millis(80));
         if let Some(pid) = last.pid {
