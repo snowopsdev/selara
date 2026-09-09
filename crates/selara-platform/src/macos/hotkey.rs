@@ -84,6 +84,8 @@ pub enum HotkeyAction {
     Picker,
     /// Run this command id directly.
     Command(String),
+    /// Restore the text the last Replace overwrote.
+    Undo,
 }
 
 struct SharedHotkeys {
@@ -162,9 +164,14 @@ impl MacosHotkey {
             .take()
     }
 
-    /// Unregister everything and register picker + command hotkeys.
-    /// `command_hotkeys` is `(command_id, hotkey_spec)`.
-    pub fn reregister_all(&self, picker: &str, command_hotkeys: &[(String, String)]) -> Result<()> {
+    /// Unregister everything and register picker + command hotkeys, plus the
+    /// optional undo chord. `command_hotkeys` is `(command_id, hotkey_spec)`.
+    pub fn reregister_all(
+        &self,
+        picker: &str,
+        command_hotkeys: &[(String, String)],
+        undo: Option<&str>,
+    ) -> Result<()> {
         let manager =
             GlobalHotKeyManager::new().context("create GlobalHotKeyManager (main thread)")?;
 
@@ -193,6 +200,17 @@ impl MacosHotkey {
             map.insert(hk.id(), HotkeyAction::Command(cmd_id.clone()));
         }
 
+        if let Some(spec) = undo.map(str::trim).filter(|s| !s.is_empty()) {
+            let hk = parse_hotkey(spec).with_context(|| format!("parse undo hotkey `{spec}`"))?;
+            if map.contains_key(&hk.id()) {
+                bail!("undo hotkey `{spec}` collides with another binding");
+            }
+            manager
+                .register(hk)
+                .with_context(|| format!("register undo hotkey `{spec}`"))?;
+            map.insert(hk.id(), HotkeyAction::Undo);
+        }
+
         *self.shared.by_id.lock().unwrap_or_else(|e| e.into_inner()) = map;
         *self.manager.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
         Ok(())
@@ -216,6 +234,6 @@ impl Default for MacosHotkey {
 impl HotkeyService for MacosHotkey {
     async fn register(&self, hotkey: &str, _on_fire: Box<dyn Fn() + Send + Sync>) -> Result<()> {
         // Legacy single-hotkey path: register as picker only.
-        self.reregister_all(hotkey, &[])
+        self.reregister_all(hotkey, &[], None)
     }
 }

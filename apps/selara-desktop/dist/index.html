@@ -631,11 +631,18 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<input id=\"hotkey\" value=\"" + escapeAttr(config.hotkey || "ctrl+shift+space") + "\" />" +
       "<p class=\"field-hint\">With selara serve running, changes apply within about a second.</p>" +
       "</div></div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"undo-hotkey\">Undo hotkey</label>" +
+      "<div class=\"control-stack\">" +
+      "<input id=\"undo-hotkey\" value=\"" + escapeAttr(config.undo_hotkey || "") + "\" placeholder=\"Optional, e.g. ctrl+shift+z\" autocomplete=\"off\" spellcheck=\"false\" />" +
+      "<p class=\"field-hint\">Puts back the text the last Replace overwrote. The picker also has an Undo button.</p>" +
+      "</div></div>" +
       "</div>" +
       "<div class=\"general-save\"><button class=\"btn\" id=\"save-general\">Save changes</button></div>";
     $("#save-general").onclick = async () => {
       config.language = $("#language").value.trim() || "en";
       config.hotkey = $("#hotkey").value.trim() || "ctrl+shift+space";
+      config.undo_hotkey = $("#undo-hotkey").value.trim() || null;
       await saveConfig();
     };
   }

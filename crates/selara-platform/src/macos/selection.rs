@@ -332,6 +332,45 @@ impl MacosSelection {
     }
 }
 
+impl MacosSelection {
+    /// Put `original` back where a previous Replace wrote `replacement`.
+    ///
+    /// `range` is the location of the original selection when it was captured
+    /// (from `AXSelectedTextRange`). When it is missing (the clipboard fallback
+    /// read the selection) the caret is assumed to sit right after the pasted
+    /// text, which is where ⌘V leaves it; if that assumption cannot be
+    /// verified the caller gets an error rather than a paste in the wrong place.
+    pub fn undo_replace(
+        &self,
+        pid: Option<i32>,
+        original: &str,
+        replacement: &str,
+        range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        // AX ranges are NSRange-like: UTF-16 code units.
+        let replaced_len = replacement.encode_utf16().count() as i64;
+        let target = match range {
+            Some((loc, _)) => (loc, replaced_len),
+            None => {
+                let element = match pid {
+                    Some(pid) => focused_element_for_pid(pid).or_else(|_| focused_element()),
+                    None => focused_element(),
+                }
+                .context("undo: no focused element in the target app")?;
+                match read_ax_selected_range(&element) {
+                    Some((loc, 0)) if loc >= replaced_len => (loc - replaced_len, replaced_len),
+                    Some((loc, len)) if len == replaced_len => (loc, len),
+                    other => bail!(
+                        "undo: cannot locate the replaced text (selection is {other:?}); \
+                         use Undo (⌘Z) in the app instead"
+                    ),
+                }
+            }
+        };
+        self.replace_in_app(pid, original, replacement, Some(target))
+    }
+}
+
 impl Default for MacosSelection {
     fn default() -> Self {
         Self::new().expect("clipboard")
