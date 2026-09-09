@@ -265,6 +265,13 @@ impl AppConfig {
     }
 }
 
+/// Path of the pidfile `selara serve` writes while it runs: `serve.pid` next
+/// to the config file, so the Settings app (which knows the config path) can
+/// tell whether the shell is running.
+pub fn serve_pidfile(config_path: &Path) -> PathBuf {
+    config_path.with_file_name("serve.pid")
+}
+
 fn temp_sibling(path: &Path) -> PathBuf {
     let name = path
         .file_name()
@@ -414,6 +421,20 @@ model = "llama3.1:8b"
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn serve_pidfile_is_sibling_of_config() {
+        let cfg = Path::new("/home/me/.config/selara/config.toml");
+        assert_eq!(
+            serve_pidfile(cfg),
+            PathBuf::from("/home/me/.config/selara/serve.pid")
+        );
+        // A custom --config path keeps the pidfile next to that file.
+        let custom = Path::new("/tmp/work/my-selara.toml");
+        assert_eq!(serve_pidfile(custom), PathBuf::from("/tmp/work/serve.pid"));
+        let bare = Path::new("config.toml");
+        assert_eq!(serve_pidfile(bare), PathBuf::from("serve.pid"));
     }
 
     #[test]

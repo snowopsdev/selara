@@ -431,6 +431,40 @@ button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
 .auth-actions .btn:first-child { margin-left: 174px; }
 .auth-actions .btn { min-width: 0; }
 
+/* Status tab: one glass card per check. */
+.status-toolbar {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  margin: 0 0 16px;
+}
+.status-toolbar .lead { margin: 0; }
+.status-toolbar .btn { flex-shrink: 0; }
+.status-card-head { display: flex; align-items: center; gap: 10px; min-height: 22px; }
+.status-card-head h2 { margin: 0; font-size: 13.5px; font-weight: 600; flex: 1; min-width: 0; }
+.status-card-head .status-state { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.status-meta {
+  display: grid; grid-template-columns: 96px 1fr; gap: 5px 12px;
+  margin: 10px 0 0; font-size: 12.5px;
+}
+.status-meta dt { color: var(--muted); margin: 0; }
+.status-meta dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.status-card .field-hint { margin-top: 10px; }
+.status-card .actions { margin-top: 10px; }
+.status-card .actions .field-hint { margin: 0; flex: 1; min-width: 0; }
+.status-card code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px;
+  padding: 1px 5px; border-radius: 5px; border: 1px solid var(--hairline);
+  background: var(--glass-strong); color: var(--text);
+}
+.status-list {
+  margin: 10px 0 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.status-list li {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 12.5px; min-width: 0;
+}
+.status-list li > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .soon {
   border: 1px dashed var(--hairline-strong); border-radius: var(--radius-control); padding: 12px;
   color: var(--muted); font-size: 13px;
@@ -450,7 +484,11 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   <div id="app">
     <aside class="nav" data-tauri-drag-region>
       <div class="brand" data-tauri-drag-region>Selara</div>
-      <button class="nav-item active" data-section="general">
+      <button class="nav-item active" data-section="status">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 8.5h2.6l1.6-4.2 2.6 8 1.8-5.6 1 1.8h3.4"/></svg>
+        Status
+      </button>
+      <button class="nav-item" data-section="general">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 4.5h12M2 8h12M2 11.5h12"/><circle cx="5.5" cy="4.5" r="1.6" fill="var(--glass-strong)"/><circle cx="10.5" cy="8" r="1.6" fill="var(--glass-strong)"/><circle cx="6.5" cy="11.5" r="1.6" fill="var(--glass-strong)"/></svg>
         General
       </button>
@@ -470,10 +508,11 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     </aside>
     <main class="content">
       <div class="drag-strip" data-tauri-drag-region></div>
-      <section id="section-general" class="section active">
-        <h1>General</h1>
+      <section id="section-status" class="section active">
+        <h1>Status</h1>
         <p class="lead">Loading settings…</p>
       </section>
+      <section id="section-general" class="section"></section>
       <section id="section-models" class="section"></section>
       <section id="section-commands" class="section"></section>
       <section id="section-limits" class="section"></section>
@@ -537,7 +576,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
   // @selara-helpers-end
   const statusEl = () => $("#save-status");
-  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded)$/;
+  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable)$/;
   const BAD_STATUS = /error|failed|required|before saving|not available|could not|enoent/i;
   function setStatus(msg) {
     const text = msg || "";
@@ -650,6 +689,182 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.addEventListener("click", () => showSection(btn.dataset.section));
   });
+
+  // Status tab: is `serve` running, is Accessibility granted, can the
+  // provider be reached, and which shortcuts are live. Read-only apart from
+  // the two buttons; editing happens in the other tabs.
+  let serveStatus = null;
+  let axGranted = null;
+
+  async function refreshStatusData() {
+    try {
+      serveStatus = await invoke("serve_status");
+    } catch (e) {
+      serveStatus = { running: false, pid: null, pidfile: "", error: String(e) };
+    }
+    try {
+      axGranted = await invoke("accessibility_status");
+    } catch (_) {
+      axGranted = null;
+    }
+  }
+
+  function setDot(el, cls) {
+    if (!el) return;
+    el.classList.remove("ok", "bad", "unknown");
+    if (cls) el.classList.add(cls);
+  }
+
+  function keyBadge(chord) {
+    return "<span class=\"badge key\" title=\"" + escapeAttr(chord) + "\">" + escapeHtml(prettyHotkey(chord)) + "</span>";
+  }
+
+  function statusCard(id, title, dotClass, state, body) {
+    return (
+      "<div class=\"card status-card\" id=\"status-" + id + "\">" +
+      "<div class=\"status-card-head\">" +
+      "<span class=\"status-dot " + dotClass + "\" aria-hidden=\"true\"></span>" +
+      "<h2>" + escapeHtml(title) + "</h2>" +
+      "<span class=\"status-state\" id=\"status-" + id + "-state\">" + escapeHtml(state) + "</span>" +
+      "</div>" + body + "</div>"
+    );
+  }
+
+  function renderStatus() {
+    const s = $("#section-status");
+    const p = (config && config.provider) || {};
+    const kind = PROVIDERS[p.kind] ? p.kind : "open_ai_compatible";
+    const meta = providerMeta(kind);
+    const auth = p.auth === "chatgpt" && kind === "open_ai_compatible" ? "chatgpt" : "api_key";
+    const sv = serveStatus || {};
+
+    // 1. serve
+    const serveDot = sv.error ? "unknown" : (sv.running ? "ok" : "bad");
+    const serveState = sv.error ? "Unknown" : (sv.running ? "Running (pid " + sv.pid + ")" : "Not running");
+    const serveBody =
+      "<p class=\"field-hint\">" +
+      (sv.running
+        ? "The global hotkey is live. Stop it with Ctrl+C in the terminal that runs it."
+        : "Hotkeys only work while it runs. Start it from the repo with <code>cargo run -p selara -- serve</code>, or <code>selara serve</code> from an installed build.") +
+      "</p>" +
+      "<dl class=\"status-meta\"><dt>Pidfile</dt><dd>" + escapeHtml(sv.pidfile || "unknown") + "</dd></dl>" +
+      (sv.error ? "<p class=\"field-hint error\">" + escapeHtml(sv.error) + "</p>" : "");
+
+    // 2. Accessibility
+    const axKnown = typeof axGranted === "boolean";
+    const axDot = !axKnown ? "unknown" : (axGranted ? "ok" : "bad");
+    const axState = !axKnown ? "Unknown" : (axGranted ? "Granted" : "Not granted");
+    const axBody =
+      "<p class=\"field-hint\">This is the grant for the Settings app itself. <code>serve</code> reads and replaces text through Accessibility, so the program that runs it (Terminal, iTerm, or the selara binary) must also be enabled under System Settings → Privacy &amp; Security → Accessibility.</p>" +
+      (axGranted
+        ? ""
+        : "<div class=\"actions\"><button type=\"button\" class=\"btn secondary\" id=\"status-open-ax\">Open Accessibility settings</button></div>");
+
+    // 3. Provider (the key is never rendered)
+    const baseUrl = auth === "chatgpt"
+      ? "not used with ChatGPT via Codex"
+      : ((p.base_url || "").trim() || "default (" + meta.baseUrl + ")");
+    const providerBody =
+      "<dl class=\"status-meta\">" +
+      "<dt>Provider</dt><dd>" + escapeHtml(meta.label) + "</dd>" +
+      "<dt>Model</dt><dd>" + escapeHtml((p.model || "").trim() || "not set") + "</dd>" +
+      "<dt>Base URL</dt><dd>" + escapeHtml(baseUrl) + "</dd>" +
+      "<dt>Auth</dt><dd>" + (auth === "chatgpt" ? "ChatGPT via Codex" : "API key") + "</dd>" +
+      "</dl>" +
+      "<div class=\"actions\">" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"status-check-provider\">Check connection</button>" +
+      "<span class=\"field-hint\" id=\"status-provider-result\">" +
+      (auth === "chatgpt" ? "Checks the Codex CLI sign-in." : "Lists models with the saved key. The key itself is never shown here.") +
+      "</span></div>";
+
+    // 4. Shortcuts
+    const cmdKeys = (config.commands || []).filter((c) => c.hotkey && String(c.hotkey).trim());
+    const shortcutRows =
+      "<li><span>Open picker</span>" + keyBadge(config.hotkey || "ctrl+shift+space") + "</li>" +
+      (config.undo_hotkey ? "<li><span>Undo last replace</span>" + keyBadge(config.undo_hotkey) + "</li>" : "") +
+      cmdKeys.map((c) => "<li><span>" + escapeHtml(c.label) + "</span>" + keyBadge(c.hotkey) + "</li>").join("");
+    const shortcutCount = 1 + (config.undo_hotkey ? 1 : 0) + cmdKeys.length;
+    const shortcutsBody =
+      "<ul class=\"status-list\">" + shortcutRows + "</ul>" +
+      "<p class=\"field-hint\">" +
+      (cmdKeys.length ? "" : "No command has its own shortcut yet; add one from the Commands tab. ") +
+      "Shortcuts work while serve is running and pick up saved changes within about a second.</p>";
+
+    s.innerHTML =
+      "<h1>Status</h1>" +
+      "<div class=\"status-toolbar\">" +
+      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, and the shortcuts.</p>" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"status-refresh\">Refresh</button>" +
+      "</div>" +
+      statusCard("serve", "selara serve", serveDot, serveState, serveBody) +
+      statusCard("accessibility", "Accessibility", axDot, axState, axBody) +
+      statusCard("provider", "Provider", "unknown", "Not checked", providerBody) +
+      statusCard("shortcuts", "Shortcuts", "", shortcutCount + (shortcutCount === 1 ? " shortcut" : " shortcuts"), shortcutsBody);
+
+    $("#status-refresh").onclick = async () => {
+      setStatus("Refreshing status…");
+      try {
+        config = await invoke("get_config");
+      } catch (_) { /* keep the copy we have; the cards below still refresh */ }
+      await refreshStatusData();
+      renderStatus();
+      setStatus("Status refreshed");
+    };
+
+    const axBtn = $("#status-open-ax");
+    if (axBtn) {
+      axBtn.onclick = async () => {
+        try {
+          await invoke("open_accessibility_settings");
+        } catch (e) {
+          setStatus(String(e));
+        }
+      };
+    }
+
+    $("#status-check-provider").onclick = async () => {
+      const btn = $("#status-check-provider");
+      const out = $("#status-provider-result");
+      const dot = document.querySelector("#status-provider .status-dot");
+      const state = $("#status-provider-state");
+      btn.disabled = true;
+      out.classList.remove("error");
+      out.textContent = "Contacting " + (auth === "chatgpt" ? "the Codex CLI" : meta.label) + "…";
+      setStatus("Checking provider…");
+      try {
+        if (auth === "chatgpt") {
+          const st = await invoke("chatgpt_auth_status");
+          chatgptStatus = st;
+          const ok = !!(st && st.logged_in);
+          setDot(dot, ok ? "ok" : statusDotClass(st));
+          state.textContent = ok ? "Signed in" : "Not signed in";
+          out.textContent = ok
+            ? "Codex CLI is signed in" + (st.email ? " as " + maskEmail(st.email) : "") + "."
+            : ((st && st.message) || "Not signed in. Use the Models tab to sign in.");
+          setStatus(ok ? "Provider reachable" : "Not signed in");
+        } else {
+          const models = await invoke("list_provider_models_cmd", {
+            kind: kind,
+            baseUrl: (p.base_url || "").trim(),
+            apiKey: (p.api_key && String(p.api_key).trim()) || null,
+          });
+          const n = Array.isArray(models) ? models.length : 0;
+          setDot(dot, "ok");
+          state.textContent = "Reachable · " + n + (n === 1 ? " model" : " models");
+          out.textContent = n + (n === 1 ? " model" : " models") + " available from " + meta.label + ".";
+          setStatus("Provider reachable");
+        }
+      } catch (e) {
+        setDot(dot, "bad");
+        state.textContent = "Unreachable";
+        out.textContent = String(e);
+        out.classList.add("error");
+        setStatus(String(e));
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  }
 
   function renderGeneral() {
     const s = $("#section-general");
@@ -1331,6 +1546,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     try {
       config = await invoke("get_config");
       await refreshChatgptStatus();
+      await refreshStatusData();
+      renderStatus();
       renderGeneral();
       renderModels();
       renderCommands();
