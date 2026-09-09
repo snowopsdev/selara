@@ -14,8 +14,8 @@ use notify::Watcher;
 use selara_core::commands::{run_command_with, CommandKind, PromptVars, WritingCommand};
 use selara_core::config::{serve_pidfile, AppConfig, LimitsConfig};
 use selara_platform::macos::{
-    accessibility_trusted, activate_pid, frontmost_pid, prompt_accessibility, HotkeyAction,
-    MacosHotkey, MacosSelection,
+    accessibility_trusted, activate_pid, frontmost_pid, mouse_location, prompt_accessibility,
+    screen_visible_frame_at, HotkeyAction, MacosHotkey, MacosSelection,
 };
 use selara_platform::SelectionService;
 
@@ -91,6 +91,111 @@ fn insert_text(body: &str) -> String {
     format!("\n\n{body}")
 }
 
+/// Default picker window size in points. Compact enough to sit next to the
+/// cursor without covering the text it was opened for.
+const PICKER_SIZE: (f32, f32) = (380.0, 440.0);
+
+/// Gap between the cursor and the picker's top-left corner, in points.
+const CURSOR_OFFSET: f64 = 12.0;
+
+/// Top-left corner for a window of `size` opened next to `cursor`: 12 pt right
+/// and below it, clamped so the whole window stays inside `visible`
+/// `(x, y, w, h)`. A window larger than the frame sits at the frame's origin so
+/// its top-left (filter box, first rows) is always reachable.
+fn place_near(cursor: (f64, f64), size: (f64, f64), visible: (f64, f64, f64, f64)) -> (f64, f64) {
+    fn clamp_axis(want: f64, origin: f64, extent: f64, len: f64) -> f64 {
+        let max = origin + extent - len;
+        if max < origin {
+            origin
+        } else {
+            want.clamp(origin, max)
+        }
+    }
+    let (vx, vy, vw, vh) = visible;
+    (
+        clamp_axis(cursor.0 + CURSOR_OFFSET, vx, vw, size.0),
+        clamp_axis(cursor.1 + CURSOR_OFFSET, vy, vh, size.1),
+    )
+}
+
+/// Commands whose label contains `query` (case-insensitive, whitespace
+/// trimmed). When no label matches, fall back to matching the prompt text so a
+/// query like "grammar" still finds Proofread. An empty query returns all.
+fn filter_commands<'a>(commands: &'a [WritingCommand], query: &str) -> Vec<&'a WritingCommand> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return commands.iter().collect();
+    }
+    let by_label: Vec<&WritingCommand> = commands
+        .iter()
+        .filter(|c| c.label.to_lowercase().contains(&query))
+        .collect();
+    if !by_label.is_empty() {
+        return by_label;
+    }
+    commands
+        .iter()
+        .filter(|c| c.prompt.to_lowercase().contains(&query))
+        .collect()
+}
+
+/// Move the highlighted row by `delta`, wrapping at both ends. `0` for an
+/// empty list.
+fn next_selection(current: usize, len: usize, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let len = len as isize;
+    ((current as isize + delta).rem_euclid(len)) as usize
+}
+
+/// Keep the highlighted row inside the visible list after filtering.
+fn clamp_selection(current: usize, len: usize) -> usize {
+    current.min(len.saturating_sub(1))
+}
+
+/// Whether a picker row may run right now. Mirrors the rails on the buttons:
+/// the hard max and an unacknowledged soft warn block everything, and an
+/// unacknowledged replace caution blocks Replace commands only.
+fn picker_row_enabled(
+    is_replace: bool,
+    hard_blocked: bool,
+    soft_blocked: bool,
+    replace_caution: bool,
+) -> bool {
+    let blocked = hard_blocked || soft_blocked || (is_replace && replace_caution);
+    !blocked
+}
+
+const DIGIT_KEYS: [egui::Key; 9] = [
+    egui::Key::Num1,
+    egui::Key::Num2,
+    egui::Key::Num3,
+    egui::Key::Num4,
+    egui::Key::Num5,
+    egui::Key::Num6,
+    egui::Key::Num7,
+    egui::Key::Num8,
+    egui::Key::Num9,
+];
+
+/// A bare `1`–`9` press this frame as a zero-based row index. The key press and
+/// the character it would type are removed from the input so the filter box
+/// stays empty; the caller only asks while the filter is empty, so digits typed
+/// into a non-empty filter keep filtering.
+fn take_digit(input: &mut egui::InputState) -> Option<usize> {
+    if !input.modifiers.is_none() {
+        return None;
+    }
+    let idx = DIGIT_KEYS.iter().position(|k| input.key_pressed(*k))?;
+    let typed = char::from(b'1' + idx as u8).to_string();
+    input.events.retain(|e| {
+        !matches!(e, egui::Event::Key { key, .. } if *key == DIGIT_KEYS[idx])
+            && !matches!(e, egui::Event::Text(t) if *t == typed)
+    });
+    Some(idx)
+}
+
 /// The two ways a popup result can be written back into the source app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriteBack {
@@ -146,6 +251,12 @@ struct ServeApp {
     job_tx: Sender<JobResult>,
     runtime: tokio::runtime::Runtime,
     status_line: String,
+    /// Live text of the picker's filter box; cleared on every capture.
+    picker_filter: String,
+    /// Index into the filtered command list that ↑/↓/Enter act on.
+    picker_selected: usize,
+    /// Give the filter box keyboard focus on the next picker frame.
+    focus_filter_next_frame: bool,
 }
 
 impl ServeApp {
@@ -204,6 +315,9 @@ impl ServeApp {
             job_rx,
             job_tx,
             runtime,
+            picker_filter: String::new(),
+            picker_selected: 0,
+            focus_filter_next_frame: false,
         })
     }
 
@@ -251,6 +365,33 @@ impl ServeApp {
                 egui::WindowLevel::AlwaysOnTop,
             ));
         }
+    }
+
+    /// Show the window for a fresh hotkey press: moved next to the mouse cursor
+    /// first (on whichever display it is on, inside that display's visible
+    /// frame), then made visible. Falls back to the window's last position
+    /// when the cursor cannot be located.
+    fn show_window_near_cursor(&self, ctx: &egui::Context) {
+        if let Some(pos) = self.position_near_cursor(ctx) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+        }
+        self.show_window(ctx, true);
+    }
+
+    fn position_near_cursor(&self, ctx: &egui::Context) -> Option<egui::Pos2> {
+        let cursor = mouse_location()?;
+        let visible = screen_visible_frame_at(cursor.0, cursor.1)?;
+        // No OS decorations, so the outer size is the inner size. Prefer the
+        // live size in case the user resized the window.
+        let size = ctx
+            .input(|i| {
+                i.viewport()
+                    .outer_rect
+                    .map(|r| (f64::from(r.width()), f64::from(r.height())))
+            })
+            .unwrap_or((f64::from(PICKER_SIZE.0), f64::from(PICKER_SIZE.1)));
+        let (x, y) = place_near(cursor, size, visible);
+        Some(egui::pos2(x as f32, y as f32))
     }
 
     fn status_for(config: &AppConfig) -> String {
@@ -380,6 +521,9 @@ impl ServeApp {
         self.soft_warn_acked = false;
         self.replace_warn_acked = false;
         self.pending_direct = None;
+        self.picker_filter.clear();
+        self.picker_selected = 0;
+        self.focus_filter_next_frame = true;
         match self.runtime.block_on(self.selection.read_selection()) {
             Ok(Some(snap)) => {
                 self.captured_text = snap.text;
@@ -424,19 +568,19 @@ Enable Selara (or Terminal / the binary you launched),\n\
 then restart `selara serve`."
                     .into(),
             };
-            self.show_window(ctx, true);
+            self.show_window_near_cursor(ctx);
             return;
         }
 
         match self.capture_selection() {
             Ok(true) => {
                 self.phase = UiPhase::Picker;
-                self.show_window(ctx, true);
+                self.show_window_near_cursor(ctx);
             }
             Ok(false) => {}
             Err(message) => {
                 self.phase = UiPhase::Error { message };
-                self.show_window(ctx, true);
+                self.show_window_near_cursor(ctx);
             }
         }
     }
@@ -456,12 +600,12 @@ then restart `selara serve`."
             self.phase = UiPhase::Error {
                 message: format!("Unknown command id `{command_id}` for hotkey."),
             };
-            self.show_window(ctx, true);
+            self.show_window_near_cursor(ctx);
             return;
         };
         match self.capture_selection() {
             Ok(true) => {
-                self.show_window(ctx, true);
+                self.show_window_near_cursor(ctx);
                 if self.needs_confirmation(&cmd) {
                     // Same rails as the picker: show it with the banner and run
                     // the command once the user confirms.
@@ -485,11 +629,11 @@ Select text in another app, then press its shortcut again.",
                         cmd.label
                     ),
                 };
-                self.show_window(ctx, true);
+                self.show_window_near_cursor(ctx);
             }
             Err(message) => {
                 self.phase = UiPhase::Error { message };
-                self.show_window(ctx, true);
+                self.show_window_near_cursor(ctx);
             }
         }
     }
@@ -814,14 +958,58 @@ impl eframe::App for ServeApp {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if matches!(self.phase, UiPhase::Settings) {
                 self.phase = UiPhase::Picker;
+                self.focus_filter_next_frame = true;
             } else {
                 self.hide(ctx);
             }
             return;
         }
 
+        // Keyboard-first picker: ↑/↓ move the highlight, Enter runs it, and a
+        // bare 1–9 runs that row while the filter box is empty. The keys are
+        // consumed here, before the panel renders, so the filter box never
+        // sees them (Enter would otherwise drop its focus).
+        let mut key_run: Option<WritingCommand> = None;
+        let mut selection_moved = false;
+        if matches!(self.phase, UiPhase::Picker) {
+            let filter_empty = self.picker_filter.is_empty();
+            let (up, down, enter, digit) = ctx.input_mut(|i| {
+                let up = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+                let down = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+                let enter = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                let digit = if filter_empty { take_digit(i) } else { None };
+                (up, down, enter, digit)
+            });
+            let visible = filter_commands(&self.config.commands, &self.picker_filter);
+            let len = visible.len();
+            let mut selected = clamp_selection(self.picker_selected, len);
+            if up {
+                selected = next_selection(selected, len, -1);
+                selection_moved = true;
+            }
+            if down {
+                selected = next_selection(selected, len, 1);
+                selection_moved = true;
+            }
+            let run_index = if enter { Some(selected) } else { digit };
+            if let Some(cmd) = run_index.and_then(|idx| visible.get(idx)) {
+                let enabled = picker_row_enabled(
+                    matches!(cmd.kind, CommandKind::Replace),
+                    self.over_hard_max(),
+                    self.needs_soft_warn(),
+                    self.needs_replace_warn(),
+                );
+                if enabled {
+                    key_run = Some((*cmd).clone());
+                }
+            }
+            self.picker_selected = selected;
+        }
+        let focus_filter = matches!(self.phase, UiPhase::Picker)
+            && std::mem::take(&mut self.focus_filter_next_frame);
+
         // Collect click target without holding a borrow across mutation.
-        let mut clicked: Option<WritingCommand> = None;
+        let mut clicked: Option<WritingCommand> = key_run;
         let mut dismiss = false;
         let mut open_settings = false;
         let mut back_to_picker = false;
@@ -840,8 +1028,23 @@ impl eframe::App for ServeApp {
         let can_retry = self.last_command.is_some();
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            // The window has no OS title bar; the header row is the drag
+            // handle. Registered before the buttons so they stay on top.
+            let header_rect = {
+                let mut r = ui.max_rect();
+                r.max.y = r.min.y + 28.0;
+                r
+            };
+            let drag = ui.interact(
+                header_rect,
+                ui.id().with("header_drag"),
+                egui::Sense::click_and_drag(),
+            );
+            if drag.drag_started_by(egui::PointerButton::Primary) {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
             ui.horizontal(|ui| {
-                ui.heading("Selara");
+                ui.heading("Selara").on_hover_text("Drag to move");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Close").clicked() {
                         dismiss = true;
@@ -929,28 +1132,66 @@ impl eframe::App for ServeApp {
                     }
 
                     ui.add_space(8.0);
-                    ui.label("Choose a command:");
+                    let filter = ui.add(
+                        egui::TextEdit::singleline(&mut self.picker_filter)
+                            .hint_text("Type to filter, ↑↓ to choose, ⏎ to run, 1–9 quick pick")
+                            .desired_width(f32::INFINITY),
+                    );
+                    if focus_filter {
+                        filter.request_focus();
+                    }
+                    if filter.changed() {
+                        self.picker_selected = 0;
+                    }
+                    ui.add_space(4.0);
 
                     let commands = self.config.commands.clone();
-                    for cmd in commands {
-                        let kind_tag = match cmd.kind {
-                            CommandKind::Replace => "replace",
-                            CommandKind::Popup => "popup",
-                        };
-                        let replace_locked = matches!(cmd.kind, CommandKind::Replace)
-                            && replace_caution
-                            && !hard_blocked
-                            && !soft_blocked;
-                        let enabled = !hard_blocked && !soft_blocked && !replace_locked;
-                        let resp = ui.add_enabled(
-                            enabled,
-                            egui::Button::new(format!("{}  ({kind_tag})", cmd.label))
-                                .min_size(egui::vec2(ui.available_width(), 28.0)),
-                        );
-                        if resp.clicked() {
-                            clicked = Some(cmd);
-                        }
-                    }
+                    let visible = filter_commands(&commands, &self.picker_filter);
+                    let selected_idx = clamp_selection(self.picker_selected, visible.len());
+                    self.picker_selected = selected_idx;
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if visible.is_empty() {
+                                ui.small("No command matches that filter.");
+                            }
+                            for (idx, cmd) in visible.iter().enumerate() {
+                                let kind_tag = match cmd.kind {
+                                    CommandKind::Replace => "replace",
+                                    CommandKind::Popup => "popup",
+                                };
+                                let enabled = picker_row_enabled(
+                                    matches!(cmd.kind, CommandKind::Replace),
+                                    hard_blocked,
+                                    soft_blocked,
+                                    replace_caution,
+                                );
+                                let selected = idx == selected_idx;
+                                let badge = if idx < 9 {
+                                    format!("{}", idx + 1)
+                                } else {
+                                    " ".to_string()
+                                };
+                                let resp = ui.add_enabled(
+                                    enabled,
+                                    egui::Button::selectable(
+                                        selected,
+                                        (
+                                            egui::RichText::new(badge).weak().monospace(),
+                                            egui::RichText::new(cmd.label.as_str()),
+                                        ),
+                                    )
+                                    .right_text(egui::RichText::new(kind_tag).weak().small())
+                                    .min_size(egui::vec2(ui.available_width(), 28.0)),
+                                );
+                                if selected && selection_moved {
+                                    resp.scroll_to_me(None);
+                                }
+                                if resp.clicked() {
+                                    clicked = Some((*cmd).clone());
+                                }
+                            }
+                        });
                 }
                 UiPhase::Settings => {
                     ui.label("Limits");
@@ -1097,6 +1338,7 @@ impl eframe::App for ServeApp {
         }
         if back_to_picker {
             self.phase = UiPhase::Picker;
+            self.focus_filter_next_frame = true;
         }
         if reset_limits {
             self.config.limits = LimitsConfig::default();
@@ -1226,9 +1468,12 @@ pub fn run(config_path: PathBuf) -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 520.0])
-            .with_min_inner_size([320.0, 400.0])
+            .with_inner_size([PICKER_SIZE.0, PICKER_SIZE.1])
+            .with_min_inner_size([320.0, 300.0])
             .with_resizable(true)
+            // Borderless: the header row inside the panel is the drag handle
+            // (`ViewportCommand::StartDrag`), and Esc / Close dismiss it.
+            .with_decorations(false)
             .with_always_on_top()
             .with_visible(false)
             .with_title("Selara"),
@@ -1252,7 +1497,132 @@ pub fn run(config_path: PathBuf) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{insert_range, insert_text, popup_actions, should_apply_job, PopupActions};
+    use super::{
+        clamp_selection, filter_commands, insert_range, insert_text, next_selection,
+        picker_row_enabled, place_near, popup_actions, should_apply_job, PopupActions,
+    };
+    use selara_core::commands::{CommandKind, WritingCommand};
+
+    const SIZE: (f64, f64) = (380.0, 440.0);
+    /// 1920×1080 display with a 25 pt menu bar and a 70 pt Dock, top-left origin.
+    const VISIBLE: (f64, f64, f64, f64) = (0.0, 25.0, 1920.0, 985.0);
+
+    #[test]
+    fn place_near_offsets_from_the_cursor_when_there_is_room() {
+        assert_eq!(place_near((100.0, 200.0), SIZE, VISIBLE), (112.0, 212.0));
+    }
+
+    #[test]
+    fn place_near_clamps_at_the_right_and_bottom_edges() {
+        // Cursor in the bottom-right corner: the window shifts left and up so
+        // it ends exactly at the visible frame's edges (1920 - 380, 1010 - 440).
+        assert_eq!(place_near((1900.0, 1000.0), SIZE, VISIBLE), (1540.0, 570.0));
+    }
+
+    #[test]
+    fn place_near_never_goes_above_the_visible_frame() {
+        // Cursor on the menu bar of a secondary display whose visible frame
+        // starts at (1920, -200): the window is pushed down onto the frame.
+        let secondary = (1920.0, -200.0, 2560.0, 1415.0);
+        assert_eq!(
+            place_near((2000.0, -230.0), SIZE, secondary),
+            (2012.0, -200.0)
+        );
+    }
+
+    #[test]
+    fn place_near_falls_back_to_the_frame_origin_when_the_window_is_larger() {
+        let tiny = (100.0, 50.0, 300.0, 200.0);
+        assert_eq!(place_near((150.0, 100.0), SIZE, tiny), (100.0, 50.0));
+    }
+
+    fn cmd(label: &str, prompt: &str) -> WritingCommand {
+        WritingCommand {
+            id: label.to_lowercase(),
+            label: label.into(),
+            kind: CommandKind::Replace,
+            prompt: prompt.into(),
+            hotkey: None,
+            model: None,
+        }
+    }
+
+    fn sample() -> Vec<WritingCommand> {
+        vec![
+            cmd("Proofread", "Fix grammar and spelling."),
+            cmd("Summary", "Summarize the text."),
+            cmd("Professional", "Rewrite the text in a professional tone."),
+        ]
+    }
+
+    fn labels<'a>(list: &[&'a WritingCommand]) -> Vec<&'a str> {
+        list.iter().map(|c| c.label.as_str()).collect()
+    }
+
+    #[test]
+    fn empty_or_blank_query_returns_every_command() {
+        let all = sample();
+        assert_eq!(filter_commands(&all, "").len(), 3);
+        assert_eq!(filter_commands(&all, "   ").len(), 3);
+    }
+
+    #[test]
+    fn filter_matches_labels_case_insensitively() {
+        let all = sample();
+        assert_eq!(
+            labels(&filter_commands(&all, "PRO")),
+            vec!["Proofread", "Professional"]
+        );
+        assert_eq!(labels(&filter_commands(&all, " summ ")), vec!["Summary"]);
+    }
+
+    #[test]
+    fn filter_falls_back_to_prompts_only_when_no_label_matches() {
+        let all = sample();
+        // "grammar" is in Proofread's prompt only.
+        assert_eq!(labels(&filter_commands(&all, "grammar")), vec!["Proofread"]);
+        // "text" is in two prompts but also in no label.
+        assert_eq!(
+            labels(&filter_commands(&all, "text")),
+            vec!["Summary", "Professional"]
+        );
+        // A label match wins even though "pro" also appears in a prompt.
+        assert_eq!(
+            labels(&filter_commands(&all, "professional")),
+            vec!["Professional"]
+        );
+        assert!(filter_commands(&all, "zzz").is_empty());
+    }
+
+    #[test]
+    fn next_selection_wraps_around_in_both_directions() {
+        assert_eq!(next_selection(0, 3, 1), 1);
+        assert_eq!(next_selection(2, 3, 1), 0);
+        assert_eq!(next_selection(0, 3, -1), 2);
+        assert_eq!(next_selection(1, 3, -1), 0);
+        assert_eq!(next_selection(0, 0, 1), 0);
+        assert_eq!(next_selection(5, 0, -1), 0);
+    }
+
+    #[test]
+    fn clamp_selection_keeps_the_highlight_inside_the_filtered_list() {
+        assert_eq!(clamp_selection(7, 3), 2);
+        assert_eq!(clamp_selection(1, 3), 1);
+        assert_eq!(clamp_selection(4, 0), 0);
+    }
+
+    #[test]
+    fn picker_rows_follow_the_same_rails_as_the_buttons() {
+        // Nothing blocked: everything runs.
+        assert!(picker_row_enabled(true, false, false, false));
+        assert!(picker_row_enabled(false, false, false, false));
+        // Hard max or soft warn block every row.
+        assert!(!picker_row_enabled(false, true, false, false));
+        assert!(!picker_row_enabled(false, false, true, false));
+        // Replace caution blocks Replace rows only.
+        assert!(!picker_row_enabled(true, false, false, true));
+        assert!(picker_row_enabled(false, false, false, true));
+    }
 
     #[test]
     fn current_generation_while_waiting_is_applied() {
