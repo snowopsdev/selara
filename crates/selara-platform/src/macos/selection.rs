@@ -140,7 +140,9 @@ fn set_ax_selected_range(element: &AXUIElement, location: i64, length: i64) -> R
     }
 }
 
-fn frontmost_app_name() -> Option<String> {
+/// Localized name of the frontmost app (`NSRunningApplication.localizedName`).
+/// Call before showing our UI so it does not report Selara itself.
+pub fn frontmost_app_name() -> Option<String> {
     unsafe {
         let workspace: cocoa::base::id = msg_send![class!(NSWorkspace), sharedWorkspace];
         let app: cocoa::base::id = msg_send![workspace, frontmostApplication];
@@ -152,6 +154,32 @@ fn frontmost_app_name() -> Option<String> {
             return None;
         }
         let utf8: *const std::os::raw::c_char = msg_send![name, UTF8String];
+        if utf8.is_null() {
+            return None;
+        }
+        Some(
+            std::ffi::CStr::from_ptr(utf8)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+}
+
+/// Bundle identifier of the frontmost app (`NSRunningApplication.bundleIdentifier`),
+/// e.g. `com.apple.Terminal`. `None` for unbundled processes. Call before
+/// showing our UI so it does not report Selara itself.
+pub fn frontmost_bundle_id() -> Option<String> {
+    unsafe {
+        let workspace: cocoa::base::id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let app: cocoa::base::id = msg_send![workspace, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        let bundle: cocoa::base::id = msg_send![app, bundleIdentifier];
+        if bundle.is_null() {
+            return None;
+        }
+        let utf8: *const std::os::raw::c_char = msg_send![bundle, UTF8String];
         if utf8.is_null() {
             return None;
         }
@@ -748,6 +776,7 @@ impl SelectionService for MacosSelection {
         }
 
         let app_name = frontmost_app_name();
+        let bundle_id = frontmost_bundle_id();
 
         match focused_element() {
             Ok(el) => {
@@ -758,6 +787,7 @@ impl SelectionService for MacosSelection {
                         return Ok(Some(SelectionSnapshot {
                             text,
                             app_name,
+                            bundle_id,
                             range,
                         }));
                     }
@@ -774,6 +804,7 @@ impl SelectionService for MacosSelection {
         Ok(text.map(|text| SelectionSnapshot {
             text,
             app_name,
+            bundle_id,
             range: None,
         }))
     }

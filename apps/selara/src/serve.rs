@@ -12,10 +12,11 @@ use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::Watcher;
 use selara_core::commands::{run_command_stream, CommandKind, PromptVars, WritingCommand};
-use selara_core::config::{serve_pidfile, AppConfig, LimitsConfig};
+use selara_core::config::{app_is_excluded, serve_pidfile, AppConfig, LimitsConfig};
 use selara_platform::macos::{
-    accessibility_trusted, activate_pid, frontmost_pid, mouse_location, prompt_accessibility,
-    screen_visible_frame_at, HotkeyAction, MacosHotkey, MacosSelection,
+    accessibility_trusted, activate_pid, frontmost_app_name, frontmost_bundle_id, frontmost_pid,
+    mouse_location, prompt_accessibility, screen_visible_frame_at, HotkeyAction, MacosHotkey,
+    MacosSelection,
 };
 use selara_platform::SelectionService;
 
@@ -464,8 +465,12 @@ impl ServeApp {
             .filter(|h| !h.is_empty())
             .map(|h| format!(" · Undo: {h}"))
             .unwrap_or_default();
+        let excluded = match config.excluded_apps.len() {
+            0 => String::new(),
+            n => format!(" · {n} excluded apps"),
+        };
         format!(
-            "Picker: {} · {} cmds · {}{undo} · Access: {}",
+            "Picker: {} · {} cmds · {}{undo}{excluded} · Access: {}",
             config.hotkey,
             config.commands.len(),
             if cmd_hk <= 1 {
@@ -599,7 +604,34 @@ impl ServeApp {
         warn > 0 && self.selection_chars() > warn && !self.replace_warn_acked
     }
 
+    /// True when the frontmost app is on `excluded_apps`. Checked before any
+    /// window, selection, or clipboard access so excluded apps (password
+    /// managers, terminals) never see Selara react to the hotkey.
+    fn frontmost_is_excluded(&self, trigger: &str) -> bool {
+        if self.config.excluded_apps.is_empty() {
+            return false;
+        }
+        let name = frontmost_app_name();
+        let bundle = frontmost_bundle_id();
+        let excluded = app_is_excluded(
+            &self.config.excluded_apps,
+            name.as_deref(),
+            bundle.as_deref(),
+        );
+        if excluded {
+            tracing::info!(
+                "selara: {trigger} ignored, frontmost app is excluded (name={:?}, bundle={:?})",
+                name,
+                bundle
+            );
+        }
+        excluded
+    }
+
     fn on_hotkey(&mut self, ctx: &egui::Context) {
+        if self.frontmost_is_excluded("picker hotkey") {
+            return;
+        }
         if !accessibility_trusted() {
             prompt_accessibility();
             self.phase = UiPhase::Error {
@@ -627,6 +659,9 @@ then restart `selara serve`."
     }
 
     fn on_command_hotkey(&mut self, ctx: &egui::Context, command_id: &str) {
+        if self.frontmost_is_excluded(&format!("command hotkey `{command_id}`")) {
+            return;
+        }
         if !accessibility_trusted() {
             self.on_hotkey(ctx);
             return;
