@@ -322,6 +322,29 @@ button.btn:disabled { opacity: 0.5; }
   display: flex; flex-direction: column; align-items: center; gap: 10px;
 }
 .cmd-list .empty strong { color: var(--text); font-weight: 600; font-size: 13px; }
+.hist-item {
+  display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: start;
+  padding: 10px 10px; margin: 0 -6px; border-top: 1px solid var(--hairline);
+}
+.hist-item:first-child { border-top: 0; }
+.hist-item .hist-main { min-width: 0; }
+.hist-item h3 {
+  margin: 0; font-size: 13.5px; font-weight: 600;
+  display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap;
+}
+.hist-item h3 .hist-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-item .hist-meta { font-size: 11.5px; color: var(--muted); margin: 2px 0 6px; }
+.hist-item .hist-preview {
+  margin: 0; font-size: 12px; line-height: 1.4; display: grid; grid-template-columns: auto 1fr; gap: 2px 8px;
+}
+.hist-item .hist-preview dt { color: var(--muted); margin: 0; }
+.hist-item .hist-preview dd {
+  margin: 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hist-item .hist-preview dd.result { color: var(--text); }
+.hist-item .hist-preview dd.original { color: var(--muted); }
+.hist-item .row-actions { display: flex; flex-direction: column; gap: 4px; }
+.hist-item .row-actions .btn { white-space: nowrap; font-size: 11.5px; padding: 3px 9px; }
 button.icon-btn.danger:hover { color: var(--danger); }
 
 /* Sheet */
@@ -516,6 +539,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2.5"/><path d="M5 6l2.5 2L5 10M8.5 10h3"/></svg>
         Commands
       </button>
+      <button class="nav-item" data-section="history">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9"/><path d="M2 2.5v2.6h2.6"/><path d="M8 5v3.2l2.2 1.3"/></svg>
+        History
+      </button>
       <button class="nav-item" data-section="limits">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 11.5a5.5 5.5 0 1 1 11 0"/><path d="M8 11.5l2.6-3.6"/><circle cx="8" cy="11.5" r="1" fill="currentColor"/></svg>
         Limits
@@ -531,6 +558,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       <section id="section-general" class="section"></section>
       <section id="section-models" class="section"></section>
       <section id="section-commands" class="section"></section>
+      <section id="section-history" class="section"></section>
       <section id="section-limits" class="section"></section>
     </main>
   </div>
@@ -552,6 +580,24 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "command";
   }
   function kindLabel(k) { return k === "popup" ? "Popup" : "Replace"; }
+  // "just now", "3 min ago", "2 h ago", "5 d ago"; `ts` and `now` in unix seconds.
+  function relativeTime(ts, now) {
+    const t = Number(ts);
+    if (!Number.isFinite(t) || t <= 0) return "unknown time";
+    const d = Math.max(0, Math.floor(Number(now) - t));
+    if (d < 45) return "just now";
+    if (d < 3600) return Math.max(1, Math.round(d / 60)) + " min ago";
+    if (d < 86400) return Math.round(d / 3600) + " h ago";
+    if (d < 86400 * 30) return Math.round(d / 86400) + " d ago";
+    return new Date(t * 1000).toLocaleDateString();
+  }
+  // One line of preview: whitespace collapsed, cut to `max` chars with an ellipsis.
+  function previewLine(text, max) {
+    const one = String(text ?? "").replace(/\s+/g, " ").trim();
+    if (!one) return "(empty)";
+    const n = Number(max) || 160;
+    return one.length > n ? one.slice(0, n - 1).trimEnd() + "\u2026" : one;
+  }
   function maskEmail(email) {
     if (!email) return "";
     const at = email.indexOf("@");
@@ -729,7 +775,13 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   document.querySelectorAll(".nav-item").forEach((btn) => {
-    btn.addEventListener("click", () => showSection(btn.dataset.section));
+    btn.addEventListener("click", async () => {
+      showSection(btn.dataset.section);
+      if (btn.dataset.section === "history" && config) {
+        await refreshHistoryData();
+        renderHistory();
+      }
+    });
   });
 
   // Status tab: is `serve` running, is Accessibility granted, can the
@@ -1787,6 +1839,117 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     }
   }
 
+  // History tab: what `serve` wrote to history.jsonl, newest first. Read-only
+  // apart from the copy buttons and Clear; restoring text into the source
+  // app needs its focus and Accessibility, so the picker's Undo covers that.
+  let historyEntries = [];
+  let historyError = "";
+
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) { /* fall through to the execCommand path */ }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  async function refreshHistoryData() {
+    try {
+      const list = await invoke("history_list");
+      historyEntries = Array.isArray(list) ? list : [];
+      historyError = "";
+    } catch (e) {
+      historyEntries = [];
+      historyError = String(e);
+    }
+  }
+
+  function renderHistory() {
+    const s = $("#section-history");
+    const now = Math.floor(Date.now() / 1000);
+    const rows = historyEntries.map((h, i) => {
+      const when = relativeTime(h.ts, now);
+      const app = h.app ? " · " + escapeHtml(h.app) : "";
+      const isInsert = !h.original && h.kind !== "popup";
+      return (
+        "<div class=\"hist-item\" data-index=\"" + i + "\">" +
+        "<div class=\"hist-main\">" +
+        "<h3><span class=\"hist-name\">" + escapeHtml(h.label || h.command_id || "Command") + "</span>" +
+        "<span class=\"badge\">" + escapeHtml(isInsert ? "Insert below" : kindLabel(h.kind)) + "</span></h3>" +
+        "<div class=\"hist-meta\" title=\"" + escapeAttr(h.ts ? new Date(h.ts * 1000).toLocaleString() : "") + "\">" + escapeHtml(when) + app + "</div>" +
+        "<dl class=\"hist-preview\">" +
+        "<dt>Original</dt><dd class=\"original\" title=\"" + escapeAttr(previewLine(h.original, 400)) + "\">" + escapeHtml(previewLine(h.original, 160)) + "</dd>" +
+        "<dt>Result</dt><dd class=\"result\" title=\"" + escapeAttr(previewLine(h.result, 400)) + "\">" + escapeHtml(previewLine(h.result, 160)) + "</dd>" +
+        "</dl></div>" +
+        "<div class=\"row-actions\">" +
+        "<button type=\"button\" class=\"btn secondary\" data-act=\"copy-result\" title=\"Copy the result to the clipboard\">Copy result</button>" +
+        "<button type=\"button\" class=\"btn secondary\" data-act=\"copy-original\" title=\"Copy the text that was selected\"" + (h.original ? "" : " disabled") + ">Copy original</button>" +
+        "</div></div>"
+      );
+    }).join("");
+
+    let listInner = rows;
+    if (historyError) {
+      listInner = "<div class=\"empty\"><strong>Could not read history</strong><span>" + escapeHtml(historyError) + "</span></div>";
+    } else if (!historyEntries.length) {
+      listInner =
+        "<div class=\"empty\"><strong>No history yet</strong>" +
+        "<span>Every command that finishes while <code>selara serve</code> runs shows up here, newest first (last 50).</span></div>";
+    }
+
+    s.innerHTML =
+      "<h1>History</h1>" +
+      "<p class=\"lead\">What Selara wrote and what it replaced. Copy a result or the original text back to the clipboard; " +
+      "to put text back into the app itself, use Undo in the picker right after a Replace. " +
+      "The file holds the selected text verbatim and is readable only by you.</p>" +
+      "<div class=\"toolbar\">" +
+      "<span class=\"field-hint\" id=\"history-count\" style=\"flex:1\">" + historyEntries.length + (historyEntries.length === 1 ? " entry" : " entries") + "</span>" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"history-refresh\">Refresh</button>" +
+      "<button type=\"button\" class=\"btn danger\" id=\"history-clear\"" + (historyEntries.length ? "" : " disabled") + ">Clear history</button>" +
+      "</div>" +
+      "<div class=\"cmd-list\" id=\"history-list\">" + listInner + "</div>";
+
+    $("#history-refresh").onclick = async () => {
+      setStatus("Refreshing history…");
+      await refreshHistoryData();
+      renderHistory();
+      setStatus("History refreshed");
+    };
+    $("#history-clear").onclick = async () => {
+      if (!confirm("Clear the history? This deletes every saved original and result.")) return;
+      try {
+        await invoke("history_clear");
+        await refreshHistoryData();
+        renderHistory();
+        setStatus("History cleared");
+      } catch (e) {
+        setStatus(String(e));
+      }
+    };
+    $("#history-list").addEventListener("click", async (ev) => {
+      const btn = ev.target.closest("button[data-act]");
+      if (!btn) return;
+      const row = btn.closest(".hist-item");
+      const h = historyEntries[Number(row && row.dataset.index)];
+      if (!h) return;
+      const text = btn.dataset.act === "copy-original" ? h.original : h.result;
+      const ok = await copyText(text || "");
+      setStatus(ok ? (btn.dataset.act === "copy-original" ? "Copied original" : "Copied result") : "Copy failed");
+    });
+  }
+
   async function load() {
     setStatus("Loading config…");
     try {
@@ -1797,6 +1960,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       renderGeneral();
       renderModels();
       renderCommands();
+      await refreshHistoryData();
+      renderHistory();
       renderLimits();
       setStatus("Loaded");
     } catch (e) {
