@@ -19,6 +19,20 @@ fn save_config(config: AppConfig) -> Result<(), String> {
     config.save(&path).map_err(|e| e.to_string())
 }
 
+/// Save one Settings tab without touching the others. The file is re-read
+/// first so a change made elsewhere (for example the Limits page inside
+/// `selara serve`) survives, and the merged config is returned so the UI can
+/// refresh its copy.
+#[tauri::command]
+fn save_config_section(section: String, value: serde_json::Value) -> Result<AppConfig, String> {
+    let path = AppConfig::default_path();
+    let mut cfg = AppConfig::load_or_init(&path).map_err(|e| e.to_string())?;
+    cfg.apply_section(&section, value)
+        .map_err(|e| e.to_string())?;
+    cfg.save(&path).map_err(|e| e.to_string())?;
+    Ok(cfg)
+}
+
 #[tauri::command]
 fn config_path() -> String {
     AppConfig::default_path().display().to_string()
@@ -81,6 +95,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
+            save_config_section,
             config_path,
             chatgpt_auth_status,
             chatgpt_login,

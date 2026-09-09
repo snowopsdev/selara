@@ -9,6 +9,7 @@
     "shell:allow-open",
     "allow-get-config",
     "allow-save-config",
+    "allow-save-config-section",
     "allow-config-path",
     "allow-chatgpt-auth-status",
     "allow-chatgpt-login",
