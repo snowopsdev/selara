@@ -868,6 +868,7 @@ impl ServeApp {
             // pastes at the caret of whatever app was in front.
             _ => {
                 self.captured_app = frontmost_app_name();
+                self.captured_bundle_id = frontmost_bundle_id();
                 self.captured_range = None;
             }
         }
