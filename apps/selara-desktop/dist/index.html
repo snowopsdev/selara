@@ -761,6 +761,15 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       appVersion = "";
     }
     try {
+      // Rust keeps the last check's result. A webview reload, or a background
+      // check that landed before the listener was bound, would otherwise leave
+      // the card saying "Not checked" until the next daily run.
+      const stored = await invoke("update_status");
+      if (stored) updateStatus = stored;
+    } catch (_) {
+      // An older build without the command: the event listener still works.
+    }
+    try {
       serveStatus = await invoke("serve_status");
     } catch (e) {
       serveStatus = { running: false, pid: null, pidfile: "", error: String(e) };
@@ -1958,6 +1967,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
 
   async function load() {
     setStatus("Loading config…");
+    // Before the first await: the startup check fires 10 s after launch and a
+    // slow load must not miss it.
+    listenForUpdates();
     try {
       config = await invoke("get_config");
       await refreshChatgptStatus();
@@ -1968,7 +1980,6 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       renderCommands();
       renderLimits();
       await listenForServeChanges();
-      listenForUpdates();
       setStatus("Loaded");
     } catch (e) {
       const msg = String(e);

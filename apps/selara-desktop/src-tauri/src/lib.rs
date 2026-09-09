@@ -698,6 +698,10 @@ struct UpdateState {
     pending: Mutex<Option<Update>>,
     /// Last result, so the Status tab can show it without a new check.
     last: Mutex<Option<UpdateStatus>>,
+    /// Set while an install runs. `download_and_install` replaces the app
+    /// bundle and then asks for a restart, so two concurrent runs would race
+    /// over the same files.
+    installing: AtomicBool,
 }
 
 /// Push the result to the tray item and the Settings window.
@@ -711,8 +715,17 @@ fn apply_update_status(app: &AppHandle, status: &UpdateStatus) {
             UpdateStatus::Available { version, .. } => (format!("Update to v{version}…"), true),
             UpdateStatus::Error { .. } => ("Update check failed".to_string(), false),
         };
-        let _ = menu.update.set_text(text);
-        let _ = menu.update.set_enabled(enabled);
+        // An install in flight owns this item: a check that finishes in the
+        // middle of one must not re-enable it.
+        let installing = app
+            .try_state::<UpdateState>()
+            .is_some_and(|s| s.installing.load(Ordering::SeqCst));
+        let _ = menu.update.set_text(if installing {
+            "Installing update…".to_string()
+        } else {
+            text
+        });
+        let _ = menu.update.set_enabled(enabled && !installing);
     }
     let _ = app.emit("update-changed", status.clone());
 }
@@ -753,9 +766,40 @@ async fn perform_update_check(app: &AppHandle) -> UpdateStatus {
     status
 }
 
+/// Run one install at a time. The tray item and the Status button both reach
+/// `install_update`, and each caller clones the same pending `Update`, so
+/// without this guard two `download_and_install` runs could replace the app
+/// bundle concurrently and both ask for a restart.
+async fn perform_update_install(app: &AppHandle) -> Result<(), String> {
+    if app
+        .state::<UpdateState>()
+        .installing
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("an update is already being installed".to_string());
+    }
+    if let Some(menu) = app.try_state::<TrayMenu>() {
+        let _ = menu.update.set_text("Installing update…");
+        let _ = menu.update.set_enabled(false);
+    }
+    let result = install_pending_update(app).await;
+    if result.is_err() {
+        // Only a failure releases the guard; a success restarts the process.
+        app.state::<UpdateState>()
+            .installing
+            .store(false, Ordering::SeqCst);
+        let last = lock(&app.state::<UpdateState>().last).clone();
+        if let Some(status) = last {
+            apply_update_status(app, &status);
+        }
+    }
+    result
+}
+
 /// Download and install the pending update (checking first when there is
 /// none), stop the managed `serve`, and relaunch into the new build.
-async fn perform_update_install(app: &AppHandle) -> Result<(), String> {
+async fn install_pending_update(app: &AppHandle) -> Result<(), String> {
     let pending = lock(&app.state::<UpdateState>().pending).clone();
     let update = match pending {
         Some(update) => update,
@@ -806,6 +850,13 @@ fn spawn_update_checks(app: AppHandle) {
 #[tauri::command]
 fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
+}
+
+/// The last check's result, without touching the network. Lets the Settings
+/// window recover a status that was emitted before its listener was bound.
+#[tauri::command]
+fn update_status(app: AppHandle) -> Option<UpdateStatus> {
+    lock(&app.state::<UpdateState>().last).clone()
 }
 
 #[tauri::command]
@@ -863,6 +914,7 @@ pub fn run() {
             open_accessibility_settings,
             app_version,
             check_for_updates,
+            update_status,
             install_update
         ])
         .setup(|app| {
