@@ -306,6 +306,17 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 struct Supervisor {
+    /// Serializes every start / stop / restart.
+    ///
+    /// The checks that decide whether to spawn read `child` and the pidfile,
+    /// and both locks are released again before the new handle is stored. Two
+    /// overlapping requests — the `RunEvent::Ready` start racing a tray or
+    /// Status-tab click, say — could therefore both pass those checks, spawn a
+    /// sidecar each, and leave the second `child` assignment hiding the first
+    /// process from Stop and Quit, still holding the global hotkey. This is
+    /// held across the whole check → spawn → store sequence, and across a
+    /// restart's stop-then-start, so only one transition is ever in flight.
+    transition: Mutex<()>,
     /// The sidecar we spawned, if any. `None` while stopped or external.
     child: Mutex<Option<CommandChild>>,
     /// When the last few automatic restarts happened (crash-loop guard).
@@ -372,6 +383,15 @@ fn notify(app: &AppHandle) {
 /// Spawn the `serve` sidecar unless one (ours or external) already runs.
 fn start_serve(app: &AppHandle) -> Result<(), String> {
     let sup = app.state::<Supervisor>();
+    let _transition = lock(&sup.transition);
+    start_serve_locked(app, &sup)
+}
+
+/// The body of `start_serve`; the caller holds `Supervisor::transition`.
+///
+/// `notify` only takes `child` and the tray state, never `transition`, so it is
+/// safe to call from here.
+fn start_serve_locked(app: &AppHandle, sup: &Supervisor) -> Result<(), String> {
     if sup.managed_pid().is_some() {
         return Ok(());
     }
@@ -508,6 +528,12 @@ fn on_terminated(app: &AppHandle, generation: u64, payload: TerminatedPayload) {
 /// following `start_serve` does not mistake the corpse for an external serve.
 fn stop_serve(app: &AppHandle) -> Result<(), String> {
     let sup = app.state::<Supervisor>();
+    let _transition = lock(&sup.transition);
+    stop_serve_locked(app, &sup)
+}
+
+/// The body of `stop_serve`; the caller holds `Supervisor::transition`.
+fn stop_serve_locked(app: &AppHandle, sup: &Supervisor) -> Result<(), String> {
     sup.desired.store(false, Ordering::SeqCst);
     sup.generation.fetch_add(1, Ordering::SeqCst);
     let Some(child) = lock(&sup.child).take() else {
@@ -539,9 +565,13 @@ fn stop_serve(app: &AppHandle) -> Result<(), String> {
 }
 
 fn restart_serve(app: &AppHandle) -> Result<(), String> {
-    stop_serve(app)?;
-    lock(&app.state::<Supervisor>().restarts).clear();
-    start_serve(app)
+    let sup = app.state::<Supervisor>();
+    // One transition, so nothing can start a second sidecar in the window
+    // between the stop and the start.
+    let _transition = lock(&sup.transition);
+    stop_serve_locked(app, &sup)?;
+    lock(&sup.restarts).clear();
+    start_serve_locked(app, &sup)
 }
 
 /// Run a supervisor action off the main thread: `stop_serve` can wait up to

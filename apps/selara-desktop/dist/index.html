@@ -774,6 +774,36 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     }
   }
 
+  // The supervisor emits "serve-changed" whenever serve starts, stops, exits or
+  // is restarted automatically after a crash — which happens from the tray menu
+  // and from the crash-loop guard, not just from the Status buttons. Without a
+  // listener an open Status tab keeps showing whatever it last read until the
+  // user presses Refresh.
+  let serveChangedPending = false;
+  async function onServeChanged() {
+    // Coalesce a burst (stop + start of a restart arrive back to back).
+    if (serveChangedPending) return;
+    serveChangedPending = true;
+    try {
+      await refreshStatusData();
+      renderStatus();
+    } finally {
+      serveChangedPending = false;
+    }
+  }
+
+  async function listenForServeChanges() {
+    const g = window.__TAURI__;
+    const listen =
+      g && g.event && typeof g.event.listen === "function" ? g.event.listen.bind(g.event) : null;
+    if (!listen) return;
+    try {
+      await listen("serve-changed", onServeChanged);
+    } catch (e) {
+      console.warn("serve-changed listener unavailable:", e);
+    }
+  }
+
   function setDot(el, cls) {
     if (!el) return;
     el.classList.remove("ok", "bad", "unknown");
@@ -1836,6 +1866,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       renderModels();
       renderCommands();
       renderLimits();
+      await listenForServeChanges();
       setStatus("Loaded");
     } catch (e) {
       const msg = String(e);
