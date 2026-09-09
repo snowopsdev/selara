@@ -492,6 +492,11 @@ button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
   margin-top: 8px; font-size: 12.5px; font-weight: 500; color: var(--text);
 }
 .check-row input[type="checkbox"] { width: auto; height: auto; margin: 0; box-shadow: none; }
+.usage-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12.5px; }
+.usage-table th, .usage-table td { padding: 4px 0; text-align: right; white-space: nowrap; }
+.usage-table th:first-child, .usage-table td:first-child { text-align: left; }
+.usage-table th { font-weight: 500; color: var(--muted); }
+.usage-table td + td, .usage-table th + th { padding-left: 14px; }
 
 .serve-log { margin-top: 10px; font-size: 12px; color: var(--muted); }
 .serve-log summary { cursor: default; }
@@ -805,6 +810,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   // through the `update-changed` event). Never triggers a network check by
   // itself; the user presses the button for that.
   let updateStatus = null;
+  let usageSummary = null;
 
   async function refreshStatusData() {
     try {
@@ -842,6 +848,31 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     } catch (_) {
       axGranted = null;
     }
+    try {
+      usageSummary = await invoke("usage_summary");
+    } catch (e) {
+      usageSummary = { error: String(e) };
+    }
+  }
+
+  function fmtTokens(n) {
+    return Number(n || 0).toLocaleString("en-US");
+  }
+
+  function fmtCost(bucket) {
+    if (!bucket || bucket.cost_usd === null || bucket.cost_usd === undefined) return "n/a";
+    const c = Number(bucket.cost_usd);
+    const base = "~$" + (c < 0.01 && c > 0 ? c.toFixed(4) : c.toFixed(2));
+    return bucket.unpriced ? base + " +" + bucket.unpriced + " unpriced" : base;
+  }
+
+  function usageRow(label, bucket) {
+    const b = bucket || {};
+    return "<tr><td>" + escapeHtml(label) + "</td>" +
+      "<td>" + fmtTokens(b.requests) + "</td>" +
+      "<td>" + fmtTokens(b.input) + "</td>" +
+      "<td>" + fmtTokens(b.output) + "</td>" +
+      "<td>" + escapeHtml(fmtCost(b)) + "</td></tr>";
   }
 
   // The supervisor emits "serve-changed" whenever serve starts, stops, exits or
@@ -1006,11 +1037,26 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       (upAvailable ? "<button type=\"button\" class=\"btn\" id=\"status-install-update\">Install and restart</button>" : "") +
       "<span class=\"field-hint" + (up.state === "error" ? " error" : "") + "\" id=\"status-update-result\">" + escapeHtml(upResult) + "</span>" +
       "</div>";
+    // 5. usage (local ledger next to the config; never leaves the machine)
+    const u = usageSummary || {};
+    const all = u.all_time || {};
+    const usageState = u.error ? "Unavailable" : (all.requests ? fmtTokens(all.requests) + (all.requests === 1 ? " request" : " requests") : "No requests yet");
+    const usageBody = u.error
+      ? "<p class=\"field-hint error\">" + escapeHtml(u.error) + "</p>"
+      : "<table class=\"usage-table\">" +
+        "<thead><tr><th>Window</th><th>Requests</th><th>Tokens in</th><th>Tokens out</th><th>Est. cost</th></tr></thead>" +
+        "<tbody>" + usageRow("Today", u.today) + usageRow("Last 30 days", u.last_30_days) + usageRow("All time", u.all_time) + "</tbody>" +
+        "</table>" +
+        "<div class=\"actions\">" +
+        "<p class=\"field-hint\">Counted locally from provider replies and kept in <code>usage.jsonl</code> next to the config; never sent anywhere. Costs are estimates from a built-in list-price table (n/a for local or unlisted models).</p>" +
+        "<button type=\"button\" class=\"btn secondary\" id=\"usage-clear\"" + (all.requests ? "" : " disabled") + ">Clear</button>" +
+        "</div>";
 
     s.innerHTML =
       "<h1>Status</h1>" +
       "<div class=\"status-toolbar\">" +
       "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, the shortcuts, and updates.</p>" +
+      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, the shortcuts, and what it has cost.</p>" +
       "<button type=\"button\" class=\"btn secondary\" id=\"status-refresh\">Refresh</button>" +
       "</div>" +
       statusCard("serve", "selara serve", serveDot, serveState, serveBody) +
@@ -1052,6 +1098,23 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         } catch (e) {
           updateStatus = { state: "error", message: String(e) };
           renderStatus();
+            }
+        }
+    }
+
+      statusCard("usage", "Usage", u.error ? "unknown" : "", usageState, usageBody);
+
+    const clearBtn = $("#usage-clear");
+    if (clearBtn) {
+      clearBtn.onclick = async () => {
+        clearBtn.disabled = true;
+        setStatus("Clearing usage…");
+        try {
+          usageSummary = await invoke("clear_usage");
+          renderStatus();
+          setStatus("Usage cleared");
+        } catch (e) {
+          clearBtn.disabled = false;
           setStatus(String(e));
         }
       };

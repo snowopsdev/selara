@@ -48,6 +48,8 @@
     "allow-open-accessibility-settings",
     "allow-app-version",
     "allow-check-for-updates",
-    "allow-install-update"
+    "allow-install-update",
+    "allow-usage-summary",
+    "allow-clear-usage"
   ]
 }

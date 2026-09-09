@@ -10,6 +10,7 @@ use crate::chatgpt_auth::{
     ChatGptAuth, CODEX_MODELS_URL, CODEX_ORIGINATOR, CODEX_RESPONSES_URL, CODEX_USER_AGENT,
 };
 use crate::error::CoreError;
+use crate::usage::{self, TokenUsage};
 
 /// Fail fast on a black hole, but do not cap a still-progressing completion.
 /// `timeout()` is a total deadline through the last body byte; a local model or
@@ -477,6 +478,8 @@ impl OpenAiCompatibleProvider {
         }
         if stream {
             body["stream"] = json!(true);
+            // Ask for a final usage-only chunk (OpenAI, vLLM; others ignore it).
+            body["stream_options"] = json!({"include_usage": true});
         }
 
         let mut builder = client.post(url).json(&body);
@@ -504,6 +507,49 @@ impl OpenAiCompatibleProvider {
         openai_message_content(value)
             .ok_or_else(|| CoreError::Provider(format!("unexpected response: {value}")))
     }
+
+    /// Ledger label: OpenRouter is the same wire format with attribution headers.
+    fn usage_kind(&self) -> &'static str {
+        if self.extra_headers.is_empty() {
+            usage::KIND_OPENAI_COMPATIBLE
+        } else {
+            usage::KIND_OPENROUTER
+        }
+    }
+
+    fn record_usage(&self, value: &serde_json::Value) {
+        if let Some(u) = parse_openai_usage(value) {
+            usage::record(self.usage_kind(), &self.model, u);
+        }
+    }
+}
+
+/// `usage.prompt_tokens` / `usage.completion_tokens` from a Chat Completions
+/// reply or its final streamed chunk. `None` when the server sent no usage.
+pub fn parse_openai_usage(value: &serde_json::Value) -> Option<TokenUsage> {
+    let u = value.get("usage")?;
+    if u.is_null() {
+        return None;
+    }
+    Some(TokenUsage {
+        input: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        output: u
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    })
+}
+
+/// `usage.input_tokens` / `usage.output_tokens` from a buffered Messages reply.
+pub fn parse_anthropic_usage(value: &serde_json::Value) -> Option<TokenUsage> {
+    let u = value.get("usage")?;
+    if u.is_null() {
+        return None;
+    }
+    Some(TokenUsage {
+        input: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        output: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
 }
 
 #[async_trait]
@@ -515,6 +561,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
         }
+        self.record_usage(&value);
         Self::parse_response(&value)
     }
 
@@ -530,6 +577,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         }
         if is_json_response(&resp) {
             let (_, value) = json_or_raw(resp).await?;
+            self.record_usage(&value);
             let out = Self::parse_response(&value)?;
             on_delta(&out);
             return Ok(out);
@@ -538,6 +586,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let mut out = String::new();
         let mut truncated = false;
         let mut terminated = false;
+        let mut used: Option<TokenUsage> = None;
         for_each_sse_event(resp, |event| {
             if sse_is_done_sentinel(event) {
                 terminated = true;
@@ -547,6 +596,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
             };
             if let Some(err) = value.get("error") {
                 return Err(CoreError::Provider(format!("stream error: {err}")));
+            }
+            // With `include_usage` the last chunk carries `usage` and no choices.
+            if let Some(u) = parse_openai_usage(&value) {
+                used = Some(u);
             }
             // Role-only and keep-alive chunks carry `content: null`; skip them.
             if let Some(text) = value
@@ -567,6 +620,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
             Ok(())
         })
         .await?;
+        if let Some(u) = used {
+            usage::record(self.usage_kind(), &self.model, u);
+        }
         // Drain the whole stream first so the connection closes cleanly, but
         // never hand back partial text: the caller would write it over the selection.
         if truncated {
@@ -653,6 +709,9 @@ impl LlmProvider for AnthropicProvider {
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
         }
+        if let Some(u) = parse_anthropic_usage(&value) {
+            usage::record(usage::KIND_ANTHROPIC, &self.model, u);
+        }
         Self::parse_response(&value)
     }
 
@@ -669,6 +728,9 @@ impl LlmProvider for AnthropicProvider {
         }
         if is_json_response(&resp) {
             let (_, value) = json_or_raw(resp).await?;
+            if let Some(u) = parse_anthropic_usage(&value) {
+                usage::record(usage::KIND_ANTHROPIC, &self.model, u);
+            }
             let out = Self::parse_response(&value)?;
             on_delta(&out);
             return Ok(out);
@@ -677,6 +739,8 @@ impl LlmProvider for AnthropicProvider {
         let mut out = String::new();
         let mut truncated = false;
         let mut terminated = false;
+        // `message_start` carries input tokens, `message_delta` the output count.
+        let mut used: Option<TokenUsage> = None;
         for_each_sse_event(resp, |event| {
             let Some((event_name, value)) = parse_sse_event(event) else {
                 return Ok(());
@@ -692,6 +756,14 @@ impl LlmProvider for AnthropicProvider {
                         }
                     }
                 }
+                "message_start" => {
+                    if let Some(n) = value
+                        .pointer("/message/usage/input_tokens")
+                        .and_then(|v| v.as_u64())
+                    {
+                        used.get_or_insert_with(TokenUsage::default).input = n;
+                    }
+                }
                 "message_delta" => {
                     // The final message_delta carries the stop reason; earlier
                     // ones leave it null.
@@ -699,6 +771,12 @@ impl LlmProvider for AnthropicProvider {
                     {
                         terminated = true;
                         truncated |= stop == "max_tokens";
+                    }
+                    if let Some(n) = value
+                        .pointer("/usage/output_tokens")
+                        .and_then(|v| v.as_u64())
+                    {
+                        used.get_or_insert_with(TokenUsage::default).output = n;
                     }
                 }
                 "message_stop" => terminated = true,
@@ -719,6 +797,9 @@ impl LlmProvider for AnthropicProvider {
             Ok(())
         })
         .await?;
+        if let Some(u) = used {
+            usage::record(usage::KIND_ANTHROPIC, &self.model, u);
+        }
         if truncated {
             return Err(truncation_error("stop_reason=max_tokens"));
         }
@@ -810,6 +891,7 @@ impl LlmProvider for ChatGptCodexProvider {
         let mut out = String::new();
         let mut incomplete: Option<String> = None;
         let mut terminated = false;
+        let mut used: Option<TokenUsage> = None;
         for_each_sse_event(resp, |event| {
             if let Some(delta) = parse_sse_output_text_delta(event) {
                 out.push_str(&delta);
@@ -819,9 +901,15 @@ impl LlmProvider for ChatGptCodexProvider {
                 incomplete = sse_event_incomplete_reason(event);
             }
             terminated |= sse_event_is_terminal(event);
+            if let Some(u) = parse_sse_response_usage(event) {
+                used = Some(u);
+            }
             Ok(())
         })
         .await?;
+        if let Some(u) = used {
+            usage::record(usage::KIND_CHATGPT_CODEX, &self.model, u);
+        }
         // Drain the whole stream first so the connection closes cleanly, but
         // never hand back partial text: the caller would write it over the selection.
         if let Some(reason) = incomplete {
@@ -944,6 +1032,25 @@ pub fn sse_event_incomplete_reason(event_block: &str) -> Option<String> {
 
 /// Extract text from an SSE event whose `event:` is `response.output_text.delta`
 /// (or whose JSON `type` field matches). Data may be split across multiple `data:` lines.
+/// `response.usage.{input_tokens,output_tokens}` from a Responses API
+/// `response.completed` (or `response.incomplete`) event; `None` otherwise.
+pub fn parse_sse_response_usage(event_block: &str) -> Option<TokenUsage> {
+    let (event_name, value) = parse_sse_event(event_block)?;
+    let json_type = value.get("type").and_then(|v| v.as_str());
+    let kind = event_name.as_deref().or(json_type)?;
+    if kind != "response.completed" && kind != "response.incomplete" {
+        return None;
+    }
+    let u = value.pointer("/response/usage")?;
+    if u.is_null() {
+        return None;
+    }
+    Some(TokenUsage {
+        input: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        output: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
+}
+
 pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
     let (event_name, value) = parse_sse_event(event_block)?;
     let type_field = value.get("type").and_then(|v| v.as_str());
@@ -1666,6 +1773,176 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
             system: "s".into(),
             user: "u".into(),
         }
+    }
+
+    /// The usage store is process-wide and tests run in parallel: hold this
+    /// while a test sets a store path, and use a unique model id per test so
+    /// concurrent recordings from other tests never match its assertions.
+    static USAGE_STORE_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct UsageStore {
+        path: std::path::PathBuf,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl UsageStore {
+        fn new(tag: &str) -> Self {
+            let guard = USAGE_STORE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+            let path = std::env::temp_dir().join(format!(
+                "selara-usage-test-{}-{tag}.jsonl",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            usage::set_store(Some(path.clone()));
+            Self {
+                path,
+                _guard: guard,
+            }
+        }
+
+        fn model_totals(&self, model: &str) -> Option<(u64, u64, u64)> {
+            let s = usage::summary(&self.path).unwrap();
+            s.models
+                .iter()
+                .find(|m| m.model == model)
+                .map(|m| (m.totals.requests, m.totals.input, m.totals.output))
+        }
+    }
+
+    impl Drop for UsageStore {
+        fn drop(&mut self) {
+            usage::set_store(None);
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_records_usage_from_buffered_reply() {
+        let store = UsageStore::new("openai-buffered");
+        let payload = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}"#;
+        let base = spawn_http(200, payload, "application/json");
+        openai_provider(&base, "usage-test-openai-buffered")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.model_totals("usage-test-openai-buffered"),
+            Some((1, 12, 3))
+        );
+        let s = usage::summary(&store.path).unwrap();
+        let m = &s.models[0];
+        assert_eq!(m.kind, usage::KIND_OPENAI_COMPATIBLE);
+        assert_eq!(m.totals.cost_usd, None, "unknown model has no cost");
+    }
+
+    #[tokio::test]
+    async fn openai_missing_usage_is_skipped() {
+        let store = UsageStore::new("openai-no-usage");
+        let base = spawn_http(200, OPENAI_OK, "application/json");
+        openai_provider(&base, "usage-test-openai-none")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(store.model_totals("usage-test-openai-none"), None);
+    }
+
+    #[tokio::test]
+    async fn openai_stream_records_final_usage_chunk() {
+        let store = UsageStore::new("openai-stream");
+        let d1 = openai_delta("\"Hello\"");
+        let fin = openai_finish("stop");
+        let usage_chunk =
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5}}\n\n";
+        let (base, rx) = spawn_http_chunked(
+            200,
+            "text/event-stream",
+            vec![&d1, &fin, usage_chunk, "data: [DONE]\n\n"],
+        );
+        let out = openai_provider(&base, "usage-test-openai-stream")
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap();
+        assert_eq!(out, "Hello");
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["stream_options"]["include_usage"], true, "{sent}");
+        assert_eq!(
+            store.model_totals("usage-test-openai-stream"),
+            Some((1, 20, 5))
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_records_usage_from_buffered_reply() {
+        let store = UsageStore::new("anthropic-buffered");
+        let payload = r#"{"content":[{"type":"text","text":"claude-ok"}],"stop_reason":"end_turn","usage":{"input_tokens":30,"output_tokens":7}}"#;
+        let base = spawn_http(200, payload, "application/json");
+        AnthropicProvider {
+            api_key: "k".into(),
+            model: "usage-test-anthropic-buffered".into(),
+            base_url: base,
+        }
+        .complete(simple_req())
+        .await
+        .unwrap();
+        assert_eq!(
+            store.model_totals("usage-test-anthropic-buffered"),
+            Some((1, 30, 7))
+        );
+        let s = usage::summary(&store.path).unwrap();
+        assert_eq!(s.models[0].kind, usage::KIND_ANTHROPIC);
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_records_start_and_delta_usage() {
+        let store = UsageStore::new("anthropic-stream");
+        let start = anthropic_event(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"m1","role":"assistant","content":[],"usage":{"input_tokens":41,"output_tokens":1}}}"#,
+        );
+        let d1 = anthropic_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+        );
+        let msg_delta = anthropic_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}"#,
+        );
+        let stop = anthropic_event("message_stop", r#"{"type":"message_stop"}"#);
+        let (base, _rx) = spawn_http_chunked(
+            200,
+            "text/event-stream",
+            vec![&start, &d1, &msg_delta, &stop],
+        );
+        let mut provider = anthropic_provider(base);
+        provider.model = "usage-test-anthropic-stream".into();
+        let out = provider
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap();
+        assert_eq!(out, "hi");
+        assert_eq!(
+            store.model_totals("usage-test-anthropic-stream"),
+            Some((1, 41, 9))
+        );
+    }
+
+    #[test]
+    fn codex_usage_parses_response_completed_only() {
+        let done = "event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"total_tokens\":125}}}\n";
+        assert_eq!(
+            parse_sse_response_usage(done),
+            Some(TokenUsage {
+                input: 100,
+                output: 25
+            })
+        );
+        let delta = "event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n";
+        assert_eq!(parse_sse_response_usage(delta), None);
+        let no_usage =
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n";
+        assert_eq!(parse_sse_response_usage(no_usage), None);
     }
 
     const OPENAI_OK: &str =

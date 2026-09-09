@@ -7,6 +7,7 @@ use selara_core::commands::{
 };
 use selara_core::config::{ApiKeySource, AppConfig};
 use selara_core::secrets;
+use selara_core::usage;
 
 #[cfg(target_os = "macos")]
 mod serve;
@@ -49,6 +50,8 @@ enum Action {
     },
     /// Start the desktop shell (global hotkey + picker UI). macOS only for now.
     Serve,
+    /// Show tokens used and estimated cost, from the local usage ledger
+    Usage,
     /// Manage the provider API key in the OS keychain
     Key {
         #[command(subcommand)]
@@ -114,6 +117,8 @@ fn main() -> Result<()> {
 }
 
 async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
+    // Every command below may talk to a provider; record what it used.
+    usage::set_store(Some(usage::usage_path(&config_path)));
     match command {
         Action::Init => {
             let cfg = AppConfig::load_or_init(&config_path)?;
@@ -221,8 +226,66 @@ async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
                 result?;
             }
         }
+        Action::Usage => {
+            let path = usage::usage_path(&config_path);
+            let summary = usage::summary(&path)?;
+            print!("{}", format_usage_table(&summary));
+        }
         Action::Serve => unreachable!("handled in main"),
     }
 
     Ok(())
+}
+
+/// Render the ledger summary as a small fixed-width table.
+fn format_usage_table(summary: &usage::UsageSummary) -> String {
+    fn cost(bucket: &usage::UsageBucket) -> String {
+        match bucket.cost_usd {
+            Some(c) if bucket.unpriced > 0 => format!("~${c:.4} (+{} unpriced)", bucket.unpriced),
+            Some(c) => format!("~${c:.4}"),
+            None => "n/a".to_string(),
+        }
+    }
+    let mut out = String::new();
+    out.push_str(&format!("ledger: {}\n\n", summary.path));
+    out.push_str(&format!(
+        "{:<12} {:>9} {:>12} {:>12}  {}\n",
+        "window", "requests", "tokens in", "tokens out", "est. cost"
+    ));
+    for (label, b) in [
+        ("today", &summary.today),
+        ("last 30 days", &summary.last_30_days),
+        ("all time", &summary.all_time),
+    ] {
+        out.push_str(&format!(
+            "{label:<12} {:>9} {:>12} {:>12}  {}\n",
+            b.requests,
+            b.input,
+            b.output,
+            cost(b)
+        ));
+    }
+    if summary.models.is_empty() {
+        out.push_str("\nno requests recorded yet\n");
+    } else {
+        out.push_str(&format!(
+            "\n{:<18} {:<32} {:>9} {:>12} {:>12}  {}\n",
+            "provider", "model", "requests", "tokens in", "tokens out", "est. cost"
+        ));
+        for m in &summary.models {
+            out.push_str(&format!(
+                "{:<18} {:<32} {:>9} {:>12} {:>12}  {}\n",
+                m.kind,
+                m.model,
+                m.totals.requests,
+                m.totals.input,
+                m.totals.output,
+                cost(&m.totals)
+            ));
+        }
+    }
+    out.push_str(
+        "\ncosts are estimates from a built-in list-price table; local only, never sent anywhere\n",
+    );
+    out
 }
