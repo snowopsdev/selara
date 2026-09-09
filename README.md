@@ -143,7 +143,7 @@ Guard rails for large selections. Set any value to `0` to disable it. The soft w
 
 ## Providers and config
 
-Default config path: `~/.config/selara/config.toml`.
+Default config path: `~/.config/selara/config.toml`. The file is written atomically (temp file + rename) with owner-only permissions (`0600`), and the Settings app saves one tab at a time, so a change made in `serve`'s Limits page is never overwritten by a save in another tab. A `schema_version` key records the file format (currently `1`).
 
 | `kind` | Wire format | Default `base_url` |
 |---|---|---|

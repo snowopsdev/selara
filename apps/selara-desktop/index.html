@@ -640,10 +640,11 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "</div>" +
       "<div class=\"general-save\"><button class=\"btn\" id=\"save-general\">Save changes</button></div>";
     $("#save-general").onclick = async () => {
-      config.language = $("#language").value.trim() || "en";
-      config.hotkey = $("#hotkey").value.trim() || "ctrl+shift+space";
-      config.undo_hotkey = $("#undo-hotkey").value.trim() || null;
-      await saveConfig();
+      await saveSection("general", {
+        language: $("#language").value.trim() || "en",
+        hotkey: $("#hotkey").value.trim() || "ctrl+shift+space",
+        undo_hotkey: $("#undo-hotkey").value.trim() || null,
+      });
     };
   }
 
@@ -983,14 +984,13 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         return;
       }
       const a = $("#provider-auth").value || "api_key";
-      config.provider = {
+      await saveSection("provider", {
         kind: $("#provider-kind").value,
         model: model,
         base_url: $("#base_url") ? $("#base_url").value.trim() : "",
         api_key: ($("#api_key") && $("#api_key").value.trim()) || null,
         auth: a,
-      };
-      await saveConfig();
+      });
     };
 
     const loginBtn = $("#chatgpt-login");
@@ -1155,7 +1155,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       label: src.label + " copy",
       hotkey: null,
     }));
-    await saveConfig();
+    await saveSection("commands", config.commands);
     renderCommands();
   }
 
@@ -1164,7 +1164,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     if (!confirm("Delete “" + (c ? c.label : id) + "”?")) return false;
     config.commands = config.commands.filter((x) => x.id !== id);
     if (editingId === id) editingId = null;
-    await saveConfig();
+    await saveSection("commands", config.commands);
     renderCommands();
     return true;
   }
@@ -1266,7 +1266,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         const newId = slug(label) + "-" + Math.random().toString(36).slice(2, 7);
         config.commands.push({ id: newId, label, prompt, kind, hotkey });
       }
-      await saveConfig();
+      await saveSection("commands", config.commands);
       closeCommandSheet();
       renderCommands();
     };
@@ -1306,26 +1306,31 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<button class=\"btn\" id=\"save-limits\">Save changes</button>" +
       "</div>";
     $("#save-limits").onclick = async () => {
-      config.limits = {
+      await saveSection("limits", {
         soft_warn_chars: num($("#soft_warn").value),
         hard_max_chars: num($("#hard_max").value),
         replace_warn_chars: num($("#replace_warn").value),
-      };
-      await saveConfig();
+      });
     };
     $("#reset-limits").onclick = async () => {
-      config.limits = { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000 };
-      await saveConfig();
+      await saveSection("limits", { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000 });
       renderLimits();
     };
   }
 
-  async function saveConfig() {
+  // Save one tab. The backend re-reads config.toml, replaces just this
+  // section, writes atomically, and returns the merged config, so a change
+  // made elsewhere (for example Limits inside `selara serve`) is kept and
+  // shows up here after the save.
+  async function saveSection(section, value) {
     try {
-      await invoke("save_config", { config });
+      const merged = await invoke("save_config_section", { section, value });
+      if (merged && typeof merged === "object") config = merged;
       setStatus("Saved");
+      return true;
     } catch (e) {
       setStatus(String(e));
+      return false;
     }
   }
 
