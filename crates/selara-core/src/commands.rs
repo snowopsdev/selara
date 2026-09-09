@@ -168,29 +168,96 @@ pub struct MergeReport {
     pub hotkeys_dropped: usize,
 }
 
+/// Canonical identity of a hotkey spec, for telling whether two spellings name
+/// the same binding. Mirrors `parse_hotkey` in `selara-platform`: `+`-separated
+/// tokens trimmed and lowercased, modifier and key aliases folded together,
+/// modifier order ignored, and the last key token wins. `None` when the spec
+/// names no key at all, which is what `parse_hotkey` rejects.
+///
+/// Core cannot call `parse_hotkey` directly: it is behind the macOS-only
+/// `global_hotkey` dependency. The two normalizations must agree, so any alias
+/// added to `parse_hotkey` belongs here too.
+pub fn canonical_hotkey(spec: &str) -> Option<String> {
+    // ctrl, alt, shift, meta.
+    let mut mods = [false; 4];
+    let mut key: Option<String> = None;
+    for part in spec.split('+').map(|s| s.trim().to_ascii_lowercase()) {
+        if part.is_empty() {
+            continue;
+        }
+        match part.as_str() {
+            "ctrl" | "control" | "control_l" | "control_r" => mods[0] = true,
+            "alt" | "option" | "opt" => mods[1] = true,
+            "shift" => mods[2] = true,
+            "cmd" | "command" | "super" | "meta" | "win" => mods[3] = true,
+            _ => key = Some(canonical_hotkey_key(&part)),
+        }
+    }
+    let key = key?;
+    let mut out = String::new();
+    for (on, name) in mods.iter().zip(["ctrl", "alt", "shift", "meta"]) {
+        if *on {
+            out.push_str(name);
+            out.push('+');
+        }
+    }
+    out.push_str(&key);
+    Some(out)
+}
+
+/// Fold the key aliases `parse_hotkey` accepts onto a single spelling.
+fn canonical_hotkey_key(token: &str) -> String {
+    match token {
+        "return" => "enter",
+        "esc" => "escape",
+        "del" => "delete",
+        "pgup" => "pageup",
+        "pgdn" => "pagedown",
+        "arrowup" => "up",
+        "arrowdown" => "down",
+        "arrowleft" => "left",
+        "arrowright" => "right",
+        other => other,
+    }
+    .to_string()
+}
+
 /// Merge `incoming` into `existing` according to `mode`. Hotkeys that would
-/// collide with a command already in the list are dropped, never duplicated,
-/// so a reload of `serve` cannot fail on a duplicate binding.
+/// collide with a command already in the list, or with one of `reserved` (the
+/// picker and undo bindings, which `reregister_all` registers first), are
+/// dropped rather than duplicated, so a reload of `serve` cannot fail on a
+/// duplicate binding.
 pub fn merge_commands(
     existing: &mut Vec<WritingCommand>,
     incoming: Vec<WritingCommand>,
     mode: MergeMode,
+    reserved: &[&str],
 ) -> MergeReport {
     let mut report = MergeReport::default();
+    let reserved: Vec<String> = reserved
+        .iter()
+        .filter_map(|spec| canonical_hotkey(spec))
+        .collect();
     for mut cmd in incoming {
         let pos = existing.iter().position(|c| c.id == cmd.id);
-        // Hotkey collisions: compare against everything except the command
-        // this one is about to replace.
-        if let Some(hk) = cmd
-            .hotkey
-            .as_deref()
-            .map(str::trim)
-            .filter(|h| !h.is_empty())
-        {
-            let taken = existing.iter().enumerate().any(|(i, c)| {
-                Some(i) != pos.filter(|_| mode == MergeMode::Replace)
-                    && c.hotkey.as_deref().map(str::trim) == Some(hk)
-            });
+        // A skipped import changes nothing that gets saved, so decide that
+        // before any hotkey accounting: it must not report a dropped hotkey.
+        if pos.is_some() && mode == MergeMode::Skip {
+            report.skipped += 1;
+            continue;
+        }
+        // Hotkey collisions: compare canonical identities, because
+        // `reregister_all` rejects duplicates by parsed hotkey id, not by
+        // spelling. Everything is compared except the command this one is
+        // about to replace.
+        if let Some(hk) = cmd.hotkey.as_deref().and_then(canonical_hotkey) {
+            let replacing = pos.filter(|_| mode == MergeMode::Replace);
+            let taken = reserved.contains(&hk)
+                || existing.iter().enumerate().any(|(i, c)| {
+                    Some(i) != replacing
+                        && c.hotkey.as_deref().and_then(canonical_hotkey).as_deref()
+                            == Some(hk.as_str())
+                });
             if taken {
                 cmd.hotkey = None;
                 report.hotkeys_dropped += 1;
@@ -205,7 +272,7 @@ pub fn merge_commands(
                 existing[i] = cmd;
                 report.replaced += 1;
             }
-            (Some(_), MergeMode::Skip) => report.skipped += 1,
+            (Some(_), MergeMode::Skip) => unreachable!("skips return above"),
             (Some(_), MergeMode::KeepBoth) => {
                 let original = cmd.id.clone();
                 let mut n = 2;
@@ -826,7 +893,7 @@ mod tests {
         let incoming = || vec![pack_cmd("a", Some("ctrl+9")), pack_cmd("c", Some("ctrl+1"))];
 
         let mut e = base();
-        let r = merge_commands(&mut e, incoming(), MergeMode::Skip);
+        let r = merge_commands(&mut e, incoming(), MergeMode::Skip, &[]);
         assert_eq!((r.added, r.replaced, r.skipped), (1, 0, 1));
         assert_eq!(e.len(), 3);
         assert_eq!(e[0].hotkey.as_deref(), Some("ctrl+1"), "existing untouched");
@@ -835,7 +902,7 @@ mod tests {
         assert_eq!(r.hotkeys_dropped, 1);
 
         let mut e = base();
-        let r = merge_commands(&mut e, incoming(), MergeMode::Replace);
+        let r = merge_commands(&mut e, incoming(), MergeMode::Replace, &[]);
         assert_eq!((r.added, r.replaced, r.skipped), (1, 1, 0));
         assert_eq!(e[0].hotkey.as_deref(), Some("ctrl+9"), "replaced in place");
         assert_eq!(e[0].label, "A");
@@ -845,12 +912,70 @@ mod tests {
 
         let mut e = base();
         e.push(pack_cmd("a-2", None));
-        let r = merge_commands(&mut e, incoming(), MergeMode::KeepBoth);
+        let r = merge_commands(&mut e, incoming(), MergeMode::KeepBoth, &[]);
         assert_eq!((r.added, r.replaced, r.skipped), (2, 0, 0));
         assert_eq!(r.renamed, vec![("a".to_string(), "a-3".to_string())]);
         let renamed = e.iter().find(|c| c.id == "a-3").unwrap();
         assert_eq!(renamed.label, "A (imported)");
         assert_eq!(renamed.hotkey.as_deref(), Some("ctrl+9"));
+    }
+
+    #[test]
+    fn canonical_hotkey_folds_case_spacing_aliases_and_order() {
+        let id = |s: &str| canonical_hotkey(s).unwrap();
+        assert_eq!(id("ctrl+shift+p"), id(" Shift + Control + P "));
+        assert_eq!(id("option+space"), id("ALT+Space"));
+        assert_eq!(id("cmd+return"), id("meta+enter"));
+        assert_eq!(id("ctrl+esc"), id("control+escape"));
+        assert_ne!(id("ctrl+p"), id("ctrl+shift+p"));
+        assert_ne!(id("ctrl+p"), id("cmd+p"));
+        // No key token is what `parse_hotkey` rejects.
+        assert_eq!(canonical_hotkey("ctrl+shift"), None);
+        assert_eq!(canonical_hotkey("   "), None);
+    }
+
+    #[test]
+    fn merge_compares_hotkey_identities_not_spellings() {
+        let mut e = vec![pack_cmd("a", Some("ctrl+shift+p"))];
+        let r = merge_commands(
+            &mut e,
+            vec![pack_cmd("c", Some(" Shift + Control + P "))],
+            MergeMode::KeepBoth,
+            &[],
+        );
+        assert_eq!(r.hotkeys_dropped, 1);
+        assert_eq!(e[1].hotkey, None, "equivalent spelling still collides");
+    }
+
+    #[test]
+    fn merge_reserves_picker_and_undo_hotkeys() {
+        let mut e = vec![pack_cmd("a", None)];
+        let r = merge_commands(
+            &mut e,
+            vec![
+                pack_cmd("c", Some("CTRL + Shift + Space")),
+                pack_cmd("d", Some("cmd+shift+z")),
+            ],
+            MergeMode::KeepBoth,
+            &["ctrl+shift+space", "meta+shift+z"],
+        );
+        assert_eq!(r.hotkeys_dropped, 2);
+        assert_eq!(e[1].hotkey, None, "picker hotkey reserved");
+        assert_eq!(e[2].hotkey, None, "undo hotkey reserved");
+    }
+
+    #[test]
+    fn skipped_commands_do_not_count_as_dropped_hotkeys() {
+        let mut e = vec![pack_cmd("a", Some("ctrl+1"))];
+        let r = merge_commands(
+            &mut e,
+            vec![pack_cmd("a", Some("ctrl+1"))],
+            MergeMode::Skip,
+            &[],
+        );
+        assert_eq!((r.added, r.replaced, r.skipped), (0, 0, 1));
+        assert_eq!(r.hotkeys_dropped, 0, "nothing was kept, nothing dropped");
+        assert_eq!(e[0].hotkey.as_deref(), Some("ctrl+1"));
     }
 
     struct EchoProvider;

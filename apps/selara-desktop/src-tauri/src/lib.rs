@@ -139,7 +139,16 @@ async fn import_commands(
         let incoming = parse_command_pack(&text).map_err(|e| e.to_string())?;
         let cfg_path = AppConfig::default_path();
         let mut cfg = AppConfig::load_or_init(&cfg_path).map_err(|e| e.to_string())?;
-        let report = merge_commands(&mut cfg.commands, incoming, mode);
+        // The picker and undo hotkeys are registered before any command
+        // hotkey, so an import that claims one of them would make the next
+        // `serve` config reload fail instead of activating.
+        let picker = cfg.hotkey.clone();
+        let undo = cfg.undo_hotkey.clone().unwrap_or_default();
+        let mut reserved: Vec<&str> = vec![picker.as_str()];
+        if !undo.trim().is_empty() {
+            reserved.push(undo.as_str());
+        }
+        let report = merge_commands(&mut cfg.commands, incoming, mode, &reserved);
         cfg.save(&cfg_path).map_err(|e| e.to_string())?;
         Ok(Some(report))
     })
