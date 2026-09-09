@@ -604,6 +604,16 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const list = PROVIDERS.open_ai_compatible.presets;
     return list.find((p) => p.id === id) || list[list.length - 1];
   }
+  // The server a credential belongs to. A blank base URL means the OpenAI
+  // default, which is what core falls back to.
+  function endpointOrigin(baseUrl) {
+    const raw = String(baseUrl || "").trim() || PROVIDERS.open_ai_compatible.baseUrl;
+    try {
+      return new URL(raw).origin.toLowerCase();
+    } catch (e) {
+      return raw.replace(/\/+$/, "").toLowerCase();
+    }
+  }
 
   const EYE_SVG =
     "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\">" +
@@ -985,12 +995,25 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       presetSelect.onchange = () => {
         const preset = presetById(presetSelect.value);
         const base = $("#base_url");
+        const previousOrigin = endpointOrigin(base ? base.value : "");
         if (base && preset.id !== "custom") base.value = preset.baseUrl;
+        // A key and a model id belong to the host that issued them. Carrying
+        // them to a different origin would send one vendor's credential to
+        // another server and save a model that host does not serve, so both
+        // fields start over whenever the endpoint moves.
+        const switchedHosts = endpointOrigin(base ? base.value : "") !== previousOrigin;
+        const key = $("#api_key");
+        const model = $("#model");
+        if (switchedHosts) {
+          if (key) key.value = "";
+          if (model) model.value = "";
+        }
         const list = $("#model-options");
         if (list) list.innerHTML = "";
         const modelsHint = $("#byok-models-hint");
         if (modelsHint) modelsHint.textContent = "Type a model id, or load the list from the provider to check the connection.";
         syncProviderUi();
+        if (switchedHosts) setStatus("Switched to " + preset.label + " — enter the API key and model for that endpoint.");
       };
       const baseInput = $("#base_url");
       if (baseInput) baseInput.addEventListener("input", () => { syncPresetFromBaseUrl(); syncProviderUi(); });
