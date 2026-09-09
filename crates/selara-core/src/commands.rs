@@ -80,7 +80,68 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             prompt: "Convert the useful information in the text into a markdown table.".into(),
             hotkey: None,
         },
+        WritingCommand {
+            id: "translate".into(),
+            label: "Translate".into(),
+            kind: CommandKind::Replace,
+            prompt: "Translate the text to {{language}}. Return only the translation.".into(),
+            hotkey: None,
+        },
     ]
+}
+
+/// Values a prompt can reference with `{{name}}` placeholders.
+///
+/// `{{language}}` is the preferred language from config; `{{app}}` is the
+/// frontmost application the selection came from (`serve` only). The selected
+/// text itself is always sent as the user message, so prompts do not need a
+/// placeholder for it. Unknown placeholders are left as written.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PromptVars<'a> {
+    pub language: Option<&'a str>,
+    pub app: Option<&'a str>,
+}
+
+const APP_FALLBACK: &str = "the current application";
+const LANGUAGE_FALLBACK: &str = "the same language as the text";
+
+/// Replace `{{language}}` / `{{app}}` (whitespace inside the braces is
+/// allowed) with their values, or a neutral fallback when unknown.
+pub fn substitute_prompt_vars(template: &str, vars: PromptVars<'_>) -> String {
+    let language = vars
+        .language
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .unwrap_or(LANGUAGE_FALLBACK);
+    let app = vars
+        .app
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .unwrap_or(APP_FALLBACK);
+
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                let key = after[..end].trim();
+                match key {
+                    "language" => out.push_str(language),
+                    "app" => out.push_str(app),
+                    _ => out.push_str(&rest[start..start + 2 + end + 2]),
+                }
+                rest = &after[end + 2..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Output contract appended to the system prompt of every `Replace` command.
@@ -99,7 +160,28 @@ pub fn build_system_prompt(
     custom_instruction: Option<&str>,
     language: Option<&str>,
 ) -> String {
-    let mut system = command.prompt.clone();
+    build_system_prompt_with(
+        command,
+        custom_instruction,
+        PromptVars {
+            language,
+            app: None,
+        },
+    )
+}
+
+/// Like [`build_system_prompt`], with the full set of template variables.
+/// Placeholders are expanded in the command prompt and in the one-off
+/// instruction before anything else is appended.
+pub fn build_system_prompt_with(
+    command: &WritingCommand,
+    custom_instruction: Option<&str>,
+    vars: PromptVars<'_>,
+) -> String {
+    let language = vars.language;
+    let custom_instruction = custom_instruction.map(|c| substitute_prompt_vars(c, vars));
+    let custom_instruction = custom_instruction.as_deref();
+    let mut system = substitute_prompt_vars(&command.prompt, vars);
     if command.kind == CommandKind::Replace {
         system.push('\n');
         system.push_str(REPLACE_OUTPUT_RULES);
@@ -125,10 +207,32 @@ pub async fn run_command(
     custom_instruction: Option<&str>,
     language: Option<&str>,
 ) -> Result<String, CoreError> {
+    run_command_with(
+        provider,
+        command,
+        input,
+        custom_instruction,
+        PromptVars {
+            language,
+            app: None,
+        },
+    )
+    .await
+}
+
+/// [`run_command`] with the full set of prompt variables (`serve` passes the
+/// source application name so `{{app}}` resolves).
+pub async fn run_command_with(
+    provider: &dyn LlmProvider,
+    command: &WritingCommand,
+    input: &str,
+    custom_instruction: Option<&str>,
+    vars: PromptVars<'_>,
+) -> Result<String, CoreError> {
     if input.trim().is_empty() {
         return Err(CoreError::EmptyInput);
     }
-    let system = build_system_prompt(command, custom_instruction, language);
+    let system = build_system_prompt_with(command, custom_instruction, vars);
 
     let out = provider
         .complete(CompletionRequest {
@@ -481,6 +585,68 @@ mod tests {
             clean("```\nHere is the corrected text:\n\"Two cats.\"\n```\n"),
             "Two cats."
         );
+    }
+
+    #[test]
+    fn builtins_include_translate_using_language_placeholder() {
+        let cmds = builtin_commands();
+        let t = cmds
+            .iter()
+            .find(|c| c.id == "translate")
+            .expect("translate builtin");
+        assert_eq!(t.kind, CommandKind::Replace);
+        assert!(t.prompt.contains("{{language}}"));
+        let system = build_system_prompt(t, None, Some("es"));
+        assert!(system.starts_with("Translate the text to es."), "{system}");
+        assert!(
+            !system.contains("{{"),
+            "placeholder must be expanded: {system}"
+        );
+    }
+
+    #[test]
+    fn substitutes_language_and_app_with_whitespace_tolerance() {
+        let vars = PromptVars {
+            language: Some(" fr "),
+            app: Some("Mail"),
+        };
+        assert_eq!(
+            substitute_prompt_vars("Reply in {{language}} for {{ app }}.", vars),
+            "Reply in fr for Mail."
+        );
+    }
+
+    #[test]
+    fn unknown_or_unterminated_placeholders_are_left_alone() {
+        let vars = PromptVars::default();
+        assert_eq!(
+            substitute_prompt_vars("Keep {{selection}} and {{unknown}} and {{", vars),
+            "Keep {{selection}} and {{unknown}} and {{"
+        );
+        assert_eq!(substitute_prompt_vars("no braces", vars), "no braces");
+    }
+
+    #[test]
+    fn missing_values_fall_back_to_neutral_wording() {
+        let vars = PromptVars {
+            language: Some("  "),
+            app: None,
+        };
+        assert_eq!(
+            substitute_prompt_vars("Write in {{language}} as used in {{app}}.", vars),
+            "Write in the same language as the text as used in the current application."
+        );
+    }
+
+    #[test]
+    fn instruction_placeholders_are_expanded_too() {
+        let vars = PromptVars {
+            language: Some("de"),
+            app: Some("Slack"),
+        };
+        let system = build_system_prompt_with(&popup_cmd(), Some("Mention {{app}}."), vars);
+        assert!(system.contains("Additional user instruction: Mention Slack."));
+        assert!(system.contains("Preferred language: de."));
     }
 
     struct EchoProvider;
