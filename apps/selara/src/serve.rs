@@ -1,12 +1,14 @@
 //! macOS desktop shell: global hotkey → command picker → replace / popup.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use eframe::egui;
+use notify::Watcher;
 use selara_core::commands::{run_command, CommandKind, WritingCommand};
 use selara_core::config::{AppConfig, LimitsConfig};
 use selara_platform::macos::{
@@ -71,6 +73,13 @@ struct ServeApp {
     selection: Arc<MacosSelection>,
     hotkey: MacosHotkey,
     config_mtime: Option<SystemTime>,
+    /// Set from the file-system watcher thread when the config directory
+    /// changes; drained once per frame. The watcher is kept alive here.
+    config_dirty: Arc<AtomicBool>,
+    _config_watcher: Option<notify::RecommendedWatcher>,
+    /// Fallback poll so a missed event (or no watcher) still reloads.
+    last_config_poll: Instant,
+    egui_ctx: egui::Context,
     phase: UiPhase,
     /// Text captured at hotkey time (before our window steals focus).
     captured_text: String,
@@ -104,14 +113,17 @@ impl ServeApp {
         let hotkey = MacosHotkey::new();
         // Wake egui when the hotkey fires so a hidden window still updates.
         let egui_ctx = _cc.egui_ctx.clone();
+        let wake_ctx = egui_ctx.clone();
         hotkey.set_wake(move || {
-            egui_ctx.request_repaint();
+            wake_ctx.request_repaint();
         });
         // Must register on the main thread (eframe creation runs there).
         Self::register_hotkeys(&hotkey, &config)?;
         let config_mtime = std::fs::metadata(&config_path)
             .and_then(|m| m.modified())
             .ok();
+        let config_dirty = Arc::new(AtomicBool::new(false));
+        let config_watcher = Self::watch_config(&config_path, &config_dirty, &egui_ctx);
 
         let (job_tx, job_rx) = mpsc::channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -126,6 +138,10 @@ impl ServeApp {
             selection,
             hotkey,
             config_mtime,
+            config_dirty,
+            _config_watcher: config_watcher,
+            last_config_poll: Instant::now(),
+            egui_ctx,
             phase: UiPhase::Hidden,
             captured_text: String::new(),
             captured_app: None,
@@ -141,6 +157,42 @@ impl ServeApp {
             job_tx,
             runtime,
         })
+    }
+
+    /// Watch the config's directory (not the file: atomic saves rename a new
+    /// inode into place) and flag a reload plus a repaint on any change. Returns
+    /// `None` when the watcher cannot be created; the periodic poll still runs.
+    fn watch_config(
+        config_path: &std::path::Path,
+        dirty: &Arc<AtomicBool>,
+        egui_ctx: &egui::Context,
+    ) -> Option<notify::RecommendedWatcher> {
+        let dir = config_path.parent()?.to_path_buf();
+        let dirty = dirty.clone();
+        let ctx = egui_ctx.clone();
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
+                Ok(_) => {
+                    dirty.store(true, Ordering::SeqCst);
+                    ctx.request_repaint();
+                }
+                Err(e) => tracing::warn!("config watcher error: {e}"),
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!("config watcher unavailable ({e}); polling every 5s instead");
+                    return None;
+                }
+            };
+        if let Err(e) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+            tracing::warn!(
+                "cannot watch {} ({e}); polling every 5s instead",
+                dir.display()
+            );
+            return None;
+        }
+        tracing::info!("selara: watching {} for config changes", dir.display());
+        Some(watcher)
     }
 
     fn show_window(&self, ctx: &egui::Context, visible: bool) {
@@ -231,6 +283,16 @@ impl ServeApp {
             .reregister_all(&config.hotkey, &cmd_keys, undo)
             .with_context(|| format!("register hotkeys (picker `{}`)", config.hotkey))?;
         Ok(())
+    }
+
+    /// Reload when the watcher flagged a change, or every 5 s as a fallback.
+    fn poll_config(&mut self) {
+        let dirty = self.config_dirty.swap(false, Ordering::SeqCst);
+        if !dirty && self.last_config_poll.elapsed() < Duration::from_secs(5) {
+            return;
+        }
+        self.last_config_poll = Instant::now();
+        self.maybe_reload_config();
     }
 
     fn maybe_reload_config(&mut self) {
@@ -474,6 +536,7 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
         let tx = self.job_tx.clone();
         let label = cmd.label.clone();
         let generation = self.generation;
+        let wake = self.egui_ctx.clone();
         self.phase = UiPhase::Working {
             label: label.clone(),
         };
@@ -500,6 +563,8 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
                 },
             };
             let _ = tx.send(msg);
+            // The UI may be idling at a slow tick; make it pick the result up now.
+            wake.request_repaint();
         });
     }
 
@@ -592,7 +657,7 @@ impl ServeApp {
 impl eframe::App for ServeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.hotkey.poll();
-        self.maybe_reload_config();
+        self.poll_config();
 
         if let Some(action) = self.hotkey.take_pending() {
             match action {
@@ -621,8 +686,10 @@ impl eframe::App for ServeApp {
         }
 
         if matches!(self.phase, UiPhase::Hidden) {
-            // Keep the event loop alive so hotkey.poll / wake still run after hide.
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            // Hotkeys, config changes, and job results all wake the loop
+            // explicitly; this slow tick only backs up `hotkey.poll()` and the
+            // 5 s config poll, so an idle `serve` stays near zero CPU.
+            ctx.request_repaint_after(Duration::from_secs(1));
             egui::CentralPanel::default().show(ctx, |_ui| {});
             return;
         }
