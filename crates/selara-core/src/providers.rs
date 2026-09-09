@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -16,11 +17,90 @@ use crate::error::CoreError;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Statuses worth one more try: rate limiting and upstream/gateway hiccups.
+/// A 500 is deliberately absent because it usually means the request itself
+/// is bad and would fail again.
+const RETRYABLE_STATUSES: [u16; 4] = [429, 502, 503, 504];
+/// Honour `Retry-After` only when it is short; anything longer is treated as
+/// a normal transient wait so a hostile header cannot stall the hotkey.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(1000);
+const RETRY_JITTER_MS: u64 = 500;
+
+/// One process-wide client so every provider call shares the connection pool
+/// and the TLS configuration instead of rebuilding both per request. A build
+/// failure is cached as the error text and returned on every call rather than
+/// panicking; `reqwest::Error` is not `Clone`, hence the `String`.
+static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+
 pub(crate) fn http_client() -> Result<reqwest::Client, CoreError> {
-    Ok(reqwest::Client::builder()
-        .connect_timeout(HTTP_CONNECT_TIMEOUT)
-        .read_timeout(HTTP_READ_IDLE_TIMEOUT)
-        .build()?)
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                .read_timeout(HTTP_READ_IDLE_TIMEOUT)
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .clone()
+        .map_err(|e| CoreError::Provider(format!("HTTP client: {e}")))
+}
+
+/// Send a request and retry it once on a transient failure: a connect or
+/// timeout error, or a 429/502/503/504 response. Requests whose body cannot be
+/// cloned (streams) are sent once. The second attempt's result is returned
+/// as-is so callers keep shaping errors exactly as they did without retry.
+pub(crate) async fn send_with_retry(
+    builder: reqwest::RequestBuilder,
+    what: &str,
+) -> Result<reqwest::Response, CoreError> {
+    let Some(retry) = builder.try_clone() else {
+        return Ok(builder.send().await?);
+    };
+    let delay = match builder.send().await {
+        Ok(resp) if RETRYABLE_STATUSES.contains(&resp.status().as_u16()) => {
+            let status = resp.status();
+            let delay = retry_delay(retry_after(&resp));
+            tracing::warn!(%what, %status, ?delay, "retrying after transient HTTP status");
+            delay
+        }
+        Ok(resp) => return Ok(resp),
+        Err(e) if e.is_connect() || e.is_timeout() => {
+            let delay = retry_delay(None);
+            tracing::warn!(%what, error = %e, ?delay, "retrying after request error");
+            delay
+        }
+        Err(e) => return Err(e.into()),
+    };
+    tokio::time::sleep(delay).await;
+    Ok(retry.send().await?)
+}
+
+/// `Retry-After` in delay-seconds form, when present and no longer than
+/// [`MAX_RETRY_AFTER`]. HTTP-date form is ignored (falls back to the default).
+fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
+    let secs = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let wait = Duration::from_secs(secs);
+    (wait <= MAX_RETRY_AFTER).then_some(wait)
+}
+
+/// The server's hint if usable, else the base delay plus 0..500 ms of jitter
+/// taken from the clock so simultaneous retries do not line up.
+fn retry_delay(hint: Option<Duration>) -> Duration {
+    hint.unwrap_or_else(|| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0);
+        RETRY_BASE_DELAY + Duration::from_millis(nanos % RETRY_JITTER_MS)
+    })
 }
 
 /// Read the body as text, then JSON. Non-JSON error pages keep the HTTP status.
@@ -40,6 +120,41 @@ async fn json_or_raw(
             text.chars().take(200).collect::<String>()
         ))),
     }
+}
+
+/// Error returned when a provider stopped generating because it hit its output
+/// token limit. Callers replace the user's selection with the result, so a
+/// silently truncated rewrite would destroy text; surfacing it as an error is
+/// the only safe option.
+fn truncation_error(detail: &str) -> CoreError {
+    CoreError::Provider(format!(
+        "output was cut off by the model's token limit ({detail}); \
+         shorten the selection or pick a model with a larger output limit"
+    ))
+}
+
+/// OpenAI reasoning models (`o1`, `o3`, `o4-mini`, `gpt-5*`) reject any
+/// non-default `temperature` with HTTP 400, so the request must omit it. An
+/// optional `openai/` vendor prefix is stripped first because OpenRouter ids
+/// look like `openai/o3`. The `o` + digit rule deliberately excludes ids such
+/// as `omni-moderation`, and `gpt-4o*` never matches because it starts with `gpt-4`.
+pub fn is_reasoning_model(id: &str) -> bool {
+    let lower = id.trim().to_ascii_lowercase();
+    let bare = lower.strip_prefix("openai/").unwrap_or(&lower);
+    let mut chars = bare.chars();
+    let o_series = matches!(
+        (chars.next(), chars.next()),
+        (Some('o'), Some(d)) if d.is_ascii_digit()
+    );
+    o_series || bare.starts_with("gpt-5")
+}
+
+/// `max_tokens` for an Anthropic request sized to the input. A rewrite's output
+/// is roughly the length of its input; at ~4 chars per token, `chars / 2` gives
+/// about 2x headroom. The floor keeps short inputs generous and the ceiling
+/// stays under current model output limits.
+pub fn anthropic_max_tokens(input_chars: usize) -> u32 {
+    (input_chars / 2).clamp(4096, 32_000) as u32
 }
 
 /// Chat Completions `message.content` is a string, or an array of text parts.
@@ -157,14 +272,16 @@ impl LlmProvider for OpenAiCompatibleProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let client = http_client()?;
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": [
                 {"role": "system", "content": req.system},
                 {"role": "user", "content": req.user}
-            ],
-            "temperature": 0.2
+            ]
         });
+        if !is_reasoning_model(&self.model) {
+            body["temperature"] = json!(0.2);
+        }
 
         let mut builder = client.post(url).json(&body);
         if !self.api_key.is_empty() {
@@ -174,10 +291,17 @@ impl LlmProvider for OpenAiCompatibleProvider {
             builder = builder.header(name.as_str(), value.as_str());
         }
 
-        let resp = builder.send().await?;
+        let resp = send_with_retry(builder, "chat completion").await?;
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        }
+        if value
+            .pointer("/choices/0/finish_reason")
+            .and_then(|v| v.as_str())
+            == Some("length")
+        {
+            return Err(truncation_error("finish_reason=length"));
         }
 
         openai_message_content(&value)
@@ -199,22 +323,24 @@ impl LlmProvider for AnthropicProvider {
         let client = http_client()?;
         let body = json!({
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": anthropic_max_tokens(req.user.chars().count()),
             "system": req.system,
             "messages": [
                 {"role": "user", "content": req.user}
             ]
         });
-        let resp = client
+        let builder = client
             .post(url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&body)
-            .send()
-            .await?;
+            .json(&body);
+        let resp = send_with_retry(builder, "anthropic messages").await?;
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        }
+        if value.get("stop_reason").and_then(|v| v.as_str()) == Some("max_tokens") {
+            return Err(truncation_error("stop_reason=max_tokens"));
         }
         // content is an array of blocks; take first text block
         if let Some(arr) = value.get("content").and_then(|v| v.as_array()) {
@@ -279,7 +405,9 @@ impl LlmProvider for ChatGptCodexProvider {
             builder = builder.header("ChatGPT-Account-ID", account_id);
         }
 
-        let resp = builder.send().await?;
+        // Only the initial POST is retried; once the SSE stream is open a
+        // failure mid-stream surfaces to the caller as before.
+        let resp = send_with_retry(builder, "chatgpt codex responses").await?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -291,6 +419,7 @@ impl LlmProvider for ChatGptCodexProvider {
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
         let mut out = String::new();
+        let mut truncated = false;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -298,6 +427,7 @@ impl LlmProvider for ChatGptCodexProvider {
                 if let Some(delta) = parse_sse_output_text_delta(&event) {
                     out.push_str(&delta);
                 }
+                truncated |= sse_event_marks_truncation(&event);
             }
         }
         // Trailing event without final blank line
@@ -305,6 +435,12 @@ impl LlmProvider for ChatGptCodexProvider {
             if let Some(delta) = parse_sse_output_text_delta(&buf) {
                 out.push_str(&delta);
             }
+            truncated |= sse_event_marks_truncation(&buf);
+        }
+        // Drain the whole stream first so the connection closes cleanly, but
+        // never hand back partial text: the caller would write it over the selection.
+        if truncated {
+            return Err(truncation_error("response incomplete: max_output_tokens"));
         }
 
         let trimmed = out.trim().to_string();
@@ -317,9 +453,10 @@ impl LlmProvider for ChatGptCodexProvider {
     }
 }
 
-/// Extract text from an SSE event whose `event:` is `response.output_text.delta`
-/// (or whose JSON `type` field matches). Data may be split across multiple `data:` lines.
-pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
+/// Split one SSE event block into its `event:` name and parsed JSON `data:`
+/// payload. Data may be split across multiple `data:` lines. Returns `None` for
+/// blocks with no data, the `[DONE]` sentinel, or non-JSON data.
+fn parse_sse_event(event_block: &str) -> Option<(Option<String>, serde_json::Value)> {
     let mut event_name: Option<String> = None;
     let mut data_lines: Vec<&str> = Vec::new();
     for line in event_block.lines() {
@@ -337,6 +474,39 @@ pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(&data).ok()?;
+    Some((event_name, value))
+}
+
+/// True when a Responses API terminal event says the output was cut short:
+/// a `response.incomplete` event, a `response.completed` whose `response.status`
+/// is not `completed`, or any terminal event whose
+/// `response.incomplete_details.reason` is `max_output_tokens`.
+pub fn sse_event_marks_truncation(event_block: &str) -> bool {
+    let Some((event_name, value)) = parse_sse_event(event_block) else {
+        return false;
+    };
+    let json_type = value.get("type").and_then(|v| v.as_str());
+    let is_type = |name: &str| event_name.as_deref() == Some(name) || json_type == Some(name);
+    if is_type("response.incomplete") {
+        return true;
+    }
+    let reason = value
+        .pointer("/response/incomplete_details/reason")
+        .and_then(|v| v.as_str());
+    if reason == Some("max_output_tokens") {
+        return true;
+    }
+    if is_type("response.completed") {
+        let status = value.pointer("/response/status").and_then(|v| v.as_str());
+        return status.is_some_and(|s| s != "completed");
+    }
+    false
+}
+
+/// Extract text from an SSE event whose `event:` is `response.output_text.delta`
+/// (or whose JSON `type` field matches). Data may be split across multiple `data:` lines.
+pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
+    let (event_name, value) = parse_sse_event(event_block)?;
     let type_field = value.get("type").and_then(|v| v.as_str());
     let is_delta = event_name.as_deref() == Some("response.output_text.delta")
         || type_field == Some("response.output_text.delta");
@@ -368,7 +538,7 @@ pub async fn list_chatgpt_models() -> Result<Vec<String>, CoreError> {
     if let Some(account_id) = auth.account_id_header() {
         builder = builder.header("ChatGPT-Account-ID", account_id);
     }
-    let resp = builder.send().await?;
+    let resp = send_with_retry(builder, "list models").await?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -509,7 +679,7 @@ async fn send_json(
     builder: reqwest::RequestBuilder,
     what: &str,
 ) -> Result<serde_json::Value, CoreError> {
-    let resp = builder.send().await?;
+    let resp = send_with_retry(builder, what).await?;
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
@@ -734,6 +904,112 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"ab\"}\n";
         http_client().expect("client should build");
     }
 
+    /// The shared client is built once; every call hands back a usable clone.
+    #[tokio::test]
+    async fn http_client_is_shared_and_reusable() {
+        let first = http_client().expect("first client");
+        let second = http_client().expect("second client");
+        let (base, served) = spawn_http_sequence(vec![(200, "{}"), (200, "{}")]);
+        let a = first.get(format!("{base}/a")).send().await.unwrap();
+        assert_eq!(a.status().as_u16(), 200);
+        let b = second.get(format!("{base}/b")).send().await.unwrap();
+        assert_eq!(b.status().as_u16(), 200);
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn retry_delay_uses_short_hint_or_jittered_base() {
+        assert_eq!(
+            retry_delay(Some(Duration::from_secs(3))),
+            Duration::from_secs(3)
+        );
+        for _ in 0..8 {
+            let d = retry_delay(None);
+            assert!(d >= RETRY_BASE_DELAY, "{d:?}");
+            assert!(
+                d < RETRY_BASE_DELAY + Duration::from_millis(RETRY_JITTER_MS),
+                "{d:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_once_after_503_then_succeeds() {
+        let (base, served) =
+            spawn_http_sequence(vec![(503, r#"{"error":"busy"}"#), (200, OPENAI_OK)]);
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_429_honouring_retry_after_zero() {
+        let started = std::time::Instant::now();
+        let (base, served) = spawn_http_sequence_with_headers(vec![
+            (429, "Retry-After: 0\r\n", r#"{"error":"rate limited"}"#),
+            (200, "", OPENAI_OK),
+        ]);
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            started.elapsed() < RETRY_BASE_DELAY,
+            "Retry-After: 0 should skip the default backoff, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_500() {
+        let (base, served) =
+            spawn_http_sequence(vec![(500, r#"{"error":"boom"}"#), (200, OPENAI_OK)]);
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("500"), "{msg}");
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn gives_up_after_second_503() {
+        let (base, served) = spawn_http_sequence(vec![
+            (503, r#"{"error":"busy"}"#),
+            (503, r#"{"error":"still busy"}"#),
+            (200, OPENAI_OK),
+        ]);
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("503"), "{msg}");
+        assert!(
+            msg.contains("still busy"),
+            "second attempt's body expected: {msg}"
+        );
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn list_models_retries_transient_status() {
+        let models = r#"{"data":[{"id":"gpt-4o-mini"}]}"#;
+        let (base, served) =
+            spawn_http_sequence(vec![(504, "<html>timeout</html>"), (200, models)]);
+        let ids = list_provider_models(ProviderKind::OpenAiCompatible, &base, "k")
+            .await
+            .unwrap();
+        assert_eq!(ids, vec!["gpt-4o-mini"]);
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn sse_framing_splits_crlf_and_lf_events() {
         let mut buf = String::from(
@@ -783,28 +1059,310 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
     }
 
     fn spawn_http(status: u16, body: &str, content_type: &str) -> String {
-        use std::io::{Read, Write};
+        spawn_http_capture(status, body, content_type).0
+    }
+
+    /// One-shot fake HTTP server. Reads the full request (headers, then
+    /// `Content-Length` bytes of body), sends the captured request body on the
+    /// returned channel, and answers with the canned response.
+    fn spawn_http_capture(
+        status: u16,
+        body: &str,
+        content_type: &str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::Write;
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let body = body.to_string();
         let content_type = content_type.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 8192];
-            let _ = stream.read(&mut buf);
+            let request_body = read_http_request(&mut stream);
+            let _ = tx.send(request_body);
             let resp = format!(
                 "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = stream.write_all(resp.as_bytes());
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), rx)
+    }
+
+    /// Read one HTTP/1.1 request (headers, then `Content-Length` bytes of
+    /// body) from the stream and return the body.
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let header_end = loop {
+            let n = stream.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                break None;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                break Some(pos + 4);
+            }
+        };
+        let Some(end) = header_end else {
+            return String::new();
+        };
+        let head = String::from_utf8_lossy(&raw[..end]).to_string();
+        let len = head
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case("content-length")
+                    .then(|| v.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        while raw.len() < end + len {
+            let n = stream.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&raw[end..raw.len().min(end + len)]).to_string()
+    }
+
+    /// Fake HTTP server that answers N sequential connections, one canned
+    /// JSON response each, in order. Returns the base URL and a counter of
+    /// requests actually served, so tests can assert how many attempts the
+    /// retry logic made. Every response closes its connection.
+    fn spawn_http_sequence(
+        responses: Vec<(u16, &str)>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        spawn_http_sequence_with_headers(
+            responses
+                .into_iter()
+                .map(|(status, body)| (status, "", body))
+                .collect(),
+        )
+    }
+
+    /// Like [`spawn_http_sequence`] with extra raw header lines per response
+    /// (each terminated by `\r\n`, e.g. `"Retry-After: 0\r\n"`).
+    fn spawn_http_sequence_with_headers(
+        responses: Vec<(u16, &str, &str)>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let responses: Vec<(u16, String, String)> = responses
+            .into_iter()
+            .map(|(s, h, b)| (s, h.to_string(), b.to_string()))
+            .collect();
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&served);
+        std::thread::spawn(move || {
+            for (status, extra_headers, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let _ = read_http_request(&mut stream);
+                counter.fetch_add(1, Ordering::SeqCst);
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), served)
+    }
+
+    fn openai_provider(base: &str, model: &str) -> OpenAiCompatibleProvider {
+        OpenAiCompatibleProvider {
+            base_url: format!("{base}/v1"),
+            api_key: "k".into(),
+            model: model.into(),
+            extra_headers: Vec::new(),
+        }
+    }
+
+    fn simple_req() -> CompletionRequest {
+        CompletionRequest {
+            system: "s".into(),
+            user: "u".into(),
+        }
+    }
+
+    const OPENAI_OK: &str =
+        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+
+    #[test]
+    fn reasoning_model_detection() {
+        for id in [
+            "o4-mini",
+            "o3",
+            "o1-preview",
+            "gpt-5",
+            "gpt-5.4-mini",
+            "openai/o3",
+            "OpenAI/GPT-5",
+        ] {
+            assert!(is_reasoning_model(id), "{id} should be a reasoning model");
+        }
+        for id in [
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "omni-moderation",
+            "llama3.1:8b",
+            "claude-opus-5",
+            "",
+            "o",
+        ] {
+            assert!(
+                !is_reasoning_model(id),
+                "{id} should not be a reasoning model"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_model_request_omits_temperature() {
+        let (base, rx) = spawn_http_capture(200, OPENAI_OK, "application/json");
+        let out = openai_provider(&base, "o4-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert!(
+            sent.get("temperature").is_none(),
+            "reasoning model body must not carry temperature: {sent}"
+        );
+        assert_eq!(sent["model"], "o4-mini");
+    }
+
+    #[tokio::test]
+    async fn non_reasoning_model_request_sends_temperature() {
+        let (base, rx) = spawn_http_capture(200, OPENAI_OK, "application/json");
+        openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["temperature"], 0.2, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn openai_finish_reason_length_is_an_error() {
+        let payload = r#"{"choices":[{"message":{"role":"assistant","content":"partial text"},"finish_reason":"length"}]}"#;
+        let base = spawn_http(200, payload, "application/json");
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off"), "{msg}");
+        assert!(msg.contains("finish_reason=length"), "{msg}");
+        assert!(
+            !msg.contains("partial text"),
+            "must not leak partial output: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_finish_reason_stop_returns_content() {
+        let base = spawn_http(200, OPENAI_OK, "application/json");
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stop_reason_max_tokens_is_an_error() {
+        let payload =
+            r#"{"content":[{"type":"text","text":"partial"}],"stop_reason":"max_tokens"}"#;
+        let base = spawn_http(200, payload, "application/json");
+        let provider = AnthropicProvider {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url: base,
+        };
+        let err = provider.complete(simple_req()).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off"), "{msg}");
+        assert!(msg.contains("stop_reason=max_tokens"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_end_turn_returns_text_and_sizes_max_tokens() {
+        let payload = r#"{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}"#;
+        let (base, rx) = spawn_http_capture(200, payload, "application/json");
+        let provider = AnthropicProvider {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url: base,
+        };
+        let out = provider
+            .complete(CompletionRequest {
+                system: "s".into(),
+                user: "x".repeat(20_000),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out, "done");
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["max_tokens"], 10_000, "{}", sent["max_tokens"]);
+    }
+
+    #[test]
+    fn anthropic_max_tokens_clamps_to_input_size() {
+        assert_eq!(anthropic_max_tokens(0), 4096);
+        assert_eq!(anthropic_max_tokens(100), 4096);
+        assert_eq!(anthropic_max_tokens(8192), 4096);
+        assert_eq!(anthropic_max_tokens(20_000), 10_000);
+        assert_eq!(anthropic_max_tokens(1_000_000), 32_000);
+    }
+
+    #[test]
+    fn sse_truncation_detects_incomplete_terminal_events() {
+        let incomplete = "event: response.incomplete\n\
+data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n";
+        assert!(sse_event_marks_truncation(incomplete));
+
+        let completed_but_cut = "event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n";
+        assert!(sse_event_marks_truncation(completed_but_cut));
+
+        let completed_wrong_status =
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"incomplete\"}}\n";
+        assert!(sse_event_marks_truncation(completed_wrong_status));
+    }
+
+    #[test]
+    fn sse_truncation_ignores_normal_events() {
+        let completed = "event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"incomplete_details\":null}}\n";
+        assert!(!sse_event_marks_truncation(completed));
+
+        let delta = "event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n";
+        assert!(!sse_event_marks_truncation(delta));
+
+        assert!(!sse_event_marks_truncation("data: [DONE]\n"));
+        assert!(!sse_event_marks_truncation("event: ping\n"));
     }
 
     #[tokio::test]
     async fn html_error_page_keeps_http_status() {
-        let base = spawn_http(502, "<html>bad gateway</html>", "text/html");
+        // 502 is retried once, so serve it twice: the error shape must
+        // survive retry exhaustion.
+        let (base, served) = spawn_http_sequence(vec![
+            (502, "<html>bad gateway</html>"),
+            (502, "<html>bad gateway</html>"),
+        ]);
         let provider = OpenAiCompatibleProvider {
             base_url: format!("{base}/v1"),
             api_key: "k".into(),
@@ -827,6 +1385,7 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
             !msg.to_lowercase().contains("error decoding"),
             "must not hide status behind a JSON decode error: {msg}"
         );
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
