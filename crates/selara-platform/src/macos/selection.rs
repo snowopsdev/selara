@@ -681,6 +681,16 @@ impl MacosSelection {
         })
     }
 
+    /// Text sitting on the pasteboard right now, or `None` when it is empty
+    /// or holds nothing but whitespace.
+    ///
+    /// Reads through the same process-wide pasteboard lock as the copy/paste
+    /// fallbacks, so a delayed restore cannot land in the middle of the read.
+    /// Nothing is written and no key event is synthesized.
+    pub fn clipboard_text(&self) -> Result<Option<String>> {
+        Ok(clip_get(&self.clipboard)?.filter(|t| !t.trim().is_empty()))
+    }
+
     fn read_via_clipboard_fallback(&self) -> Result<Option<String>> {
         let snap = snapshot_pasteboard().context("snapshot pasteboard before ⌘C")?;
         clipboard_copy()?;
