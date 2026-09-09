@@ -464,6 +464,11 @@ button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
   font-size: 12.5px; min-width: 0;
 }
 .status-list li > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.check-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 8px; font-size: 12.5px; font-weight: 500; color: var(--text);
+}
+.check-row input[type="checkbox"] { width: auto; height: auto; margin: 0; box-shadow: none; }
 
 .soon {
   border: 1px dashed var(--hairline-strong); border-radius: var(--radius-control); padding: 12px;
@@ -1090,6 +1095,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const byokKey =
       "<div class=\"key-wrap\" id=\"byok-key-wrap\">" +
       "<input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" placeholder=\"API key\" autocomplete=\"off\" aria-label=\"API key\" />" +
+      "<label class=\"check-row\" for=\"store-keychain\"><input type=\"checkbox\" id=\"store-keychain\" checked /> Store in the OS keychain instead of config.toml</label>" +
+      "<p class=\"field-hint\" id=\"key-source-hint\"></p>" +
       "</div>";
 
     s.innerHTML =
@@ -1304,6 +1311,26 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       };
     }
 
+    async function refreshKeySource() {
+      const hint = $("#key-source-hint");
+      if (!hint) return;
+      try {
+        const src = await invoke("api_key_source");
+        const text = {
+          env: "Key comes from SELARA_API_KEY in the environment (overrides everything below).",
+          keychain: "Key is stored in the OS keychain. Leave the field blank to keep it, or type a new one to replace it.",
+          config: "Key is stored in plaintext in config.toml. Save with the keychain box checked to move it.",
+          none: "No key stored yet.",
+        }[src] || "";
+        hint.textContent = text;
+        const clear = $("#clear-keychain");
+        if (clear) clear.style.display = src === "keychain" ? "" : "none";
+      } catch (e) {
+        hint.textContent = "";
+      }
+    }
+    refreshKeySource();
+
     $("#save-models").onclick = async () => {
       const model = currentModelValue();
       if (!model) {
@@ -1311,13 +1338,28 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         return;
       }
       const a = $("#provider-auth").value || "api_key";
-      await saveSection("provider", {
-        kind: $("#provider-kind").value,
+      const kind = $("#provider-kind").value;
+      const typedKey = ($("#api_key") && $("#api_key").value.trim()) || "";
+      const useKeychain = !!($("#store-keychain") && $("#store-keychain").checked);
+      let fileKey = typedKey || null;
+      if (a === "api_key" && typedKey && useKeychain) {
+        try {
+          await invoke("store_api_key", { kind: kind, apiKey: typedKey });
+          fileKey = null;
+          $("#api_key").value = "";
+        } catch (e) {
+          setStatus(String(e));
+          return;
+        }
+      }
+      const saved = await saveSection("provider", {
+        kind: kind,
         model: model,
         base_url: $("#base_url") ? $("#base_url").value.trim() : "",
-        api_key: ($("#api_key") && $("#api_key").value.trim()) || null,
+        api_key: fileKey,
         auth: a,
       });
+      if (saved) refreshKeySource();
     };
 
     const loginBtn = $("#chatgpt-login");

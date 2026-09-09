@@ -29,7 +29,8 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 - **Size limits.** A soft warning, a replace caution, and a hard maximum, so a stray select-all never sends 100k characters to a metered API. They apply to picker and shortcut runs alike.
 - **Live config.** Everything lives in one TOML file. The `serve` process watches the config directory for changes and re-registers hotkeys as soon as the Settings app saves (with a 5-second poll as a fallback), while staying idle otherwise.
 - **Menu-bar Settings app.** A Tauri tray app with Status, General, Models, Commands, and Limits tabs. The Status tab shows whether `serve` is running, whether Accessibility is granted, and whether the provider answers. No Dock icon, closes to the tray.
-- **Scriptable CLI.** `selara init`, `selara list-commands`, and `selara run <command>` for pipelines and quick checks.
+- **Scriptable CLI.** `selara init`, `selara list-commands`, `selara run <command>`, and `selara key set|clear|status` for pipelines and quick checks.
+- **Keys in the keychain.** API keys go into the OS credential store (macOS Keychain) by default; `config.toml` stays free of secrets unless you choose otherwise.
 
 ## How it works
 
@@ -69,13 +70,13 @@ Until the release is signed and notarized by Apple, macOS may report the app as 
    cargo run -p selara -- init
    ```
 
-2. **Set an API key.** The environment variable is preferred:
+2. **Set an API key.** Store it in the OS keychain (macOS Keychain):
 
    ```bash
-   export SELARA_API_KEY=sk-...
+   echo -n sk-... | cargo run -p selara -- key set
    ```
 
-   Or open the Settings app (next section) and paste it into the Models tab. Local servers such as Ollama accept any placeholder key.
+   Or export `SELARA_API_KEY`, which always wins, or open the Settings app (next section) and paste it into the Models tab, where "Store in the OS keychain" is on by default. Local servers such as Ollama accept any placeholder key. Lookup order is environment, keychain, then `provider.api_key` in `config.toml`. macOS asks once per binary before another program may read a keychain item, so `cargo run` builds prompt again after each rebuild; the packaged app does not.
 
 3. **Grant Accessibility.** System Settings → Privacy & Security → Accessibility, then enable Terminal or iTerm (whichever runs `cargo run`) or the `selara` binary itself. macOS may prompt on first launch, and starting `serve` also triggers the prompt.
 
@@ -188,7 +189,7 @@ api_key = "ollama"
 Environment and paths:
 
 - `SELARA_CONFIG_DIR` overrides the config directory (falls back to the legacy `WRITING_TOOLS_CONFIG_DIR`).
-- `SELARA_API_KEY` overrides `provider.api_key` (falls back to the legacy `WRITING_TOOLS_API_KEY`).
+- `SELARA_API_KEY` overrides everything (falls back to the legacy `WRITING_TOOLS_API_KEY`); next comes the OS keychain entry (`selara key set|clear|status`, service `dev.snowops.selara`), then `provider.api_key`.
 - `selara --config <path>` overrides the file for a single CLI invocation.
 - **Migration:** on first load, if the Selara config is missing but `~/.config/writing-tools/config.toml` exists, it is copied into the Selara path (a one-time message is printed).
 - ChatGPT via Codex reads tokens from `~/.codex/auth.json` and needs `codex` on `PATH`.
