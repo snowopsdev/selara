@@ -145,6 +145,24 @@ impl AppConfig {
         dirs_path().join("config.toml")
     }
 
+    /// Refuse a config written by a newer Selara. Deserializing drops fields
+    /// this build does not know, and the next save would write the truncated
+    /// struct back over the file while keeping the newer version number — so
+    /// the newer release's settings would be silently deleted. Failing to
+    /// start is recoverable; a clobbered config is not.
+    fn check_schema_version(&self, path: &Path) -> Result<(), CoreError> {
+        if self.schema_version > CURRENT_SCHEMA_VERSION {
+            return Err(CoreError::Config(format!(
+                "{}: schema_version {} was written by a newer Selara (this build understands up to {}). \
+                 Update Selara, or move that file aside to start from a fresh config.",
+                path.display(),
+                self.schema_version,
+                CURRENT_SCHEMA_VERSION
+            )));
+        }
+        Ok(())
+    }
+
     pub fn load_or_init(path: &Path) -> Result<Self, CoreError> {
         maybe_migrate_legacy_config(path)?;
         if path.exists() {
@@ -152,6 +170,7 @@ impl AppConfig {
             let cfg: AppConfig = toml::from_str(&raw)?;
             // The file may hold an API key; older versions wrote it world-readable.
             restrict_to_owner(path);
+            cfg.check_schema_version(path)?;
             Ok(cfg)
         } else {
             let cfg = Self::default();
@@ -428,6 +447,54 @@ model = "gpt-4o-mini"
         assert_eq!(cfg.schema_version, 1);
         let out = toml::to_string_pretty(&cfg).unwrap();
         assert!(out.contains("schema_version = 1"), "{out}");
+    }
+
+    #[test]
+    fn a_newer_schema_version_is_rejected_and_the_file_is_left_alone() {
+        let dir = scratch_dir("newer-schema");
+        let path = dir.join("config.toml");
+        let raw = format!(
+            r#"schema_version = {}
+future_setting = "kept"
+
+[provider]
+kind = "open_ai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+"#,
+            CURRENT_SCHEMA_VERSION + 1
+        );
+        std::fs::write(&path, &raw).unwrap();
+        let err = AppConfig::load_or_init(&path).unwrap_err().to_string();
+        assert!(
+            err.contains(&(CURRENT_SCHEMA_VERSION + 1).to_string()) && err.contains("newer Selara"),
+            "error must name the version it cannot read: {err}"
+        );
+        // Loading must not have rewritten the file, so the newer release's
+        // fields are still there when it starts again.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_current_and_older_schema_versions_still_load() {
+        let dir = scratch_dir("current-schema");
+        let path = dir.join("config.toml");
+        for version in [1, CURRENT_SCHEMA_VERSION] {
+            let raw = format!(
+                r#"schema_version = {version}
+
+[provider]
+kind = "open_ai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+"#
+            );
+            std::fs::write(&path, raw).unwrap();
+            let cfg = AppConfig::load_or_init(&path).unwrap();
+            assert_eq!(cfg.schema_version, version);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
