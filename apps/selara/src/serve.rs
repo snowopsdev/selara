@@ -1,11 +1,12 @@
 //! macOS desktop shell: global hotkey → command picker → replace / popup.
 
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use eframe::egui;
@@ -175,6 +176,180 @@ fn picker_row_enabled(
     !blocked
 }
 
+/// Id of the command built from free-form text typed into the picker. It is
+/// never written to the config: "Save as command" derives a real id first.
+const ADHOC_ID: &str = "adhoc";
+
+/// How many instructions the picker remembers for ↑ recall.
+const HISTORY_CAP: usize = 10;
+
+/// A one-off command from the text in the picker's filter box. It runs through
+/// the same pipeline as a configured command (rails, streaming, Retry) but
+/// only lives in memory unless the user saves it afterwards.
+fn adhoc_command(text: &str, popup: bool) -> WritingCommand {
+    WritingCommand {
+        id: ADHOC_ID.into(),
+        label: "Instruction".into(),
+        kind: if popup {
+            CommandKind::Popup
+        } else {
+            CommandKind::Replace
+        },
+        prompt: text.trim().to_string(),
+        hotkey: None,
+        model: None,
+    }
+}
+
+fn is_adhoc(cmd: &WritingCommand) -> bool {
+    cmd.id == ADHOC_ID
+}
+
+/// Label for a saved instruction: its first four words.
+fn instruction_label(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().take(4).collect();
+    if words.is_empty() {
+        "Instruction".into()
+    } else {
+        words.join(" ")
+    }
+}
+
+/// `Make it shorter, please!` → `make-it-shorter-please`, the same rule as the
+/// Settings app's `slug`: ASCII alphanumerics kept and lowercased, every other
+/// run collapsed to one dash, no leading or trailing dash, `command` when
+/// nothing is left. Capped at 32 chars so a long label still gives a short id.
+fn slugify(text: &str) -> String {
+    let mut out = String::new();
+    let mut pending_dash = false;
+    for c in text.chars() {
+        if out.len() >= 32 {
+            break;
+        }
+        if c.is_ascii_alphanumeric() {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
+            }
+            pending_dash = false;
+            out.push(c.to_ascii_lowercase());
+        } else {
+            pending_dash = true;
+        }
+    }
+    let out = out.trim_end_matches('-').to_string();
+    if out.is_empty() {
+        "command".into()
+    } else {
+        out
+    }
+}
+
+/// `slug` plus a five-hex-digit tail taken from `seed`, re-derived until the
+/// id is not in `existing`. Deterministic for a given seed so it can be
+/// tested; the caller feeds it the clock, mirroring the random tail the
+/// Settings app appends so two similar instructions never collide.
+fn unique_command_id(slug: &str, existing: &[String], mut seed: u64) -> String {
+    loop {
+        let id = format!("{slug}-{:05x}", seed % 0x10_0000);
+        if !existing.contains(&id) {
+            return id;
+        }
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+    }
+}
+
+/// Turn an instruction that was just run into a command worth keeping: label
+/// from its first words, id from their slug plus a tail unique among
+/// `existing`, the kind it was run as, and no shortcut or model override.
+fn command_from_instruction(text: &str, kind: CommandKind, existing: &[String]) -> WritingCommand {
+    let prompt = text.trim().to_string();
+    let label = instruction_label(&prompt);
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    WritingCommand {
+        id: unique_command_id(&slugify(&label), existing, seed),
+        label,
+        kind,
+        prompt,
+        hotkey: None,
+        model: None,
+    }
+}
+
+/// Remember `text` as the most recent instruction. A repeat moves to the
+/// front instead of appearing twice; only the last `HISTORY_CAP` are kept.
+fn push_history(history: &mut VecDeque<String>, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    history.retain(|h| h != text);
+    history.push_front(text.to_string());
+    history.truncate(HISTORY_CAP);
+}
+
+/// Where ↑ (`delta > 0`, older) or ↓ (`delta < 0`, newer) lands while walking
+/// a history of `len` entries stored newest first. `None` is the empty box:
+/// ↑ from there recalls the newest entry and ↓ from the newest returns to it.
+/// Walking past the oldest entry stays on it.
+fn history_step(current: Option<usize>, len: usize, delta: isize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    match (current, delta.signum()) {
+        (None, 1) => Some(0),
+        (Some(i), 1) => Some((i + 1).min(len - 1)),
+        (Some(0), -1) => None,
+        (Some(i), -1) => Some(i - 1),
+        (current, _) => current,
+    }
+}
+
+/// One row of the picker list. The instruction row exists only while the
+/// filter box has text and always sits first, so ↑ from the first match
+/// reaches it.
+#[derive(Debug, Clone, Copy)]
+enum PickerRow<'a> {
+    Instruction,
+    Command(&'a WritingCommand),
+}
+
+fn picker_rows<'a>(commands: &'a [WritingCommand], filter: &str) -> Vec<PickerRow<'a>> {
+    let mut rows = Vec::new();
+    if !filter.trim().is_empty() {
+        rows.push(PickerRow::Instruction);
+    }
+    rows.extend(
+        filter_commands(commands, filter)
+            .into_iter()
+            .map(PickerRow::Command),
+    );
+    rows
+}
+
+/// Row to highlight after the filter text changes: the first matching command
+/// when there is one (so `proof` + ⏎ still runs Proofread), otherwise the
+/// instruction row.
+fn default_picker_row(rows: &[PickerRow<'_>]) -> usize {
+    rows.iter()
+        .position(|r| matches!(r, PickerRow::Command(_)))
+        .unwrap_or(0)
+}
+
+/// The first `max` characters of `text`, with an ellipsis when it was cut.
+fn ellipsize(text: &str, max: usize) -> String {
+    let short: String = text.chars().take(max).collect();
+    if text.chars().count() > max {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
 const DIGIT_KEYS: [egui::Key; 9] = [
     egui::Key::Num1,
     egui::Key::Num2,
@@ -299,6 +474,19 @@ struct ServeApp {
     picker_selected: usize,
     /// Give the filter box keyboard focus on the next picker frame.
     focus_filter_next_frame: bool,
+    /// Instructions typed into the picker, newest first, for ↑ recall.
+    instruction_history: VecDeque<String>,
+    /// Which history entry the filter box currently shows, if any; `None`
+    /// once the user edits the text or the box is empty again.
+    history_cursor: Option<usize>,
+    /// Put the filter box's caret at the end on the next frame (after a
+    /// recalled instruction replaced its text).
+    filter_caret_to_end: bool,
+    /// The most recent ad-hoc instruction that finished, kept until it is
+    /// saved as a command or another one finishes.
+    last_adhoc: Option<WritingCommand>,
+    /// One-line feedback in the picker and popup (e.g. "Saved as …").
+    picker_notice: String,
 }
 
 impl ServeApp {
@@ -360,6 +548,11 @@ impl ServeApp {
             picker_filter: String::new(),
             picker_selected: 0,
             focus_filter_next_frame: false,
+            instruction_history: VecDeque::new(),
+            history_cursor: None,
+            filter_caret_to_end: false,
+            last_adhoc: None,
+            picker_notice: String::new(),
         })
     }
 
@@ -569,6 +762,8 @@ impl ServeApp {
         self.pending_direct = None;
         self.picker_filter.clear();
         self.picker_selected = 0;
+        self.history_cursor = None;
+        self.picker_notice.clear();
         self.focus_filter_next_frame = true;
         match self.runtime.block_on(self.selection.read_selection()) {
             Ok(Some(snap)) => {
@@ -890,15 +1085,64 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
             }
             JobResult::Success {
                 kind, label, text, ..
-            } => match kind {
-                CommandKind::Popup => {
-                    self.phase = UiPhase::Popup {
-                        title: label,
-                        body: text,
-                    };
+            } => {
+                // A finished instruction is offered for saving: from the
+                // popup right away, or from the picker's banner next time.
+                if self.last_command.as_ref().is_some_and(is_adhoc) {
+                    self.last_adhoc = self.last_command.clone();
                 }
-                CommandKind::Replace => self.replace_selection_with(ctx, text),
-            },
+                match kind {
+                    CommandKind::Popup => {
+                        self.phase = UiPhase::Popup {
+                            title: label,
+                            body: text,
+                        };
+                    }
+                    CommandKind::Replace => self.replace_selection_with(ctx, text),
+                }
+            }
+        }
+    }
+
+    /// Run a command picked in the picker. An ad-hoc instruction is also
+    /// remembered for ↑ recall.
+    fn run_picked(&mut self, cmd: WritingCommand) {
+        if is_adhoc(&cmd) {
+            push_history(&mut self.instruction_history, &cmd.prompt);
+            tracing::info!(
+                "selara: running instruction ({} chars) as {:?}",
+                cmd.prompt.chars().count(),
+                cmd.kind
+            );
+        }
+        self.start_command(cmd);
+    }
+
+    /// Append the last finished instruction to the config as a real command
+    /// and save the file. On failure the command is dropped again and the
+    /// instruction stays offered.
+    fn save_last_adhoc(&mut self) {
+        let Some(adhoc) = self.last_adhoc.take() else {
+            return;
+        };
+        let existing: Vec<String> = self.config.commands.iter().map(|c| c.id.clone()).collect();
+        let cmd = command_from_instruction(&adhoc.prompt, adhoc.kind, &existing);
+        let (id, label) = (cmd.id.clone(), cmd.label.clone());
+        self.config.commands.push(cmd);
+        match self.config.save(&self.config_path) {
+            Ok(()) => {
+                self.config_mtime = std::fs::metadata(&self.config_path)
+                    .and_then(|m| m.modified())
+                    .ok();
+                self.status_line = Self::status_for(&self.config);
+                self.picker_notice = format!("Saved as “{label}” · edit it in Settings → Commands");
+                tracing::info!("selara: saved instruction as command `{id}`");
+            }
+            Err(e) => {
+                self.config.commands.pop();
+                self.last_adhoc = Some(adhoc);
+                self.picker_notice = format!("Save failed: {e}");
+            }
         }
     }
 
@@ -1082,33 +1326,72 @@ impl eframe::App for ServeApp {
         }
 
         // Keyboard-first picker: ↑/↓ move the highlight, Enter runs it, and a
-        // bare 1–9 runs that row while the filter box is empty. The keys are
-        // consumed here, before the panel renders, so the filter box never
-        // sees them (Enter would otherwise drop its focus).
+        // bare 1–9 runs that row while the filter box is empty. Text that is
+        // typed is also an instruction: ⌘⏎ always runs it (⇧⏎ as a popup), and
+        // so does ⏎ on the "Run instruction" row or when nothing matches. ↑ in
+        // an empty box recalls the previous instruction. The keys are consumed
+        // here, before the panel renders, so the filter box never sees them
+        // (Enter would otherwise drop its focus).
         let mut key_run: Option<WritingCommand> = None;
         let mut selection_moved = false;
         if matches!(self.phase, UiPhase::Picker) {
-            let filter_empty = self.picker_filter.is_empty();
-            let (up, down, enter, digit) = ctx.input_mut(|i| {
+            let filter_empty = self.picker_filter.trim().is_empty();
+            let (up, down, cmd_enter, shift_enter, enter, digit) = ctx.input_mut(|i| {
                 let up = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
                 let down = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+                // Most specific first: `consume_key` ignores an extra Shift,
+                // so the bare-Enter check would otherwise swallow ⇧⏎ too.
+                let cmd_enter = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter);
+                let shift_enter = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter);
                 let enter = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
                 let digit = if filter_empty { take_digit(i) } else { None };
-                (up, down, enter, digit)
+                (up, down, cmd_enter, shift_enter, enter, digit)
             });
-            let visible = filter_commands(&self.config.commands, &self.picker_filter);
-            let len = visible.len();
+            // While the box is empty, or still shows a recalled instruction,
+            // ↑/↓ walk the history instead of the rows.
+            let walking_history = (up || down)
+                && (filter_empty || self.history_cursor.is_some())
+                && !self.instruction_history.is_empty();
+            if walking_history {
+                let delta = if up { 1 } else { -1 };
+                self.history_cursor =
+                    history_step(self.history_cursor, self.instruction_history.len(), delta);
+                self.picker_filter = self
+                    .history_cursor
+                    .and_then(|i| self.instruction_history.get(i).cloned())
+                    .unwrap_or_default();
+                self.filter_caret_to_end = true;
+                // A recalled instruction is meant to run as one.
+                self.picker_selected = 0;
+            }
+            let rows = picker_rows(&self.config.commands, &self.picker_filter);
+            let len = rows.len();
             let mut selected = clamp_selection(self.picker_selected, len);
-            if up {
-                selected = next_selection(selected, len, -1);
-                selection_moved = true;
+            if !walking_history {
+                if up {
+                    selected = next_selection(selected, len, -1);
+                    selection_moved = true;
+                }
+                if down {
+                    selected = next_selection(selected, len, 1);
+                    selection_moved = true;
+                }
             }
-            if down {
-                selected = next_selection(selected, len, 1);
-                selection_moved = true;
-            }
-            let run_index = if enter { Some(selected) } else { digit };
-            if let Some(cmd) = run_index.and_then(|idx| visible.get(idx)) {
+            let has_instruction = !self.picker_filter.trim().is_empty();
+            let target: Option<(PickerRow<'_>, bool)> = if cmd_enter && has_instruction {
+                Some((PickerRow::Instruction, false))
+            } else if shift_enter && has_instruction {
+                Some((PickerRow::Instruction, true))
+            } else if enter {
+                rows.get(selected).map(|r| (*r, false))
+            } else {
+                digit.and_then(|d| rows.get(d)).map(|r| (*r, false))
+            };
+            if let Some((row, popup)) = target {
+                let cmd = match row {
+                    PickerRow::Instruction => adhoc_command(&self.picker_filter, popup),
+                    PickerRow::Command(cmd) => cmd.clone(),
+                };
                 let enabled = picker_row_enabled(
                     matches!(cmd.kind, CommandKind::Replace),
                     self.over_hard_max(),
@@ -1116,7 +1399,7 @@ impl eframe::App for ServeApp {
                     self.needs_replace_warn(),
                 );
                 if enabled {
-                    key_run = Some((*cmd).clone());
+                    key_run = Some(cmd);
                 }
             }
             self.picker_selected = selected;
@@ -1136,12 +1419,18 @@ impl eframe::App for ServeApp {
         let mut undo = false;
         let mut write_back: Option<(WriteBack, String)> = None;
         let mut retry = false;
+        let mut save_adhoc = false;
 
         let soft_blocked = matches!(self.phase, UiPhase::Picker) && self.needs_soft_warn();
         let hard_blocked = matches!(self.phase, UiPhase::Picker) && self.over_hard_max();
         let replace_caution = matches!(self.phase, UiPhase::Picker) && self.needs_replace_warn();
         let popup_actions = popup_actions(self.over_hard_max(), self.needs_replace_warn());
         let can_retry = self.last_command.is_some();
+        // The popup shows "Save as command…" only for the instruction it
+        // displays, not for a configured command run after an instruction.
+        let popup_from_adhoc =
+            self.last_adhoc.is_some() && self.last_command.as_ref().is_some_and(is_adhoc);
+        let filter_caret_to_end = std::mem::take(&mut self.filter_caret_to_end);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // The window has no OS title bar; the header row is the drag
@@ -1205,12 +1494,28 @@ impl eframe::App for ServeApp {
                             pending.label
                         ));
                     }
-                    let preview: String = self.captured_text.chars().take(220).collect();
-                    ui.small(if self.captured_text.chars().count() > 220 {
-                        format!("{preview}…")
-                    } else {
-                        preview
-                    });
+                    ui.small(ellipsize(&self.captured_text, 220));
+                    if let Some(adhoc) = &self.last_adhoc {
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.small(format!(
+                                "Last instruction: {}",
+                                ellipsize(&adhoc.prompt, 60)
+                            ));
+                            if ui
+                                .small_button("Save as command…")
+                                .on_hover_text(
+                                    "Add it to your commands, named after its first words",
+                                )
+                                .clicked()
+                            {
+                                save_adhoc = true;
+                            }
+                        });
+                    }
+                    if !self.picker_notice.is_empty() {
+                        ui.small(&self.picker_notice);
+                    }
 
                     if hard_blocked {
                         ui.add_space(6.0);
@@ -1248,30 +1553,102 @@ impl eframe::App for ServeApp {
                     }
 
                     ui.add_space(8.0);
-                    let filter = ui.add(
-                        egui::TextEdit::singleline(&mut self.picker_filter)
-                            .hint_text("Type to filter, ↑↓ to choose, ⏎ to run, 1–9 quick pick")
-                            .desired_width(f32::INFINITY),
-                    );
+                    let filter = egui::TextEdit::singleline(&mut self.picker_filter)
+                        .hint_text("Filter, or type an instruction · ↑ recalls the last one")
+                        .desired_width(f32::INFINITY)
+                        .show(ui);
                     if focus_filter {
-                        filter.request_focus();
+                        filter.response.request_focus();
                     }
-                    if filter.changed() {
-                        self.picker_selected = 0;
+                    if filter_caret_to_end {
+                        let mut state = filter.state;
+                        let end = egui::text::CCursor::new(self.picker_filter.chars().count());
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::one(end)));
+                        state.store(ui.ctx(), filter.response.id);
                     }
+                    let filter_changed = filter.response.changed();
                     ui.add_space(4.0);
 
                     let commands = self.config.commands.clone();
-                    let visible = filter_commands(&commands, &self.picker_filter);
-                    let selected_idx = clamp_selection(self.picker_selected, visible.len());
+                    let filter_text = self.picker_filter.clone();
+                    let rows = picker_rows(&commands, &filter_text);
+                    if filter_changed {
+                        // Typing over a recalled instruction ends the walk.
+                        self.history_cursor = None;
+                        self.picker_selected = default_picker_row(&rows);
+                    }
+                    let selected_idx = clamp_selection(self.picker_selected, rows.len());
                     self.picker_selected = selected_idx;
+                    let quick_pick = filter_text.trim().is_empty();
+                    let no_command_matches =
+                        !rows.iter().any(|r| matches!(r, PickerRow::Command(_)));
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            if visible.is_empty() {
-                                ui.small("No command matches that filter.");
-                            }
-                            for (idx, cmd) in visible.iter().enumerate() {
+                            for (idx, row) in rows.iter().enumerate() {
+                                let selected = idx == selected_idx;
+                                let cmd = match row {
+                                    PickerRow::Command(cmd) => *cmd,
+                                    PickerRow::Instruction => {
+                                        let run_enabled = picker_row_enabled(
+                                            true,
+                                            hard_blocked,
+                                            soft_blocked,
+                                            replace_caution,
+                                        );
+                                        let popup_enabled = picker_row_enabled(
+                                            false,
+                                            hard_blocked,
+                                            soft_blocked,
+                                            replace_caution,
+                                        );
+                                        let resp = ui.add_enabled(
+                                            run_enabled,
+                                            egui::Button::selectable(
+                                                selected,
+                                                (
+                                                    egui::RichText::new("⏎").weak().monospace(),
+                                                    egui::RichText::new("Run instruction")
+                                                        .strong(),
+                                                ),
+                                            )
+                                            .right_text(
+                                                egui::RichText::new("replace").weak().small(),
+                                            )
+                                            .min_size(egui::vec2(ui.available_width(), 28.0)),
+                                        );
+                                        if selected && selection_moved {
+                                            resp.scroll_to_me(None);
+                                        }
+                                        if resp.clicked() {
+                                            clicked = Some(adhoc_command(&filter_text, false));
+                                        }
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.small(
+                                                "⏎ run as Replace · ⇧⏎ run as Popup · ⌘⏎ always runs the instruction",
+                                            );
+                                            if ui
+                                                .add_enabled(
+                                                    popup_enabled,
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Run as Popup")
+                                                            .small(),
+                                                    ),
+                                                )
+                                                .clicked()
+                                            {
+                                                clicked = Some(adhoc_command(&filter_text, true));
+                                            }
+                                        });
+                                        if no_command_matches {
+                                            ui.small("No command matches; ⏎ runs the text as an instruction.");
+                                        }
+                                        ui.add_space(4.0);
+                                        continue;
+                                    }
+                                };
                                 let kind_tag = match cmd.kind {
                                     CommandKind::Replace => "replace",
                                     CommandKind::Popup => "popup",
@@ -1282,8 +1659,9 @@ impl eframe::App for ServeApp {
                                     soft_blocked,
                                     replace_caution,
                                 );
-                                let selected = idx == selected_idx;
-                                let badge = if idx < 9 {
+                                // 1–9 only work while the box is empty, so the
+                                // badges are shown only then.
+                                let badge = if quick_pick && idx < 9 {
                                     format!("{}", idx + 1)
                                 } else {
                                     " ".to_string()
@@ -1304,7 +1682,7 @@ impl eframe::App for ServeApp {
                                     resp.scroll_to_me(None);
                                 }
                                 if resp.clicked() {
-                                    clicked = Some((*cmd).clone());
+                                    clicked = Some(cmd.clone());
                                 }
                             }
                         });
@@ -1455,7 +1833,20 @@ impl eframe::App for ServeApp {
                             {
                                 retry = true;
                             }
+                            if popup_from_adhoc
+                                && ui
+                                    .button("Save as command…")
+                                    .on_hover_text(
+                                        "Add this instruction to your commands, named after its first words",
+                                    )
+                                    .clicked()
+                            {
+                                save_adhoc = true;
+                            }
                         });
+                        if !self.picker_notice.is_empty() {
+                            ui.small(&self.picker_notice);
+                        }
                         ui.add_space(6.0);
                         // Whatever is left above the footer, top-down again so
                         // the result reads normally.
@@ -1507,6 +1898,9 @@ impl eframe::App for ServeApp {
         if save_settings {
             self.save_settings();
         }
+        if save_adhoc {
+            self.save_last_adhoc();
+        }
         if dismiss {
             self.hide(ctx);
         }
@@ -1525,7 +1919,7 @@ impl eframe::App for ServeApp {
             return;
         }
         if let Some(cmd) = clicked {
-            self.start_command(cmd);
+            self.run_picked(cmd);
         }
         if matches!(self.phase, UiPhase::Picker) {
             self.run_pending_if_ready();
@@ -1684,10 +2078,14 @@ pub fn run(config_path: PathBuf) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::{
-        clamp_selection, filter_commands, format_thousands, insert_range, insert_text,
-        next_selection, picker_row_enabled, place_near, popup_actions, remove_pidfile,
-        replace_progress, should_apply_job, write_pidfile, PopupActions,
+        adhoc_command, clamp_selection, command_from_instruction, default_picker_row, ellipsize,
+        filter_commands, format_thousands, history_step, insert_range, insert_text,
+        instruction_label, next_selection, picker_row_enabled, picker_rows, place_near,
+        popup_actions, push_history, remove_pidfile, replace_progress, should_apply_job, slugify,
+        unique_command_id, write_pidfile, PickerRow, PopupActions, ADHOC_ID, HISTORY_CAP,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1968,6 +2366,126 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adhoc_command_runs_the_typed_text_as_replace_or_popup() {
+        let replace = adhoc_command("  make it shorter ", false);
+        assert_eq!(replace.id, ADHOC_ID);
+        assert_eq!(replace.label, "Instruction");
+        assert_eq!(replace.prompt, "make it shorter");
+        assert!(matches!(replace.kind, CommandKind::Replace));
+        assert!(replace.hotkey.is_none() && replace.model.is_none());
+        let popup = adhoc_command("explain this", true);
+        assert!(matches!(popup.kind, CommandKind::Popup));
+    }
+
+    #[test]
+    fn instruction_label_is_the_first_four_words() {
+        assert_eq!(
+            instruction_label("Rewrite this as a limerick about cats"),
+            "Rewrite this as a"
+        );
+        assert_eq!(instruction_label("Shorter"), "Shorter");
+        assert_eq!(instruction_label("   "), "Instruction");
+    }
+
+    #[test]
+    fn slugify_matches_the_settings_app() {
+        assert_eq!(
+            slugify("Make it shorter, please!"),
+            "make-it-shorter-please"
+        );
+        assert_eq!(slugify("  --Rewrite--  "), "rewrite");
+        assert_eq!(slugify("¿¡!?"), "command");
+        assert_eq!(slugify("Übersetze ins Englische"), "bersetze-ins-englische");
+        let long = slugify(&"word ".repeat(20));
+        assert!(long.len() <= 32, "{long}");
+        assert!(!long.ends_with('-'));
+    }
+
+    #[test]
+    fn unique_command_id_skips_ids_that_already_exist() {
+        let first = unique_command_id("shorter", &[], 42);
+        assert!(first.starts_with("shorter-"));
+        assert_eq!(first.len(), "shorter-".len() + 5);
+        // Same seed, but the first candidate is taken: a different tail.
+        let second = unique_command_id("shorter", std::slice::from_ref(&first), 42);
+        assert!(second.starts_with("shorter-"));
+        assert_ne!(first, second);
+        // Deterministic for a seed, so saves are reproducible in tests.
+        assert_eq!(first, unique_command_id("shorter", &[], 42));
+    }
+
+    #[test]
+    fn command_from_instruction_derives_label_id_and_keeps_the_kind() {
+        let existing = vec!["proofread".to_string(), "make-it-shorter-1a2b3".to_string()];
+        let cmd = command_from_instruction(
+            " Make it shorter and punchier ",
+            CommandKind::Popup,
+            &existing,
+        );
+        assert_eq!(cmd.label, "Make it shorter and");
+        assert_eq!(cmd.prompt, "Make it shorter and punchier");
+        assert!(cmd.id.starts_with("make-it-shorter-and-"), "{}", cmd.id);
+        assert!(!existing.contains(&cmd.id));
+        assert!(matches!(cmd.kind, CommandKind::Popup));
+        assert!(cmd.hotkey.is_none() && cmd.model.is_none());
+    }
+
+    #[test]
+    fn push_history_is_newest_first_deduplicated_and_capped() {
+        let mut h = VecDeque::new();
+        push_history(&mut h, "a");
+        push_history(&mut h, "  ");
+        push_history(&mut h, "b");
+        push_history(&mut h, " a ");
+        assert_eq!(h, VecDeque::from(vec!["a".to_string(), "b".to_string()]));
+        for i in 0..20 {
+            push_history(&mut h, &format!("n{i}"));
+        }
+        assert_eq!(h.len(), HISTORY_CAP);
+        assert_eq!(h.front().map(String::as_str), Some("n19"));
+        assert_eq!(h.back().map(String::as_str), Some("n10"));
+    }
+
+    #[test]
+    fn history_step_walks_back_from_the_empty_box_and_forward_to_it() {
+        assert_eq!(history_step(None, 0, 1), None);
+        assert_eq!(history_step(None, 3, 1), Some(0));
+        assert_eq!(history_step(Some(0), 3, 1), Some(1));
+        assert_eq!(history_step(Some(2), 3, 1), Some(2));
+        assert_eq!(history_step(Some(2), 3, -1), Some(1));
+        assert_eq!(history_step(Some(0), 3, -1), None);
+        assert_eq!(history_step(None, 3, -1), None);
+        assert_eq!(history_step(Some(1), 3, 0), Some(1));
+    }
+
+    #[test]
+    fn picker_rows_put_the_instruction_first_only_while_there_is_text() {
+        let all = sample();
+        let empty = picker_rows(&all, "  ");
+        assert_eq!(empty.len(), 3);
+        assert!(matches!(empty[0], PickerRow::Command(_)));
+        assert_eq!(default_picker_row(&empty), 0);
+
+        let matching = picker_rows(&all, "pro");
+        assert_eq!(matching.len(), 3);
+        assert!(matches!(matching[0], PickerRow::Instruction));
+        assert!(matches!(matching[1], PickerRow::Command(c) if c.label == "Proofread"));
+        // ⏎ still runs the first matching command; ↑ reaches the instruction.
+        assert_eq!(default_picker_row(&matching), 1);
+
+        let none = picker_rows(&all, "make it rhyme");
+        assert_eq!(none.len(), 1);
+        assert!(matches!(none[0], PickerRow::Instruction));
+        assert_eq!(default_picker_row(&none), 0);
+    }
+
+    #[test]
+    fn ellipsize_cuts_on_characters() {
+        assert_eq!(ellipsize("abc", 5), "abc");
+        assert_eq!(ellipsize("ééééé", 3), "ééé…");
     }
 
     #[test]
