@@ -17,10 +17,30 @@ use crate::error::CoreError;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Statuses worth one more try: rate limiting and upstream/gateway hiccups.
-/// A 500 is deliberately absent because it usually means the request itself
-/// is bad and would fail again.
+/// Statuses worth one more try for a request that is safe to repeat: rate
+/// limiting and upstream/gateway hiccups. A 500 is deliberately absent because
+/// it usually means the request itself is bad and would fail again.
 const RETRYABLE_STATUSES: [u16; 4] = [429, 502, 503, 504];
+/// The subset where the provider states it never processed the request, so a
+/// repeat cannot duplicate work: 429 is rejected before generation and 503
+/// means the service declined to serve it at all. 502/504 are excluded because
+/// a gateway error can just as easily mean the upstream accepted the request
+/// and is still generating behind a dead hop.
+const UNPROCESSED_STATUSES: [u16; 2] = [429, 503];
+
+/// Whether repeating a request can duplicate work the provider already did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Idempotency {
+    /// Model listings and other reads: a repeat costs nothing, so every
+    /// transient failure is worth another try.
+    Idempotent,
+    /// Completion POSTs: a repeat starts a second generation, which double
+    /// charges the account or doubles local-model work. Neither the OpenAI
+    /// chat API, the Anthropic messages API, nor the Codex responses API
+    /// offers an idempotency key for these, so retries are restricted to
+    /// failures where the provider provably never began the work.
+    NonIdempotent,
+}
 /// Honour `Retry-After` only when it is short; anything longer is treated as
 /// a normal transient wait so a hostile header cannot stall the hotkey.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
@@ -46,26 +66,41 @@ pub(crate) fn http_client() -> Result<reqwest::Client, CoreError> {
         .map_err(|e| CoreError::Provider(format!("HTTP client: {e}")))
 }
 
-/// Send a request and retry it once on a transient failure: a connect or
-/// timeout error, or a 429/502/503/504 response. Requests whose body cannot be
-/// cloned (streams) are sent once. The second attempt's result is returned
-/// as-is so callers keep shaping errors exactly as they did without retry.
+/// Send a request and retry it once on a transient failure. What counts as
+/// transient depends on `idempotency`: an [`Idempotency::Idempotent`] request
+/// retries a connect or timeout error and a 429/502/503/504 response, while a
+/// [`Idempotency::NonIdempotent`] one retries only a connect failure and a
+/// 429/503, the cases where the request never reached generation. Requests
+/// whose body cannot be cloned (streams) are sent once. The second attempt's
+/// result is returned as-is so callers keep shaping errors exactly as they did
+/// without retry.
 pub(crate) async fn send_with_retry(
     builder: reqwest::RequestBuilder,
     what: &str,
+    idempotency: Idempotency,
 ) -> Result<reqwest::Response, CoreError> {
+    let retryable_status = |status: u16| match idempotency {
+        Idempotency::Idempotent => RETRYABLE_STATUSES.contains(&status),
+        Idempotency::NonIdempotent => UNPROCESSED_STATUSES.contains(&status),
+    };
+    // A read or response timeout means the request was already on the wire and
+    // may be generating; only a failure to connect proves nothing was received.
+    let retryable_error = |e: &reqwest::Error| match idempotency {
+        Idempotency::Idempotent => e.is_connect() || e.is_timeout(),
+        Idempotency::NonIdempotent => e.is_connect(),
+    };
     let Some(retry) = builder.try_clone() else {
         return Ok(builder.send().await?);
     };
     let delay = match builder.send().await {
-        Ok(resp) if RETRYABLE_STATUSES.contains(&resp.status().as_u16()) => {
+        Ok(resp) if retryable_status(resp.status().as_u16()) => {
             let status = resp.status();
             let delay = retry_delay(retry_after(&resp));
             tracing::warn!(%what, %status, ?delay, "retrying after transient HTTP status");
             delay
         }
         Ok(resp) => return Ok(resp),
-        Err(e) if e.is_connect() || e.is_timeout() => {
+        Err(e) if retryable_error(&e) => {
             let delay = retry_delay(None);
             tracing::warn!(%what, error = %e, ?delay, "retrying after request error");
             delay
@@ -357,7 +392,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             builder = builder.header(name.as_str(), value.as_str());
         }
 
-        let resp = send_with_retry(builder, "chat completion").await?;
+        let resp = send_with_retry(builder, "chat completion", Idempotency::NonIdempotent).await?;
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
@@ -400,7 +435,8 @@ impl LlmProvider for AnthropicProvider {
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .json(&body);
-        let resp = send_with_retry(builder, "anthropic messages").await?;
+        let resp =
+            send_with_retry(builder, "anthropic messages", Idempotency::NonIdempotent).await?;
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
@@ -473,7 +509,12 @@ impl LlmProvider for ChatGptCodexProvider {
 
         // Only the initial POST is retried; once the SSE stream is open a
         // failure mid-stream surfaces to the caller as before.
-        let resp = send_with_retry(builder, "chatgpt codex responses").await?;
+        let resp = send_with_retry(
+            builder,
+            "chatgpt codex responses",
+            Idempotency::NonIdempotent,
+        )
+        .await?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -615,7 +656,7 @@ pub async fn list_chatgpt_models() -> Result<Vec<String>, CoreError> {
     if let Some(account_id) = auth.account_id_header() {
         builder = builder.header("ChatGPT-Account-ID", account_id);
     }
-    let resp = send_with_retry(builder, "list models").await?;
+    let resp = send_with_retry(builder, "list models", Idempotency::Idempotent).await?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -756,7 +797,8 @@ async fn send_json(
     builder: reqwest::RequestBuilder,
     what: &str,
 ) -> Result<serde_json::Value, CoreError> {
-    let resp = send_with_retry(builder, what).await?;
+    // Only model listings reach this helper, and a listing is a plain GET.
+    let resp = send_with_retry(builder, what, Idempotency::Idempotent).await?;
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
@@ -1040,6 +1082,40 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"ab\"}\n";
             "Retry-After: 0 should skip the default backoff, took {:?}",
             started.elapsed()
         );
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_gateway_errors_on_a_completion_post() {
+        // A 502/504 can arrive after the upstream accepted the request, so
+        // repeating the POST risks a second billed generation.
+        for status in [502, 504] {
+            let (base, served) =
+                spawn_http_sequence(vec![(status, r#"{"error":"gateway"}"#), (200, OPENAI_OK)]);
+            let err = openai_provider(&base, "gpt-4o-mini")
+                .complete(simple_req())
+                .await
+                .unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains(&status.to_string()), "{msg}");
+            assert_eq!(
+                served.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{status} must not be retried on a completion POST"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_gateway_errors_on_an_idempotent_model_listing() {
+        let (base, served) = spawn_http_sequence(vec![
+            (502, r#"{"error":"gateway"}"#),
+            (200, r#"{"data":[{"id":"m"}]}"#),
+        ]);
+        let models = list_provider_models(ProviderKind::OpenAiCompatible, &base, "k")
+            .await
+            .unwrap();
+        assert_eq!(models, vec!["m".to_string()]);
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1535,12 +1611,8 @@ data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",
 
     #[tokio::test]
     async fn html_error_page_keeps_http_status() {
-        // 502 is retried once, so serve it twice: the error shape must
-        // survive retry exhaustion.
-        let (base, served) = spawn_http_sequence(vec![
-            (502, "<html>bad gateway</html>"),
-            (502, "<html>bad gateway</html>"),
-        ]);
+        // A completion POST is not retried on 502, so one response suffices.
+        let (base, served) = spawn_http_sequence(vec![(502, "<html>bad gateway</html>")]);
         let provider = OpenAiCompatibleProvider {
             base_url: format!("{base}/v1"),
             api_key: "k".into(),
@@ -1563,7 +1635,7 @@ data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",
             !msg.to_lowercase().contains("error decoding"),
             "must not hide status behind a JSON decode error: {msg}"
         );
-        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
