@@ -137,3 +137,12 @@ commands.allow = ["check_for_updates"]
 identifier = "allow-install-update"
 description = "Download, install, and restart into the update found by the last check"
 commands.allow = ["install_update"]
+[[permission]]
+identifier = "allow-usage-summary"
+description = "Read the local usage ledger (tokens and estimated cost)"
+commands.allow = ["usage_summary"]
+
+[[permission]]
+identifier = "allow-clear-usage"
+description = "Truncate the local usage ledger"
+commands.allow = ["clear_usage"]
