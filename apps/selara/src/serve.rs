@@ -95,6 +95,36 @@ fn popup_actions(over_hard_max: bool, needs_replace_warn: bool) -> PopupActions 
     }
 }
 
+/// What the captured text came from. A hotkey press with nothing selected
+/// falls back to the clipboard so the command still has something to run on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureSource {
+    Selection,
+    Clipboard,
+}
+
+/// Pick what a hotkey press runs on: the selection when there is one,
+/// otherwise the clipboard.
+///
+/// Whitespace-only text counts as nothing on either side. A selection is kept
+/// verbatim so the captured `AXSelectedTextRange` still spans exactly it;
+/// clipboard text is trimmed, because a copy commonly carries a stray trailing
+/// newline and there is no range it has to stay consistent with.
+fn capture_from(
+    selection: Option<String>,
+    clipboard: Option<String>,
+) -> Option<(String, CaptureSource)> {
+    if let Some(text) = selection.filter(|t| !t.trim().is_empty()) {
+        return Some((text, CaptureSource::Selection));
+    }
+    let text = clipboard?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some((trimmed.to_string(), CaptureSource::Clipboard))
+}
+
 /// Where "Insert below" writes: a zero-length range right after the selection.
 fn insert_range((loc, len): (i64, i64)) -> (i64, i64) {
     (loc + len, 0)
@@ -480,6 +510,8 @@ struct ServeApp {
     /// Matched against each command's `apps` alongside the name.
     captured_bundle_id: Option<String>,
     captured_range: Option<(i64, i64)>,
+    /// Whether `captured_text` is a real selection or the clipboard's contents.
+    source: CaptureSource,
     target_pid: Option<i32>,
     /// Soft-warn acknowledged for the current selection.
     soft_warn_acked: bool,
@@ -568,6 +600,7 @@ impl ServeApp {
             captured_app: None,
             captured_bundle_id: None,
             captured_range: None,
+            source: CaptureSource::Selection,
             target_pid: None,
             soft_warn_acked: false,
             secret_hits: Vec::new(),
@@ -804,23 +837,44 @@ impl ServeApp {
         self.history_cursor = None;
         self.picker_notice.clear();
         self.focus_filter_next_frame = true;
-        match self.runtime.block_on(self.selection.read_selection()) {
-            Ok(Some(snap)) => {
-                self.captured_text = snap.text;
+        let snap = match self.runtime.block_on(self.selection.read_selection()) {
+            Ok(snap) => snap,
+            Err(e) => return Err(format!("{e}")),
+        };
+        // Only reach for the pasteboard when there is nothing selected, so a
+        // normal run never touches it.
+        let clipboard = match snap {
+            Some(_) => None,
+            None => self.selection.clipboard_text().unwrap_or_else(|e| {
+                tracing::warn!("selara: could not read the clipboard ({e})");
+                None
+            }),
+        };
+        let selected = snap.as_ref().map(|s| s.text.clone());
+        let Some((text, source)) = capture_from(selected, clipboard) else {
+            return Err("No text selected and the clipboard is empty.\n\
+                 Select text in another app (or copy some), then press the hotkey again."
+                .into());
+        };
+        self.captured_text = text;
+        self.source = source;
+        match snap {
+            Some(snap) if source == CaptureSource::Selection => {
                 self.captured_app = snap.app_name;
                 self.captured_bundle_id = snap.bundle_id;
                 self.captured_range = snap.range;
-                if self.config.limits.secret_guard {
-                    self.secret_hits = scan_secrets(&self.captured_text);
-                }
-                Ok(true)
             }
-            Ok(None) => Err(
-                "No text selection found.\nSelect text in another app, then press the hotkey again."
-                    .into(),
-            ),
-            Err(e) => Err(format!("{e}")),
+            // Clipboard mode: there is no selection to anchor to, so a Replace
+            // pastes at the caret of whatever app was in front.
+            _ => {
+                self.captured_app = frontmost_app_name();
+                self.captured_range = None;
+            }
         }
+        if self.config.limits.secret_guard {
+            self.secret_hits = scan_secrets(&self.captured_text);
+        }
+        Ok(true)
     }
 
     fn selection_chars(&self) -> u64 {
@@ -1257,7 +1311,13 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
     /// "Replace selection" button.
     fn replace_selection_with(&mut self, ctx: &egui::Context, text: String) {
         let pid = self.target_pid;
-        let original = self.captured_text.clone();
+        // In clipboard mode nothing is selected, so there is no original text
+        // to overwrite: an empty `original` with no range pastes at the caret,
+        // and Undo takes exactly that back out again.
+        let original = match self.source {
+            CaptureSource::Selection => self.captured_text.clone(),
+            CaptureSource::Clipboard => String::new(),
+        };
         let range = self.captured_range;
         self.refocus_target(ctx);
         match self.selection.replace_in_app(pid, &text, &original, range) {
@@ -1623,7 +1683,17 @@ impl eframe::App for ServeApp {
             match &self.phase {
                 UiPhase::Picker => {
                     let chars = self.selection_chars();
-                    ui.label(format!("Selection ({chars} chars)"));
+                    match self.source {
+                        CaptureSource::Selection => {
+                            ui.label(format!("Selection ({chars} chars)"));
+                        }
+                        CaptureSource::Clipboard => {
+                            ui.label(format!("From clipboard ({chars} chars)"));
+                            ui.small(
+                                "Nothing was selected, so Replace commands paste at the caret of the app in front.",
+                            );
+                        }
+                    }
                     if let Some(pending) = &self.pending_direct {
                         ui.small(format!(
                             "{} was triggered by its shortcut and will run once you confirm below.",
@@ -2202,11 +2272,11 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::{
-        adhoc_command, clamp_selection, command_from_instruction, default_picker_row, ellipsize,
-        filter_commands, format_thousands, history_step, insert_range, insert_text,
+        adhoc_command, capture_from, clamp_selection, command_from_instruction, default_picker_row,
+        ellipsize, filter_commands, format_thousands, history_step, insert_range, insert_text,
         instruction_label, next_selection, picker_row_enabled, picker_rows, place_near,
         popup_actions, push_history, replace_progress, secret_banner, should_apply_job, slugify,
-        unique_command_id, PickerRow, PopupActions, ADHOC_ID, HISTORY_CAP,
+        unique_command_id, CaptureSource, PickerRow, PopupActions, ADHOC_ID, HISTORY_CAP,
     };
 
     use selara_core::commands::{commands_for_app, CommandKind, WritingCommand};
@@ -2215,6 +2285,60 @@ mod tests {
     const SIZE: (f64, f64) = (380.0, 440.0);
     /// 1920×1080 display with a 25 pt menu bar and a 70 pt Dock, top-left origin.
     const VISIBLE: (f64, f64, f64, f64) = (0.0, 25.0, 1920.0, 985.0);
+
+    #[test]
+    fn capture_from_prefers_the_selection_over_the_clipboard() {
+        assert_eq!(
+            capture_from(Some("selected".into()), Some("copied".into())),
+            Some(("selected".to_string(), CaptureSource::Selection))
+        );
+    }
+
+    #[test]
+    fn capture_from_keeps_the_selection_verbatim() {
+        // The captured AX range spans the untrimmed text, so trimming here
+        // would make a Replace overwrite the wrong span.
+        assert_eq!(
+            capture_from(Some("  padded  ".into()), None),
+            Some(("  padded  ".to_string(), CaptureSource::Selection))
+        );
+    }
+
+    #[test]
+    fn capture_from_falls_back_to_the_clipboard_when_nothing_is_selected() {
+        assert_eq!(
+            capture_from(None, Some("copied".into())),
+            Some(("copied".to_string(), CaptureSource::Clipboard))
+        );
+    }
+
+    #[test]
+    fn capture_from_trims_the_clipboard_text() {
+        // A copy usually drags a trailing newline along with it.
+        assert_eq!(
+            capture_from(None, Some("  copied\n".into())),
+            Some(("copied".to_string(), CaptureSource::Clipboard))
+        );
+    }
+
+    #[test]
+    fn capture_from_treats_a_whitespace_only_selection_as_nothing_selected() {
+        assert_eq!(
+            capture_from(Some("   \n".into()), Some("copied".into())),
+            Some(("copied".to_string(), CaptureSource::Clipboard))
+        );
+        assert_eq!(capture_from(Some(String::new()), None), None);
+    }
+
+    #[test]
+    fn capture_from_ignores_a_whitespace_only_clipboard() {
+        assert_eq!(capture_from(None, Some("  \t\n".into())), None);
+    }
+
+    #[test]
+    fn capture_from_is_none_when_both_are_empty() {
+        assert_eq!(capture_from(None, None), None);
+    }
 
     #[test]
     fn place_near_offsets_from_the_cursor_when_there_is_room() {

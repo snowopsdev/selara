@@ -280,6 +280,28 @@ pub fn provider_is_hosted(kind: ProviderKind, base_url: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Append the Luhn check digit so a fixture is valid without committing a
+    /// number that looks like a real card.
+    fn luhn_complete(prefix: &str) -> String {
+        for d in b'0'..=b'9' {
+            let candidate = format!("{prefix}{}", d as char);
+            let digits: Vec<u8> = candidate.bytes().map(|b| b - b'0').collect();
+            if luhn_ok(&digits) {
+                return candidate;
+            }
+        }
+        unreachable!("a Luhn check digit always exists");
+    }
+
+    /// Same number with the last digit changed, so Luhn fails.
+    fn bump_last_digit(number: &str) -> String {
+        let mut out: Vec<char> = number.chars().collect();
+        let last = out.len() - 1;
+        let next = (out[last].to_digit(10).unwrap() + 1) % 10;
+        out[last] = char::from_digit(next, 10).unwrap();
+        out.into_iter().collect()
+    }
+
     fn kinds(text: &str) -> Vec<SecretKind> {
         scan_secrets(text).into_iter().map(|h| h.kind).collect()
     }
@@ -342,19 +364,20 @@ mod tests {
 
     #[test]
     fn detects_common_api_key_shapes() {
-        // Fixtures are joined at runtime so no secret-shaped literal sits in
-        // the source (GitHub push protection scans commits for these shapes).
+        // Bodies are placeholder runs, not realistic values, and are joined at
+        // runtime: the detectors only look at the prefix, length, and charset,
+        // so this keeps coverage without a scanner-tripping literal in source.
         let cases: Vec<String> = [
-            ("sk-", "proj-abcdefghijklmnopqrstuvwxyz0123"),
-            ("sk-ant-", "api03-abcdefghijklmnopqrstuvwxyz"),
-            ("sk-or-", "v1-abcdefghijklmnopqrstuvwxyz0123"),
-            ("gsk_", "abcdefghijklmnopqrstuvwxyz012345"),
-            ("AKIA", "IOSFODNN7EXAMPLE"),
-            ("ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"),
-            ("github_pat_", "11ABCDEFG0123456789_abcdefghijklmnop"),
-            ("xoxb-", "1234567890-1234567890-abcdefghijklmnopqrstuvwx"),
-            ("xoxp-", "1234567890-1234567890-abcdefghijklmnopqrstuvwx"),
-            ("AIza", "SyA1234567890abcdefghijklmnopqrstuv"),
+            ("sk-", "proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("sk-ant-", "api03-aaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("sk-or-", "v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("gsk_", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("AKIA", "AAAAAAAAAAAAAAAA"),
+            ("ghp_", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("github_pat_", "11AAAAAAA0000000000_aaaaaaaaaaaaaaaa"),
+            ("xoxb-", "0000000000-0000000000-aaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("xoxp-", "0000000000-0000000000-aaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("AIza", "Syaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         ]
         .iter()
         .map(|(prefix, body)| format!("{prefix}{body}"))
@@ -407,11 +430,14 @@ mod tests {
 
     #[test]
     fn detects_jwts() {
-        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        // base64url of {"a":1} and {"b":2} plus a filler signature: the JWT
+        // shape (three base64url segments, "eyJ" header) without a real token.
+        let jwt = format!("eyJhIjoxfQ.eyJiIjoyfQ.{}", "a".repeat(43));
+        let jwt = jwt.as_str();
         let hits = scan_secrets(&format!("cookie={jwt}; path=/"));
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].kind, SecretKind::Jwt);
-        assert_eq!(hits[0].preview, "eyJhbG…");
+        assert_eq!(hits[0].preview, "eyJhIj…");
         // Two segments, or a non-base64url segment, is not a JWT.
         assert!(kinds("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0").is_empty());
         assert!(kinds("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig+nature/with=pad").is_empty());
@@ -420,37 +446,66 @@ mod tests {
 
     #[test]
     fn detects_card_numbers_that_pass_luhn() {
-        let hits = scan_secrets("Card: 4111 1111 1111 1111 exp 12/29");
+        // Built from a non-branded prefix so no real-looking card literal is
+        // committed; `card` is Luhn-valid by construction.
+        let card = luhn_complete("123456789012345");
+        let spaced = format!(
+            "{} {} {} {}",
+            &card[0..4],
+            &card[4..8],
+            &card[8..12],
+            &card[12..16]
+        );
+        let hits = scan_secrets(&format!("Card: {spaced} exp 12/29"));
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].kind, SecretKind::CardNumber);
-        assert_eq!(hits[0].preview, "4111 1…");
-        assert_eq!(kinds("4111-1111-1111-1111"), vec![SecretKind::CardNumber]);
-        assert_eq!(kinds("4111111111111111"), vec![SecretKind::CardNumber]);
-        // Amex (15) and a 13-digit Visa test number.
-        assert_eq!(kinds("378282246310005"), vec![SecretKind::CardNumber]);
-        assert_eq!(kinds("4222222222222"), vec![SecretKind::CardNumber]);
+        assert_eq!(hits[0].preview, format!("{}…", &spaced[0..6]));
+        assert_eq!(
+            kinds(&spaced.replace(' ', "-")),
+            vec![SecretKind::CardNumber]
+        );
+        assert_eq!(kinds(&card), vec![SecretKind::CardNumber]);
+        // 15- and 13-digit runs are cards too (Amex and old Visa lengths).
+        assert_eq!(
+            kinds(&luhn_complete("12345678901234")),
+            vec![SecretKind::CardNumber]
+        );
+        assert_eq!(
+            kinds(&luhn_complete("123456789012")),
+            vec![SecretKind::CardNumber]
+        );
     }
 
     #[test]
     fn digit_runs_that_are_not_cards_are_ignored() {
+        let card = luhn_complete("123456789012345");
+        let spaced = format!(
+            "{} {} {} {}",
+            &card[0..4],
+            &card[4..8],
+            &card[8..12],
+            &card[12..16]
+        );
         // Fails Luhn.
-        assert!(kinds("4111 1111 1111 1112").is_empty());
+        assert!(kinds(&bump_last_digit(&spaced)).is_empty());
         // Phone number: too short and fails Luhn.
         assert!(kinds("+1 555-123-4567").is_empty());
-        // 12 digits, even though Luhn-valid (4111 1111 1111 -> not valid anyway).
-        assert!(kinds("411111111111").is_empty());
+        // A 12-digit run is too short to be a card, Luhn-valid or not.
+        assert!(kinds(&card[0..12]).is_empty());
         assert!(kinds("123456789012").is_empty());
         // 20+ digit run is not sliced into a card.
-        assert!(kinds("41111111111111110000").is_empty());
+        assert!(kinds(&format!("{card}0000")).is_empty());
         // Double spaces break the run.
-        assert!(kinds("4111  1111  1111  1111").is_empty());
+        assert!(kinds(&spaced.replace(' ', "  ")).is_empty());
     }
 
     #[test]
     fn duplicate_values_are_reported_once_and_kinds_mix() {
-        let text = "key sk-abcdefghijklmnopqrstuvwxyz again sk-abcdefghijklmnopqrstuvwxyz\n\
-                    card 4111 1111 1111 1111";
-        let hits = scan_secrets(text);
+        let card = luhn_complete("123456789012345");
+        let text = format!(
+            "key sk-aaaaaaaaaaaaaaaaaaaaaaaaaa again sk-aaaaaaaaaaaaaaaaaaaaaaaaaa\ncard {card}"
+        );
+        let hits = scan_secrets(&text);
         assert_eq!(hits.len(), 2, "{hits:?}");
         assert_eq!(hits[0].kind, SecretKind::ApiKey);
         assert_eq!(hits[1].kind, SecretKind::CardNumber);
