@@ -39,6 +39,8 @@
     "allow-serve-log",
     "allow-serve-supervisor-status",
     "allow-accessibility-status",
-    "allow-open-accessibility-settings"
+    "allow-open-accessibility-settings",
+    "allow-usage-summary",
+    "allow-clear-usage"
   ]
 }

@@ -1520,6 +1520,7 @@ fn remove_pidfile(path: &Path) {
 pub fn run(config_path: PathBuf) -> Result<()> {
     let config = AppConfig::load_or_init(&config_path)?;
     write_pidfile(&serve_pidfile(&config_path))?;
+    selara_core::usage::set_store(Some(selara_core::usage::usage_path(&config_path)));
     println!("config: {}", config_path.display());
     println!("hotkey: {}", config.hotkey);
     let cmd_shortcuts: Vec<String> = config

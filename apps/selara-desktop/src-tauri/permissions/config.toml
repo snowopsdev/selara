@@ -107,3 +107,13 @@ commands.allow = ["serve_log"]
 identifier = "allow-serve-supervisor-status"
 description = "Report whether the app manages `selara serve`, or an external one runs"
 commands.allow = ["serve_supervisor_status"]
+
+[[permission]]
+identifier = "allow-usage-summary"
+description = "Read the local usage ledger (tokens and estimated cost)"
+commands.allow = ["usage_summary"]
+
+[[permission]]
+identifier = "allow-clear-usage"
+description = "Truncate the local usage ledger"
+commands.allow = ["clear_usage"]

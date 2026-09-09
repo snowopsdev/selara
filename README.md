@@ -31,7 +31,8 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 - **Size limits.** A soft warning, a replace caution, and a hard maximum, so a stray select-all never sends 100k characters to a metered API. They apply to picker and shortcut runs alike.
 - **Live config.** Everything lives in one TOML file. The `serve` process watches the config directory for changes and re-registers hotkeys as soon as the Settings app saves (with a 5-second poll as a fallback), while staying idle otherwise.
 - **Menu-bar Settings app.** A Tauri tray app with Status, General, Models, Commands, and Limits tabs. The Status tab shows whether `serve` is running, whether Accessibility is granted, and whether the provider answers. No Dock icon, closes to the tray.
-- **Scriptable CLI.** `selara init`, `selara list-commands`, `selara run <command>`, and `selara key set|clear|status` for pipelines and quick checks.
+- **Local usage and cost.** Every request's token counts are appended to `usage.jsonl` next to the config, so the Status tab and `selara usage` can show today, last 30 days, and all-time totals with an estimated cost for well-known models. The numbers are local only and never sent anywhere; costs are estimates from a built-in list-price table.
+- **Scriptable CLI.** `selara init`, `selara list-commands`, `selara run <command>`, `selara usage`, and `selara key set|clear|status` for pipelines and quick checks.
 - **Keys in the keychain.** API keys go into the OS credential store (macOS Keychain) by default; `config.toml` stays free of secrets unless you choose otherwise.
 
 ## How it works
@@ -96,12 +97,13 @@ Every tab writes to the same `config.toml`. If `serve` is running, saved changes
 
 ### Status
 
-The tab the app opens on. Four read-only cards answer "is everything in place?" without reading `serve`'s terminal output:
+The tab the app opens on. Five cards answer "is everything in place?" and "what has this cost?" without reading `serve`'s terminal output:
 
 - **selara serve**: whether the shell is running, with its pid. `serve` writes `serve.pid` next to the config file while it runs and removes it on exit; the card shows the path and the command to start it.
 - **Accessibility**: whether macOS Accessibility is granted, with an **Open Accessibility settings** button when it is not. The grant shown is the Settings app's own; the program that runs `serve` (Terminal, iTerm, or the `selara` binary) needs the same grant.
 - **Provider**: the saved provider, model, base URL, and auth mode. **Check connection** lists models with the saved key (or checks the Codex sign-in for ChatGPT via Codex) and reports "Reachable · N models" or the error text. The API key is never displayed.
 - **Shortcuts**: the picker hotkey, the undo hotkey if set, and every command that has its own shortcut.
+- **Usage**: tokens in and out for today, the last 30 days, and all time, with an estimated cost when the model is in the built-in price table ("n/a" for local or unlisted models). The ledger is `usage.jsonl` next to the config, local only and never sent anywhere; **Clear** empties it. Costs are estimates, not a bill.
 
 **Refresh** re-reads the config and re-runs the checks. No screenshot yet; it will be added with the next screenshot pass.
 
@@ -225,7 +227,7 @@ cargo run -p selara -- run proofread --text "Their going to the store tommorow."
 cargo run -p selara -- run summary --text "$(pbpaste)"
 ```
 
-`run` reads stdin when `--text` is omitted, and `--instruct` appends a one-off instruction to the command's prompt.
+`run` reads stdin when `--text` is omitted, and `--instruct` appends a one-off instruction to the command's prompt. `selara usage` prints the local usage ledger as a table (tokens in/out per window and per model, with estimated costs).
 
 ## Status
 

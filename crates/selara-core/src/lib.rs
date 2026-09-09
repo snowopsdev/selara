@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod providers;
 pub mod secrets;
+pub mod usage;
 
 pub use chatgpt_auth::ChatGptAuth;
 pub use codex_cli::CodexLoginStatus;
@@ -21,3 +22,4 @@ pub use providers::{
     take_complete_sse_events, AnthropicProvider, ChatGptCodexProvider, CompletionRequest,
     LlmProvider, OpenAiCompatibleProvider, ProviderKind,
 };
+pub use usage::{TokenUsage, UsageSummary};

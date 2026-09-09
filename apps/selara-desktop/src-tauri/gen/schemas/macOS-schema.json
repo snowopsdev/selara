@@ -423,6 +423,12 @@
           "markdownDescription": "Remove the provider API key from the OS keychain"
         },
         {
+          "description": "Truncate the local usage ledger",
+          "type": "string",
+          "const": "allow-clear-usage",
+          "markdownDescription": "Truncate the local usage ledger"
+        },
+        {
           "description": "Read config file path",
           "type": "string",
           "const": "allow-config-path",
@@ -517,6 +523,12 @@
           "type": "string",
           "const": "allow-store-api-key",
           "markdownDescription": "Store the provider API key in the OS keychain"
+        },
+        {
+          "description": "Read the local usage ledger (tokens and estimated cost)",
+          "type": "string",
+          "const": "allow-usage-summary",
+          "markdownDescription": "Read the local usage ledger (tokens and estimated cost)"
         },
         {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",

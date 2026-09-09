@@ -5,6 +5,7 @@ use selara_core::commands::{
 use selara_core::config::{serve_pidfile, ApiKeySource, AppConfig};
 use selara_core::providers::{list_chatgpt_models, list_provider_models, ProviderKind};
 use selara_core::secrets;
+use selara_core::usage::{self, UsageSummary};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -212,6 +213,21 @@ fn pid_alive(pid: u32) -> bool {
         let _ = pid;
         false
     }
+}
+
+/// Token totals and estimated cost from the local `usage.jsonl` ledger.
+#[tauri::command]
+fn usage_summary() -> Result<UsageSummary, String> {
+    let path = usage::usage_path(&AppConfig::default_path());
+    usage::summary(&path).map_err(|e| e.to_string())
+}
+
+/// Truncate the local usage ledger and return the (now empty) summary.
+#[tauri::command]
+fn clear_usage() -> Result<UsageSummary, String> {
+    let path = usage::usage_path(&AppConfig::default_path());
+    usage::clear(&path).map_err(|e| e.to_string())?;
+    usage::summary(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -603,6 +619,8 @@ pub fn run() {
             list_chatgpt_models_cmd,
             list_provider_models_cmd,
             serve_status,
+            usage_summary,
+            clear_usage,
             serve_start,
             serve_stop,
             serve_restart,
