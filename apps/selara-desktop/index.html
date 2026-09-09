@@ -641,6 +641,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   let chatgptStatus = null;
+  // Sign-in runs off the main thread and the Models section can re-render while it
+  // is in flight, so the pending state has to live outside the button element.
+  let chatgptLoginPending = false;
 
   async function refreshChatgptStatus() {
     try {
@@ -775,7 +778,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         ? "<button class=\"btn secondary\" id=\"chatgpt-logout\">Sign out</button>" +
           "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
           "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>"
-        : "<button class=\"btn\" id=\"chatgpt-login\" title=\"Opens the Codex browser sign-in flow\">Sign in with ChatGPT</button>" +
+        : "<button class=\"btn\" id=\"chatgpt-login\" title=\"Opens the Codex browser sign-in flow\"" +
+          (chatgptLoginPending ? " disabled>Waiting for browser sign-in…" : ">Sign in with ChatGPT") +
+          "</button>" +
           "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
           "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>") +
       "</div>";
@@ -984,17 +989,19 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const loginBtn = $("#chatgpt-login");
     if (loginBtn) {
       loginBtn.onclick = async () => {
+        if (chatgptLoginPending) return;
+        chatgptLoginPending = true;
         setStatus("Opening Codex login…");
         loginBtn.disabled = true;
         loginBtn.textContent = "Waiting for browser sign-in…";
         try {
           chatgptStatus = await invoke("chatgpt_login");
           setStatus(chatgptStatus.logged_in ? "ChatGPT signed in" : chatgptStatus.message);
-          renderModels();
         } catch (e) {
           setStatus(String(e));
-          loginBtn.disabled = false;
-          loginBtn.textContent = "Sign in with ChatGPT";
+        } finally {
+          chatgptLoginPending = false;
+          renderModels();
         }
       };
     }
