@@ -19,7 +19,7 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 ## Features
 
 - **Works everywhere you can select text.** A global hotkey (default `ctrl+shift+space`) reads the selection through macOS Accessibility, with a clipboard fallback for apps that do not expose it.
-- **Replace or popup.** Replace commands (Proofread, Rewrite, Friendly, Professional, Concise) write the result back over the selection. Popup commands (Summary, Key Points, Table) open a scrollable result window with a copy button.
+- **Replace or popup.** Replace commands (Proofread, Rewrite, Friendly, Professional, Concise) write the result back over the selection. Popup commands (Summary, Key Points, Table) open a scrollable result window that renders the markdown (headings, lists, tables) and offers Copy, Replace selection, Insert below, and Retry.
 - **Your prompts.** Every command is a labeled prompt. Edit the built-ins, add your own, duplicate one to make a variation, and search the list. Prompts can use `{{language}}` (your preferred language) and `{{app}}` (the app the selection came from); the built-in **Translate** command is `Translate the text to {{language}}`.
 - **Per-command hotkeys.** Give a command its own shortcut and it runs on the selection immediately, skipping the picker. If the selection trips a size limit, the picker opens with the warning and the command runs once you confirm.
 - **Undo and cancel.** Pressing Escape while a command is running discards its result instead of pasting it later. After a Replace, **Undo last replace** in the picker (or an optional `undo_hotkey`) puts the original text back.
@@ -189,6 +189,8 @@ Supported tokens: `ctrl`/`control`, `shift`, `alt`/`option`, `cmd`/`command`/`su
 
 1. Prefer setting `AXSelectedText` through Accessibility when the focused element supports it.
 2. Otherwise save the clipboard, put the result on it, send ⌘V, and restore the clipboard after about 350 ms.
+
+**Insert below** (from a popup) moves the caret to the end of the captured selection through Accessibility, or with a plain → key press when no selection range was captured, and then writes the result there preceded by a blank line using the same two steps; **Undo last replace** removes exactly the inserted text.
 
 ### Known limitations
 
