@@ -18,6 +18,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent, TerminatedPayload};
 use tauri_plugin_shell::ShellExt;
+use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// Serializes every read-modify-write of config.toml in this process.
 ///
@@ -363,6 +364,8 @@ struct TrayMenu {
     stop: MenuItem<Wry>,
     restart: MenuItem<Wry>,
     login: CheckMenuItem<Wry>,
+    /// "Update to vX.Y.Z…"; disabled with a status text until a check finds one.
+    update: MenuItem<Wry>,
 }
 
 /// Re-sync the tray items and tell the Settings window something changed.
@@ -633,6 +636,188 @@ fn serve_supervisor_status(app: AppHandle) -> SupervisorStatus {
     }
 }
 
+// ---------------------------------------------------------------------------
+// auto-update
+//
+// Releases publish a signed `Selara.app.tar.gz` plus `latest.json`; the
+// updater plugin compares the running version with that manifest. Until a
+// maintainer generates the signing keypair, `tauri.conf.json` carries a
+// placeholder public key and every check must fail closed (no network).
+// ---------------------------------------------------------------------------
+
+/// The `plugins.updater.pubkey` value shipped until a real key is generated.
+const UPDATER_PUBKEY_PLACEHOLDER: &str = "REPLACE_WITH_TAURI_UPDATER_PUBKEY";
+/// First automatic check after launch waits this long so startup stays quick.
+const UPDATE_CHECK_STARTUP_DELAY: Duration = Duration::from_secs(10);
+/// Interval between automatic checks while the app runs.
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Whether the configured updater public key is real. An empty key or the
+/// placeholder means no release could have been signed for this build, so a
+/// check would only ever fail; callers skip the network in that case.
+fn updater_configured(pubkey: &str) -> bool {
+    let key = pubkey.trim();
+    !key.is_empty() && key != UPDATER_PUBKEY_PLACEHOLDER
+}
+
+/// `plugins.updater.pubkey` from the bundled `tauri.conf.json`.
+fn configured_pubkey(app: &AppHandle) -> String {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|v| v.get("pubkey"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Result of an update check, for the Status tab and the tray.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum UpdateStatus {
+    /// The build has no real signing key; checks are skipped.
+    Unconfigured,
+    UpToDate {
+        current: String,
+    },
+    Available {
+        current: String,
+        version: String,
+        notes: Option<String>,
+        date: Option<String>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Default)]
+struct UpdateState {
+    /// The update found by the last check, ready for `install_update`.
+    pending: Mutex<Option<Update>>,
+    /// Last result, so the Status tab can show it without a new check.
+    last: Mutex<Option<UpdateStatus>>,
+}
+
+/// Push the result to the tray item and the Settings window.
+fn apply_update_status(app: &AppHandle, status: &UpdateStatus) {
+    if let Some(menu) = app.try_state::<TrayMenu>() {
+        let (text, enabled) = match status {
+            UpdateStatus::Unconfigured => ("Updates not configured".to_string(), false),
+            UpdateStatus::UpToDate { current } => {
+                (format!("Selara v{current} is up to date"), false)
+            }
+            UpdateStatus::Available { version, .. } => (format!("Update to v{version}…"), true),
+            UpdateStatus::Error { .. } => ("Update check failed".to_string(), false),
+        };
+        let _ = menu.update.set_text(text);
+        let _ = menu.update.set_enabled(enabled);
+    }
+    let _ = app.emit("update-changed", status.clone());
+}
+
+/// Ask the release feed for a newer build. Never contacts the network while
+/// the placeholder public key is configured.
+async fn perform_update_check(app: &AppHandle) -> UpdateStatus {
+    let current = app.package_info().version.to_string();
+    let state = app.state::<UpdateState>();
+    let status = if !updater_configured(&configured_pubkey(app)) {
+        UpdateStatus::Unconfigured
+    } else {
+        let result = async {
+            let updater = app.updater().map_err(|e| e.to_string())?;
+            updater.check().await.map_err(|e| e.to_string())
+        }
+        .await;
+        match result {
+            Ok(Some(update)) => {
+                let status = UpdateStatus::Available {
+                    current,
+                    version: update.version.clone(),
+                    notes: update.body.clone(),
+                    date: update.date.map(|d| d.to_string()),
+                };
+                *lock(&state.pending) = Some(update);
+                status
+            }
+            Ok(None) => UpdateStatus::UpToDate { current },
+            Err(message) => UpdateStatus::Error { message },
+        }
+    };
+    if !matches!(status, UpdateStatus::Available { .. }) {
+        *lock(&state.pending) = None;
+    }
+    *lock(&state.last) = Some(status.clone());
+    apply_update_status(app, &status);
+    status
+}
+
+/// Download and install the pending update (checking first when there is
+/// none), stop the managed `serve`, and relaunch into the new build.
+async fn perform_update_install(app: &AppHandle) -> Result<(), String> {
+    let pending = lock(&app.state::<UpdateState>().pending).clone();
+    let update = match pending {
+        Some(update) => update,
+        None => match perform_update_check(app).await {
+            UpdateStatus::Available { .. } => lock(&app.state::<UpdateState>().pending)
+                .clone()
+                .ok_or_else(|| "update vanished between check and install".to_string())?,
+            UpdateStatus::UpToDate { current } => {
+                return Err(format!("Selara v{current} is already the latest version"))
+            }
+            UpdateStatus::Unconfigured => {
+                return Err(
+                    "this build has no updater signing key; download releases from GitHub"
+                        .to_string(),
+                )
+            }
+            UpdateStatus::Error { message } => return Err(message),
+        },
+    };
+    app.state::<Supervisor>()
+        .push_log(format!("[updater] installing v{}", update.version));
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| format!("could not install update: {e}"))?;
+    // Take the sidecar down first so the relaunched app can start its own.
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = stop_serve(&handle);
+        handle.restart();
+    })
+    .await
+    .map_err(|e| format!("restart task failed: {e}"))
+}
+
+/// Startup + every 24 h: check in the background; `apply_update_status`
+/// lights up the tray item when something is found.
+fn spawn_update_checks(app: AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(UPDATE_CHECK_STARTUP_DELAY);
+        loop {
+            tauri::async_runtime::block_on(perform_update_check(&app));
+            std::thread::sleep(UPDATE_CHECK_INTERVAL);
+        }
+    });
+}
+
+#[tauri::command]
+fn app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+#[tauri::command]
+async fn check_for_updates(app: AppHandle) -> Result<UpdateStatus, String> {
+    Ok(perform_update_check(&app).await)
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    perform_update_install(&app).await
+}
+
 fn show_settings<R: Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
@@ -649,7 +834,10 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(Supervisor::default())
+        .manage(UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
@@ -672,7 +860,10 @@ pub fn run() {
             serve_log,
             serve_supervisor_status,
             accessibility_status,
-            open_accessibility_settings
+            open_accessibility_settings,
+            app_version,
+            check_for_updates,
+            install_update
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -693,6 +884,15 @@ pub fn run() {
                 login_checked,
                 None::<&str>,
             )?;
+            let check_update_i = MenuItem::with_id(
+                app,
+                "update-check",
+                "Check for updates…",
+                true,
+                None::<&str>,
+            )?;
+            let update_i =
+                MenuItem::with_id(app, "update", "No update checked yet", false, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
@@ -705,6 +905,9 @@ pub fn run() {
                     &PredefinedMenuItem::separator(app)?,
                     &login_i,
                     &PredefinedMenuItem::separator(app)?,
+                    &check_update_i,
+                    &update_i,
+                    &PredefinedMenuItem::separator(app)?,
                     &quit_i,
                 ],
             )?;
@@ -713,6 +916,7 @@ pub fn run() {
                 stop: stop_i,
                 restart: restart_i,
                 login: login_i,
+                update: update_i,
             });
 
             let mut tray = TrayIconBuilder::new()
@@ -747,6 +951,23 @@ pub fn run() {
                                 .push_log(format!("[supervisor] start at login: {e}"));
                         }
                         notify(app);
+                    }
+                    "update-check" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            perform_update_check(&app).await;
+                        });
+                    }
+                    "update" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = perform_update_install(&app).await {
+                                app.state::<Supervisor>().push_log(format!("[updater] {e}"));
+                                let status = UpdateStatus::Error { message: e };
+                                *lock(&app.state::<UpdateState>().last) = Some(status.clone());
+                                apply_update_status(&app, &status);
+                            }
+                        });
                     }
                     "quit" => app.exit(0),
                     _ => {}
@@ -799,6 +1020,7 @@ pub fn run() {
             // The event loop is up: start `serve` unless one already runs.
             RunEvent::Ready => {
                 let app = app.clone();
+                spawn_update_checks(app.clone());
                 std::thread::spawn(move || {
                     let _ = start_serve(&app);
                 });
@@ -809,4 +1031,27 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{updater_configured, UPDATER_PUBKEY_PLACEHOLDER};
+
+    #[test]
+    fn placeholder_and_empty_pubkeys_fail_closed() {
+        assert!(!updater_configured(UPDATER_PUBKEY_PLACEHOLDER));
+        assert!(!updater_configured(&format!(
+            "  {UPDATER_PUBKEY_PLACEHOLDER}\n"
+        )));
+        assert!(!updater_configured(""));
+        assert!(!updater_configured("   "));
+    }
+
+    #[test]
+    fn real_pubkey_is_configured() {
+        // Shape of a `tauri signer generate` public key (base64 minisign).
+        assert!(updater_configured(
+            "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCQ0RFRgpSV1FBQkNERUY="
+        ));
+    }
 }
