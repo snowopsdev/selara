@@ -1,0 +1,44 @@
+# Dependabot opens weekly dependency PRs. Minor and patch bumps are grouped
+# into one PR per ecosystem; major bumps get their own PR.
+#
+# Dependabot writes lowercase subjects ("bump foo from 1 to 2"), so the PR
+# title and body checks in workflows/pr-template.yml are relaxed for
+# `dependabot[bot]` only. Everyone else still follows the strict rules.
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build(deps)"
+    labels: ["P2-health"]
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: npm
+    directory: "/apps/selara-desktop"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build(deps)"
+    labels: ["P2-health"]
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci(deps)"
+    labels: ["P2-health", "area:ci"]
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]

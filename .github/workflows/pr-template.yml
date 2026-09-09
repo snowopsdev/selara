@@ -22,13 +22,21 @@ jobs:
       - name: Check PR title follows conventional commits
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+          # Dependabot titles come from .github/dependabot.yml `commit-message`
+          # prefixes plus its own lowercase subject ("bump foo from 1 to 2"),
+          # which may run past the length cap. Relax only those two rules for
+          # dependabot[bot]; the type/scope shape still has to be valid.
+          DEPENDABOT: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
         run: |
           python3 - <<'PY'
           import os, re, sys
 
+          dependabot = os.environ.get("DEPENDABOT") == "true"
+
           TYPES = "feat|fix|ref|perf|docs|test|build|ci|chore|style|meta|license"
+          SUBJECT = r"[^\s][^\n]*" if dependabot else r"[A-Z][^\n]*"
           PATTERN = re.compile(
-              rf"^({TYPES})(\([a-z0-9][a-z0-9._/-]*\))?!?: [A-Z][^\n]*$"
+              rf"^({TYPES})(\([a-z0-9][a-z0-9._/-]*\))?!?: {SUBJECT}$"
           )
           MAX_LEN = 70
 
@@ -41,7 +49,7 @@ jobs:
               )
           if title.endswith("."):
               problems.append("subject must not end with a period")
-          if len(title) > MAX_LEN:
+          if len(title) > MAX_LEN and not dependabot:
               problems.append(f"title is {len(title)} characters, maximum {MAX_LEN}")
 
           if problems:
@@ -57,7 +65,9 @@ jobs:
           print(f'PR title "{title}" is a valid conventional commit subject.')
           PY
 
+      # Dependabot writes its own release-notes body, not the template.
       - name: Check PR body sections
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           # Passed through the environment so PR text is never interpolated
           # into the script.
