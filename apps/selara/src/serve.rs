@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result};
 use eframe::egui;
 use notify::Watcher;
-use selara_core::commands::{run_command, CommandKind, WritingCommand};
+use selara_core::commands::{run_command_with, CommandKind, PromptVars, WritingCommand};
 use selara_core::config::{AppConfig, LimitsConfig};
 use selara_platform::macos::{
     accessibility_trusted, activate_pid, frontmost_pid, prompt_accessibility, HotkeyAction,
@@ -537,6 +537,7 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
         let label = cmd.label.clone();
         let generation = self.generation;
         let wake = self.egui_ctx.clone();
+        let app_name = self.captured_app.clone();
         self.phase = UiPhase::Working {
             label: label.clone(),
         };
@@ -544,8 +545,11 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
         self.runtime.spawn(async move {
             let result = async {
                 let provider = cfg.build_provider()?;
-                let out =
-                    run_command(provider.as_ref(), &cmd, &input, None, Some(&cfg.language)).await?;
+                let vars = PromptVars {
+                    language: Some(&cfg.language),
+                    app: app_name.as_deref(),
+                };
+                let out = run_command_with(provider.as_ref(), &cmd, &input, None, vars).await?;
                 Ok::<_, anyhow::Error>((cmd.kind, cmd.label, out))
             }
             .await;
