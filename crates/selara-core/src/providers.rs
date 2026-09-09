@@ -42,6 +42,41 @@ async fn json_or_raw(
     }
 }
 
+/// Error returned when a provider stopped generating because it hit its output
+/// token limit. Callers replace the user's selection with the result, so a
+/// silently truncated rewrite would destroy text; surfacing it as an error is
+/// the only safe option.
+fn truncation_error(detail: &str) -> CoreError {
+    CoreError::Provider(format!(
+        "output was cut off by the model's token limit ({detail}); \
+         shorten the selection or pick a model with a larger output limit"
+    ))
+}
+
+/// OpenAI reasoning models (`o1`, `o3`, `o4-mini`, `gpt-5*`) reject any
+/// non-default `temperature` with HTTP 400, so the request must omit it. An
+/// optional `openai/` vendor prefix is stripped first because OpenRouter ids
+/// look like `openai/o3`. The `o` + digit rule deliberately excludes ids such
+/// as `omni-moderation`, and `gpt-4o*` never matches because it starts with `gpt-4`.
+pub fn is_reasoning_model(id: &str) -> bool {
+    let lower = id.trim().to_ascii_lowercase();
+    let bare = lower.strip_prefix("openai/").unwrap_or(&lower);
+    let mut chars = bare.chars();
+    let o_series = matches!(
+        (chars.next(), chars.next()),
+        (Some('o'), Some(d)) if d.is_ascii_digit()
+    );
+    o_series || bare.starts_with("gpt-5")
+}
+
+/// `max_tokens` for an Anthropic request sized to the input. A rewrite's output
+/// is roughly the length of its input; at ~4 chars per token, `chars / 2` gives
+/// about 2x headroom. The floor keeps short inputs generous and the ceiling
+/// stays under current model output limits.
+pub fn anthropic_max_tokens(input_chars: usize) -> u32 {
+    (input_chars / 2).clamp(4096, 32_000) as u32
+}
+
 /// Chat Completions `message.content` is a string, or an array of text parts.
 fn openai_message_content(value: &serde_json::Value) -> Option<String> {
     let content = value.pointer("/choices/0/message/content")?;
@@ -157,14 +192,16 @@ impl LlmProvider for OpenAiCompatibleProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let client = http_client()?;
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": [
                 {"role": "system", "content": req.system},
                 {"role": "user", "content": req.user}
-            ],
-            "temperature": 0.2
+            ]
         });
+        if !is_reasoning_model(&self.model) {
+            body["temperature"] = json!(0.2);
+        }
 
         let mut builder = client.post(url).json(&body);
         if !self.api_key.is_empty() {
@@ -178,6 +215,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        }
+        if value
+            .pointer("/choices/0/finish_reason")
+            .and_then(|v| v.as_str())
+            == Some("length")
+        {
+            return Err(truncation_error("finish_reason=length"));
         }
 
         openai_message_content(&value)
@@ -199,7 +243,7 @@ impl LlmProvider for AnthropicProvider {
         let client = http_client()?;
         let body = json!({
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": anthropic_max_tokens(req.user.chars().count()),
             "system": req.system,
             "messages": [
                 {"role": "user", "content": req.user}
@@ -215,6 +259,9 @@ impl LlmProvider for AnthropicProvider {
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        }
+        if value.get("stop_reason").and_then(|v| v.as_str()) == Some("max_tokens") {
+            return Err(truncation_error("stop_reason=max_tokens"));
         }
         // content is an array of blocks; take first text block
         if let Some(arr) = value.get("content").and_then(|v| v.as_array()) {
@@ -291,6 +338,7 @@ impl LlmProvider for ChatGptCodexProvider {
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
         let mut out = String::new();
+        let mut truncated = false;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -298,6 +346,7 @@ impl LlmProvider for ChatGptCodexProvider {
                 if let Some(delta) = parse_sse_output_text_delta(&event) {
                     out.push_str(&delta);
                 }
+                truncated |= sse_event_marks_truncation(&event);
             }
         }
         // Trailing event without final blank line
@@ -305,6 +354,12 @@ impl LlmProvider for ChatGptCodexProvider {
             if let Some(delta) = parse_sse_output_text_delta(&buf) {
                 out.push_str(&delta);
             }
+            truncated |= sse_event_marks_truncation(&buf);
+        }
+        // Drain the whole stream first so the connection closes cleanly, but
+        // never hand back partial text: the caller would write it over the selection.
+        if truncated {
+            return Err(truncation_error("response incomplete: max_output_tokens"));
         }
 
         let trimmed = out.trim().to_string();
@@ -317,9 +372,10 @@ impl LlmProvider for ChatGptCodexProvider {
     }
 }
 
-/// Extract text from an SSE event whose `event:` is `response.output_text.delta`
-/// (or whose JSON `type` field matches). Data may be split across multiple `data:` lines.
-pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
+/// Split one SSE event block into its `event:` name and parsed JSON `data:`
+/// payload. Data may be split across multiple `data:` lines. Returns `None` for
+/// blocks with no data, the `[DONE]` sentinel, or non-JSON data.
+fn parse_sse_event(event_block: &str) -> Option<(Option<String>, serde_json::Value)> {
     let mut event_name: Option<String> = None;
     let mut data_lines: Vec<&str> = Vec::new();
     for line in event_block.lines() {
@@ -337,6 +393,39 @@ pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(&data).ok()?;
+    Some((event_name, value))
+}
+
+/// True when a Responses API terminal event says the output was cut short:
+/// a `response.incomplete` event, a `response.completed` whose `response.status`
+/// is not `completed`, or any terminal event whose
+/// `response.incomplete_details.reason` is `max_output_tokens`.
+pub fn sse_event_marks_truncation(event_block: &str) -> bool {
+    let Some((event_name, value)) = parse_sse_event(event_block) else {
+        return false;
+    };
+    let json_type = value.get("type").and_then(|v| v.as_str());
+    let is_type = |name: &str| event_name.as_deref() == Some(name) || json_type == Some(name);
+    if is_type("response.incomplete") {
+        return true;
+    }
+    let reason = value
+        .pointer("/response/incomplete_details/reason")
+        .and_then(|v| v.as_str());
+    if reason == Some("max_output_tokens") {
+        return true;
+    }
+    if is_type("response.completed") {
+        let status = value.pointer("/response/status").and_then(|v| v.as_str());
+        return status.is_some_and(|s| s != "completed");
+    }
+    false
+}
+
+/// Extract text from an SSE event whose `event:` is `response.output_text.delta`
+/// (or whose JSON `type` field matches). Data may be split across multiple `data:` lines.
+pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
+    let (event_name, value) = parse_sse_event(event_block)?;
     let type_field = value.get("type").and_then(|v| v.as_str());
     let is_delta = event_name.as_deref() == Some("response.output_text.delta")
         || type_field == Some("response.output_text.delta");
@@ -783,23 +872,246 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
     }
 
     fn spawn_http(status: u16, body: &str, content_type: &str) -> String {
+        spawn_http_capture(status, body, content_type).0
+    }
+
+    /// One-shot fake HTTP server. Reads the full request (headers, then
+    /// `Content-Length` bytes of body), sends the captured request body on the
+    /// returned channel, and answers with the canned response.
+    fn spawn_http_capture(
+        status: u16,
+        body: &str,
+        content_type: &str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let body = body.to_string();
         let content_type = content_type.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 8192];
-            let _ = stream.read(&mut buf);
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let header_end = loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break None;
+                }
+                raw.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break Some(pos + 4);
+                }
+            };
+            let request_body = match header_end {
+                Some(end) => {
+                    let head = String::from_utf8_lossy(&raw[..end]).to_string();
+                    let len = head
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    while raw.len() < end + len {
+                        let n = stream.read(&mut chunk).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        raw.extend_from_slice(&chunk[..n]);
+                    }
+                    String::from_utf8_lossy(&raw[end..raw.len().min(end + len)]).to_string()
+                }
+                None => String::new(),
+            };
+            let _ = tx.send(request_body);
             let resp = format!(
                 "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = stream.write_all(resp.as_bytes());
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), rx)
+    }
+
+    fn openai_provider(base: &str, model: &str) -> OpenAiCompatibleProvider {
+        OpenAiCompatibleProvider {
+            base_url: format!("{base}/v1"),
+            api_key: "k".into(),
+            model: model.into(),
+            extra_headers: Vec::new(),
+        }
+    }
+
+    fn simple_req() -> CompletionRequest {
+        CompletionRequest {
+            system: "s".into(),
+            user: "u".into(),
+        }
+    }
+
+    const OPENAI_OK: &str =
+        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+
+    #[test]
+    fn reasoning_model_detection() {
+        for id in [
+            "o4-mini",
+            "o3",
+            "o1-preview",
+            "gpt-5",
+            "gpt-5.4-mini",
+            "openai/o3",
+            "OpenAI/GPT-5",
+        ] {
+            assert!(is_reasoning_model(id), "{id} should be a reasoning model");
+        }
+        for id in [
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "omni-moderation",
+            "llama3.1:8b",
+            "claude-opus-5",
+            "",
+            "o",
+        ] {
+            assert!(
+                !is_reasoning_model(id),
+                "{id} should not be a reasoning model"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_model_request_omits_temperature() {
+        let (base, rx) = spawn_http_capture(200, OPENAI_OK, "application/json");
+        let out = openai_provider(&base, "o4-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert!(
+            sent.get("temperature").is_none(),
+            "reasoning model body must not carry temperature: {sent}"
+        );
+        assert_eq!(sent["model"], "o4-mini");
+    }
+
+    #[tokio::test]
+    async fn non_reasoning_model_request_sends_temperature() {
+        let (base, rx) = spawn_http_capture(200, OPENAI_OK, "application/json");
+        openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["temperature"], 0.2, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn openai_finish_reason_length_is_an_error() {
+        let payload = r#"{"choices":[{"message":{"role":"assistant","content":"partial text"},"finish_reason":"length"}]}"#;
+        let base = spawn_http(200, payload, "application/json");
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off"), "{msg}");
+        assert!(msg.contains("finish_reason=length"), "{msg}");
+        assert!(
+            !msg.contains("partial text"),
+            "must not leak partial output: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_finish_reason_stop_returns_content() {
+        let base = spawn_http(200, OPENAI_OK, "application/json");
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stop_reason_max_tokens_is_an_error() {
+        let payload =
+            r#"{"content":[{"type":"text","text":"partial"}],"stop_reason":"max_tokens"}"#;
+        let base = spawn_http(200, payload, "application/json");
+        let provider = AnthropicProvider {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url: base,
+        };
+        let err = provider.complete(simple_req()).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off"), "{msg}");
+        assert!(msg.contains("stop_reason=max_tokens"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_end_turn_returns_text_and_sizes_max_tokens() {
+        let payload = r#"{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}"#;
+        let (base, rx) = spawn_http_capture(200, payload, "application/json");
+        let provider = AnthropicProvider {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url: base,
+        };
+        let out = provider
+            .complete(CompletionRequest {
+                system: "s".into(),
+                user: "x".repeat(20_000),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out, "done");
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["max_tokens"], 10_000, "{}", sent["max_tokens"]);
+    }
+
+    #[test]
+    fn anthropic_max_tokens_clamps_to_input_size() {
+        assert_eq!(anthropic_max_tokens(0), 4096);
+        assert_eq!(anthropic_max_tokens(100), 4096);
+        assert_eq!(anthropic_max_tokens(8192), 4096);
+        assert_eq!(anthropic_max_tokens(20_000), 10_000);
+        assert_eq!(anthropic_max_tokens(1_000_000), 32_000);
+    }
+
+    #[test]
+    fn sse_truncation_detects_incomplete_terminal_events() {
+        let incomplete = "event: response.incomplete\n\
+data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n";
+        assert!(sse_event_marks_truncation(incomplete));
+
+        let completed_but_cut = "event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n";
+        assert!(sse_event_marks_truncation(completed_but_cut));
+
+        let completed_wrong_status =
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"incomplete\"}}\n";
+        assert!(sse_event_marks_truncation(completed_wrong_status));
+    }
+
+    #[test]
+    fn sse_truncation_ignores_normal_events() {
+        let completed = "event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"incomplete_details\":null}}\n";
+        assert!(!sse_event_marks_truncation(completed));
+
+        let delta = "event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n";
+        assert!(!sse_event_marks_truncation(delta));
+
+        assert!(!sse_event_marks_truncation("data: [DONE]\n"));
+        assert!(!sse_event_marks_truncation("event: ping\n"));
     }
 
     #[tokio::test]
