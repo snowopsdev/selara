@@ -27,7 +27,7 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 - **Model discovery.** Load the model list straight from the provider. A bad key or URL shows up right there, so it doubles as a connection test.
 - **ChatGPT via Codex (experimental).** Reuse an existing ChatGPT subscription by signing in with the Codex CLI. Tokens stay in Codex's own auth store, never in Selara's config.
 - **Size limits.** A soft warning, a replace caution, and a hard maximum, so a stray select-all never sends 100k characters to a metered API. They apply to picker and shortcut runs alike.
-- **Live config.** Everything lives in one TOML file. The `serve` process watches it and re-registers hotkeys within about a second of a save from the Settings app.
+- **Live config.** Everything lives in one TOML file. The `serve` process watches the config directory for changes and re-registers hotkeys as soon as the Settings app saves (with a 5-second poll as a fallback), while staying idle otherwise.
 - **Menu-bar Settings app.** A Tauri tray app with General, Models, Commands, and Limits tabs. No Dock icon, closes to the tray.
 - **Scriptable CLI.** `selara init`, `selara list-commands`, and `selara run <command>` for pipelines and quick checks.
 
