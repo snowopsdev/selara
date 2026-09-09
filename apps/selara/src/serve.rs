@@ -1252,65 +1252,81 @@ impl eframe::App for ServeApp {
                 UiPhase::Popup { title, body } => {
                     ui.heading(title);
                     ui.add_space(6.0);
-                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                        CommonMarkViewer::new().show(ui, &mut self.md_cache, body);
-                    });
-                    ui.add_space(6.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .button("Copy")
-                            .on_hover_text("Copy the result as markdown")
-                            .clicked()
-                        {
-                            ui.ctx().copy_text(body.clone());
+                    // Lay the action row out from the bottom edge up, then give
+                    // the result scroller only what is left. With a fixed
+                    // max_height a long result pushed Copy / Replace selection /
+                    // Insert below / Retry past the bottom of the borderless
+                    // window, where they could be neither clicked nor scrolled
+                    // to without resizing the window by hand.
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                        if popup_actions.show_caution {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(200, 150, 40),
+                                    format!(
+                                        "Replace caution ({}+ chars): paste-back can be flaky in some apps.",
+                                        self.config.limits.replace_warn_chars
+                                    ),
+                                );
+                                if ui.button("Allow replace").clicked() {
+                                    ack_replace = true;
+                                }
+                            });
+                            ui.add_space(4.0);
                         }
-                        if ui
-                            .add_enabled(
-                                popup_actions.replace_enabled,
-                                egui::Button::new("Replace selection"),
-                            )
-                            .on_hover_text("Write the result over the original selection")
-                            .clicked()
-                        {
-                            write_back = Some((WriteBack::Replace, body.clone()));
-                        }
-                        if ui
-                            .add_enabled(
-                                popup_actions.insert_enabled,
-                                egui::Button::new("Insert below"),
-                            )
-                            .on_hover_text(if self.captured_range.is_some() {
-                                "Insert the result after the selection"
-                            } else {
-                                "Insert the result after the selection (moves the caret with →, then pastes)"
-                            })
-                            .clicked()
-                        {
-                            write_back = Some((WriteBack::InsertBelow, body.clone()));
-                        }
-                        if ui
-                            .add_enabled(can_retry, egui::Button::new("Retry"))
-                            .on_hover_text("Run the same command again on the same selection")
-                            .clicked()
-                        {
-                            retry = true;
-                        }
-                    });
-                    if popup_actions.show_caution {
-                        ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(200, 150, 40),
-                                format!(
-                                    "Replace caution ({}+ chars): paste-back can be flaky in some apps.",
-                                    self.config.limits.replace_warn_chars
-                                ),
-                            );
-                            if ui.button("Allow replace").clicked() {
-                                ack_replace = true;
+                            if ui
+                                .button("Copy")
+                                .on_hover_text("Copy the result as markdown")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(body.clone());
+                            }
+                            if ui
+                                .add_enabled(
+                                    popup_actions.replace_enabled,
+                                    egui::Button::new("Replace selection"),
+                                )
+                                .on_hover_text("Write the result over the original selection")
+                                .clicked()
+                            {
+                                write_back = Some((WriteBack::Replace, body.clone()));
+                            }
+                            if ui
+                                .add_enabled(
+                                    popup_actions.insert_enabled,
+                                    egui::Button::new("Insert below"),
+                                )
+                                .on_hover_text(if self.captured_range.is_some() {
+                                    "Insert the result after the selection"
+                                } else {
+                                    "Insert the result after the selection (moves the caret with →, then pastes)"
+                                })
+                                .clicked()
+                            {
+                                write_back = Some((WriteBack::InsertBelow, body.clone()));
+                            }
+                            if ui
+                                .add_enabled(can_retry, egui::Button::new("Retry"))
+                                .on_hover_text("Run the same command again on the same selection")
+                                .clicked()
+                            {
+                                retry = true;
                             }
                         });
-                    }
+                        ui.add_space(6.0);
+                        // Whatever is left above the footer, top-down again so
+                        // the result reads normally.
+                        let remaining = ui.available_height().max(60.0);
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                            egui::ScrollArea::vertical().max_height(remaining).show(
+                                ui,
+                                |ui| {
+                                    CommonMarkViewer::new().show(ui, &mut self.md_cache, body);
+                                },
+                            );
+                        });
+                    });
                 }
                 UiPhase::Error { message } => {
                     ui.colored_label(egui::Color32::from_rgb(200, 80, 80), "Error");
