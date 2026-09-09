@@ -7,7 +7,7 @@
 //! Replace must run **after** our UI hides and the source app is frontmost again.
 //! Clipboard restore can race if the user copies something else in that window.
 
-#![allow(deprecated, unexpected_cfgs)]
+#![allow(deprecated)]
 
 use anyhow::{anyhow, bail, Context, Result};
 use arboard::Clipboard;
