@@ -24,20 +24,34 @@ fn config_path() -> String {
     AppConfig::default_path().display().to_string()
 }
 
-#[tauri::command]
-fn chatgpt_auth_status() -> Result<CodexLoginStatus, String> {
-    codex_cli::login_status().map_err(|e| e.to_string())
+/// Run a blocking `codex_cli` call off the main thread. Tauri 2 executes sync
+/// commands on the main thread, which would freeze the Settings window for the
+/// duration of a `Command::status()` wait (the browser login flow in particular).
+async fn run_codex_blocking<F>(f: F) -> Result<CodexLoginStatus, String>
+where
+    F: FnOnce() -> Result<CodexLoginStatus, selara_core::error::CoreError> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("codex task failed: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn chatgpt_login() -> Result<CodexLoginStatus, String> {
-    // Spawns the Codex CLI browser login flow; may take a while.
-    codex_cli::login().map_err(|e| e.to_string())
+async fn chatgpt_auth_status() -> Result<CodexLoginStatus, String> {
+    run_codex_blocking(codex_cli::login_status).await
 }
 
 #[tauri::command]
-fn chatgpt_logout() -> Result<CodexLoginStatus, String> {
-    codex_cli::logout().map_err(|e| e.to_string())
+async fn chatgpt_login() -> Result<CodexLoginStatus, String> {
+    // Spawns the Codex CLI browser login flow; blocks until the user finishes
+    // signing in, so it must not run on the main thread.
+    run_codex_blocking(codex_cli::login).await
+}
+
+#[tauri::command]
+async fn chatgpt_logout() -> Result<CodexLoginStatus, String> {
+    run_codex_blocking(codex_cli::logout).await
 }
 
 #[tauri::command]
