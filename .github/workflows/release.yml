@@ -33,7 +33,7 @@ jobs:
       pr: ${{ steps.rp.outputs.pr }}
     steps:
       - id: rp
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           # Optional: a fine-grained PAT (contents + pull-requests: write) lets
           # CI run on the release PR. Falls back to GITHUB_TOKEN, whose commits
