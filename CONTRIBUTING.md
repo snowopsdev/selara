@@ -10,7 +10,7 @@ Thanks for your interest in contributing. This document covers how to build, tes
 
 ## Prerequisites
 
-- Rust stable (edition 2021 workspace)
+- Rust stable, version 1.95 or newer (edition 2021 workspace; required by the egui shell)
 - On macOS: Xcode command-line tools (Accessibility / hotkey / egui `serve` shell)
 - For the Tauri Settings app (`apps/selara-desktop`): Node.js + a package manager, plus platform-specific Tauri dependencies
 

@@ -1516,11 +1516,11 @@ impl ServeApp {
 }
 
 impl eframe::App for ServeApp {
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         remove_pidfile(&self.pidfile);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.hotkey.poll();
         self.poll_config();
 
@@ -1555,7 +1555,12 @@ impl eframe::App for ServeApp {
             // explicitly; this slow tick only backs up `hotkey.poll()` and the
             // 5 s config poll, so an idle `serve` stays near zero CPU.
             ctx.request_repaint_after(Duration::from_secs(1));
-            egui::CentralPanel::default().show(ctx, |_ui| {});
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
+        if matches!(self.phase, UiPhase::Hidden) {
             return;
         }
 
@@ -1682,7 +1687,7 @@ impl eframe::App for ServeApp {
             self.last_adhoc.is_some() && self.last_origin == CommandOrigin::Instruction;
         let filter_caret_to_end = std::mem::take(&mut self.filter_caret_to_end);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             // The window has no OS title bar; the header row is the drag
             // handle. Registered before the buttons so they stay on top.
             let header_rect = {
