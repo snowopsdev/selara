@@ -8,7 +8,7 @@ it preserves the upstream package version. The release archive's workspace
 lockfile still contains 0.0.0 entries, so the patch also normalizes those local
 workspace versions to 0.153.4 without updating third-party dependencies.
 
-Build with Python 3.11+ and the pinned Rust toolchain:
+Build with Python 3.12+ and the pinned Rust toolchain:
 
 ```sh
 scripts/codex-runtime/build.sh

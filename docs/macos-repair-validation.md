@@ -73,7 +73,8 @@ Commands run with Rust 1.95.0 where applicable:
 The updater tests use the actual Tauri downloader and signature verifier against
 an isolated HTTP fixture. They cover valid downloads, signature tampering,
 interruption, and a missing feed. Installer tests cover unsafe archives,
-concurrent installation, replacement and restoration failures, and a successful
+concurrent installation (including a duplicated file descriptor surviving its
+owner), replacement and restoration failures, and a successful
 transition between two distinct ad hoc signed miniature macOS app bundles.
 These are fixture transitions, not the required final production update.
 
@@ -124,9 +125,10 @@ must not be distributed as the production release.
    Developer ID signatures, notarization, stapled tickets, and Gatekeeper
    acceptance have not been verified for this repair.
 2. The persistent updater private key is encrypted locally, its password is in
-   Keychain, and the GitHub signing secrets are configured. An independently
-   stored, restore-tested backup still needs verification. Only the public key
-   is committed.
+   Keychain, and the GitHub signing secrets are configured. Restoring that local
+   encrypted copy and signing against the committed public key passed. An
+   independent backup destination and restore test still need verification.
+   Only the public key is committed.
 3. Grant/revoke Accessibility for the corrected signed worker and exercise actual
    picker invocation, filtering, focus return, selection replacement, undo,
    dismissal, hotkeys, and cold launch. This machine reported Missing for the

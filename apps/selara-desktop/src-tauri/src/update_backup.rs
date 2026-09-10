@@ -6,11 +6,26 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Backup {
-    _installation_lock: std::fs::File,
+    _installation_lock: InstallationLock,
     app: PathBuf,
     directory: PathBuf,
     saved: PathBuf,
     old_version: String,
+}
+
+struct InstallationLock(std::fs::File);
+
+impl Drop for InstallationLock {
+    fn drop(&mut self) {
+        // Closing our descriptor alone can leave flock held by a concurrent
+        // fork until that child execs. Only this guard owns the transaction;
+        // explicitly release it, including when backup preparation fails.
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -153,6 +168,7 @@ impl Backup {
                 );
             }
         }
+        let installation_lock = InstallationLock(installation_lock);
         ops.verify(&app, version)?;
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -391,8 +407,13 @@ mod tests {
             .err()
             .unwrap()
             .contains("Another Selara process"));
+        // Model a descriptor briefly inherited by a concurrent fork before
+        // close-on-exec runs. It must not retain ownership after our guard ends.
+        let inherited = first._installation_lock.0.try_clone().unwrap();
         drop(first);
-        assert!(Backup::prepare_with(&app, "1.0.0", &ops).is_ok());
+        Backup::prepare_with(&app, "1.0.0", &ops)
+            .expect("the installation lock must be released when its owner finishes");
+        drop(inherited);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
