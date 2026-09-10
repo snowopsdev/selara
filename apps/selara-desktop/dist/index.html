@@ -484,6 +484,58 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   let config = null;
   let editingId = null;
   const $ = (sel) => document.querySelector(sel);
+  // @selara-helpers-start (pure functions; tests/helpers.test.mjs evaluates this block)
+  function escapeHtml(s) {
+    return String(s ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  }
+  function escapeAttr(s) { return escapeHtml(s).replaceAll('"', "&quot;"); }
+  function num(v) {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+  }
+  function slug(s) {
+    return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "command";
+  }
+  function kindLabel(k) { return k === "popup" ? "Popup" : "Replace"; }
+  function maskEmail(email) {
+    if (!email) return "";
+    const at = email.indexOf("@");
+    if (at <= 0) return "••••••••";
+    const domain = email.slice(at + 1);
+    const dot = domain.lastIndexOf(".");
+    // Bullet mask like ••••••••@••••.com (no leading letter; reads truncated otherwise).
+    const localMask = "•".repeat(8);
+    const domMask = dot > 0
+      ? ("•".repeat(Math.max(4, Math.min(dot, 6))) + domain.slice(dot))
+      : "••••";
+    return localMask + "@" + domMask;
+  }
+  // Display-only: ctrl+shift+p -> ⌃⇧P. The stored chord is unchanged.
+  function prettyHotkey(chord) {
+    const map = { ctrl: "⌃", control: "⌃", shift: "⇧", alt: "⌥", option: "⌥", cmd: "⌘", command: "⌘", super: "⌘", meta: "⌘" };
+    return String(chord || "").split("+").map((part) => {
+      const k = part.trim().toLowerCase();
+      if (map[k]) return map[k];
+      if (k === "space") return "Space";
+      return k.length === 1 ? k.toUpperCase() : part.trim();
+    }).join("");
+  }
+  function commandMatches(c, q) {
+    if (!q) return true;
+    const hay = [c.label, c.prompt, c.hotkey || "", kindLabel(c.kind)].join(" ").toLowerCase();
+    return hay.includes(q);
+  }
+  function statusDotClass(st) {
+    if (!st) return "unknown";
+    if (st.logged_in) return "ok";
+    // Amber for signed-out; red only for hard errors.
+    const msg = (st.message || "").toLowerCase();
+    if (msg && (msg.includes("error") || msg.includes("failed") || msg.includes("not found") || msg.includes("enoent"))) {
+      return "bad";
+    }
+    return "unknown";
+  }
+  // @selara-helpers-end
   const statusEl = () => $("#save-status");
   const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded)$/;
   const BAD_STATUS = /error|failed|required|before saving|not available|could not|enoent/i;
@@ -501,18 +553,6 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       dot.classList.add("bad");
     }
   }
-  function escapeHtml(s) {
-    return String(s ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-  }
-  function escapeAttr(s) { return escapeHtml(s).replaceAll('"', "&quot;"); }
-  function num(v) {
-    const n = Number(v);
-    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
-  }
-  function slug(s) {
-    return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "command";
-  }
-  function kindLabel(k) { return k === "popup" ? "Popup" : "Replace"; }
 
   const PROVIDERS = {
     open_ai_compatible: {
@@ -663,36 +703,12 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
 
   let chatgptModels = null;
 
-  function statusDotClass(st) {
-    if (!st) return "unknown";
-    if (st.logged_in) return "ok";
-    // Amber for signed-out; red only for hard errors.
-    const msg = (st.message || "").toLowerCase();
-    if (msg && (msg.includes("error") || msg.includes("failed") || msg.includes("not found") || msg.includes("enoent"))) {
-      return "bad";
-    }
-    return "unknown";
-  }
-
   const EMAIL_VISIBLE_KEY = "wt.chatgpt.emailVisible";
   function isEmailVisible() {
     try { return localStorage.getItem(EMAIL_VISIBLE_KEY) === "1"; } catch (_) { return false; }
   }
   function setEmailVisible(v) {
     try { localStorage.setItem(EMAIL_VISIBLE_KEY, v ? "1" : "0"); } catch (_) {}
-  }
-  function maskEmail(email) {
-    if (!email) return "";
-    const at = email.indexOf("@");
-    if (at <= 0) return "••••••••";
-    const domain = email.slice(at + 1);
-    const dot = domain.lastIndexOf(".");
-    // Bullet mask like ••••••••@••••.com (no leading letter; reads truncated otherwise).
-    const localMask = "•".repeat(8);
-    const domMask = dot > 0
-      ? ("•".repeat(Math.max(4, Math.min(dot, 6))) + domain.slice(dot))
-      : "••••";
-    return localMask + "@" + domMask;
   }
 
   async function loadChatgptModelsIntoSelect(preferred) {
@@ -1055,24 +1071,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   const TRASH_SVG =
     "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8\"/></svg>";
 
-  // Display-only: ctrl+shift+p -> ⌃⇧P. The stored chord is unchanged.
-  function prettyHotkey(chord) {
-    const map = { ctrl: "⌃", control: "⌃", shift: "⇧", alt: "⌥", option: "⌥", cmd: "⌘", command: "⌘", super: "⌘", meta: "⌘" };
-    return String(chord || "").split("+").map((part) => {
-      const k = part.trim().toLowerCase();
-      if (map[k]) return map[k];
-      if (k === "space") return "Space";
-      return k.length === 1 ? k.toUpperCase() : part.trim();
-    }).join("");
-  }
-
   let commandFilter = "";
-
-  function commandMatches(c, q) {
-    if (!q) return true;
-    const hay = [c.label, c.prompt, c.hotkey || "", kindLabel(c.kind)].join(" ").toLowerCase();
-    return hay.includes(q);
-  }
 
   function renderCommands() {
     const s = $("#section-commands");
