@@ -30,6 +30,10 @@ pub struct ChatGptAuthFile {
     pub tokens: ChatGptTokens,
     #[serde(default)]
     pub last_refresh: Option<String>,
+    /// Any other top-level keys the Codex CLI stores (e.g. `OPENAI_API_KEY`).
+    /// Carried through untouched so `write_back` never drops them.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +44,9 @@ pub struct ChatGptTokens {
     pub id_token: Option<String>,
     #[serde(default)]
     pub account_id: Option<String>,
+    /// Any other keys inside `tokens` that Selara does not model.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +56,12 @@ pub struct ChatGptAuth {
     pub id_token: Option<String>,
     pub account_id: Option<String>,
     pub last_refresh: Option<String>,
+    /// Original `auth_mode` from the file; preserved verbatim on write-back.
+    pub auth_mode: Option<String>,
+    /// Unknown top-level keys from `auth.json`, preserved on write-back.
+    pub file_extra: serde_json::Map<String, serde_json::Value>,
+    /// Unknown keys inside `auth.json` `tokens`, preserved on write-back.
+    pub tokens_extra: serde_json::Map<String, serde_json::Value>,
     pub path: PathBuf,
 }
 
@@ -89,6 +102,9 @@ impl ChatGptAuth {
             id_token: file.tokens.id_token,
             account_id: file.tokens.account_id,
             last_refresh: file.last_refresh,
+            auth_mode: file.auth_mode,
+            file_extra: file.extra,
+            tokens_extra: file.tokens.extra,
             path: path.to_path_buf(),
         })
     }
@@ -154,14 +170,16 @@ impl ChatGptAuth {
 
     pub fn write_back(&self) -> Result<(), CoreError> {
         let file = ChatGptAuthFile {
-            auth_mode: Some("chatgpt".into()),
+            auth_mode: self.auth_mode.clone().or_else(|| Some("chatgpt".into())),
             tokens: ChatGptTokens {
                 access_token: self.access_token.clone(),
                 refresh_token: self.refresh_token.clone(),
                 id_token: self.id_token.clone(),
                 account_id: self.account_id.clone(),
+                extra: self.tokens_extra.clone(),
             },
             last_refresh: self.last_refresh.clone(),
+            extra: self.file_extra.clone(),
         };
         let raw =
             serde_json::to_string_pretty(&file).map_err(|e| CoreError::Config(e.to_string()))?;
@@ -370,9 +388,88 @@ mod tests {
         assert!(!access_token_needs_refresh(&auth.access_token));
     }
 
+    #[test]
+    fn write_back_preserves_unknown_fields_and_auth_mode() {
+        let dir = tempfile_dir_named("preserve");
+        let path = dir.join("auth.json");
+        let token = fake_jwt(4_000_000_000);
+        // `OPENAI_API_KEY` is a non-secret placeholder string, not a real key.
+        let body = json!({
+            "auth_mode": "apikey",
+            "OPENAI_API_KEY": "sk-test-placeholder",
+            "future_field": { "nested": true },
+            "tokens": {
+                "access_token": token,
+                "refresh_token": "rt-fixture",
+                "id_token": "id-fixture",
+                "account_id": "acct-fixture",
+                "scope": "openid"
+            },
+            "last_refresh": "2026-01-01T00:00:00Z"
+        });
+        fs::write(&path, body.to_string()).unwrap();
+
+        let mut auth = ChatGptAuth::load_from(&path).unwrap();
+        assert_eq!(auth.auth_mode.as_deref(), Some("apikey"));
+        assert_eq!(
+            auth.file_extra
+                .get("OPENAI_API_KEY")
+                .and_then(|v| v.as_str()),
+            Some("sk-test-placeholder")
+        );
+        assert_eq!(
+            auth.tokens_extra.get("scope").and_then(|v| v.as_str()),
+            Some("openid")
+        );
+
+        auth.access_token = fake_jwt(4_100_000_000);
+        auth.write_back().unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["auth_mode"], json!("apikey"));
+        assert_eq!(raw["OPENAI_API_KEY"], json!("sk-test-placeholder"));
+        assert_eq!(raw["future_field"], json!({ "nested": true }));
+        assert_eq!(raw["tokens"]["scope"], json!("openid"));
+        assert_eq!(raw["tokens"]["refresh_token"], json!("rt-fixture"));
+        assert_eq!(raw["tokens"]["account_id"], json!("acct-fixture"));
+        assert_eq!(raw["tokens"]["access_token"], json!(auth.access_token));
+        assert_eq!(raw["last_refresh"], json!("2026-01-01T00:00:00Z"));
+
+        // The rewritten file must still round-trip through load_from.
+        let reloaded = ChatGptAuth::load_from(&path).unwrap();
+        assert_eq!(reloaded.access_token, auth.access_token);
+        assert_eq!(reloaded.auth_mode.as_deref(), Some("apikey"));
+    }
+
+    #[test]
+    fn write_back_defaults_auth_mode_when_absent() {
+        let dir = tempfile_dir_named("default-mode");
+        let path = dir.join("auth.json");
+        let body = json!({
+            "tokens": {
+                "access_token": fake_jwt(4_000_000_000),
+                "refresh_token": "rt-fixture"
+            }
+        });
+        fs::write(&path, body.to_string()).unwrap();
+
+        let auth = ChatGptAuth::load_from(&path).unwrap();
+        assert!(auth.auth_mode.is_none());
+        auth.write_back().unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["auth_mode"], json!("chatgpt"));
+    }
+
     fn tempfile_dir() -> PathBuf {
+        tempfile_dir_named("load")
+    }
+
+    fn tempfile_dir_named(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("wt-chatgpt-auth-{}", std::process::id()));
+        p.push(format!("wt-chatgpt-auth-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
