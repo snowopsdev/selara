@@ -20,6 +20,7 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 
 - **Works everywhere you can select text.** A global hotkey (default `ctrl+shift+space`) reads the selection through macOS Accessibility, with a clipboard fallback for apps that do not expose it.
 - **Keyboard-first picker.** The picker opens next to the mouse cursor on whichever display it is on, clear of the menu bar and Dock. Type to filter the commands, use ↑/↓ to choose, ⏎ to run, or press 1–9 to run a row directly. Clicking still works.
+- **Free-form instruction.** Type anything into the picker's box and press ⌘⏎ (or ⏎ when no command matches) to run it as a one-off Replace, ⇧⏎ for a Popup. The picker remembers the last ten instructions (↑ in the empty box recalls them) and offers **Save as command…** afterwards, which adds the instruction to your commands.
 - **Replace or popup.** Replace commands (Proofread, Rewrite, Friendly, Professional, Concise) write the result back over the selection. Popup commands (Summary, Key Points, Table) open a scrollable result window that renders the markdown (headings, lists, tables) and offers Copy, Replace selection, Insert below, and Retry.
 - **Streaming results.** Popup results stream into the window as the model writes them, rendered as markdown while they arrive, instead of a spinner until the end. Replace commands show a running character count and write back only the finished text. The CLI streams popup output by default; pass `--no-stream` to print only the finished result.
 - **Your prompts.** Every command is a labeled prompt. Edit the built-ins, add your own, duplicate one to make a variation, and search the list. Prompts can use `{{language}}` (your preferred language) and `{{app}}` (the app the selection came from); the built-in **Translate** command is `Translate the text to {{language}}`.
@@ -51,7 +52,7 @@ flowchart LR
 | `apps/selara` | CLI + macOS `serve` desktop shell |
 | `apps/selara-desktop` | Tauri tray + Settings UI |
 
-The `serve` shell registers the hotkey, reads the selection, shows a small command picker next to the cursor (type to filter, ↑/↓, ⏎, or 1–9 to run), sends `{prompt, selection}` to the configured provider, and writes the result back. The Settings app edits the same config file.
+The `serve` shell registers the hotkey, reads the selection, shows a small command picker next to the cursor (type to filter, ↑/↓, ⏎, or 1–9 to run; text that matches nothing, or ⌘⏎ with any text, runs as a free-form instruction), sends `{prompt, selection}` to the configured provider, and writes the result back. The Settings app edits the same config file.
 
 ## Install (macOS)
 
