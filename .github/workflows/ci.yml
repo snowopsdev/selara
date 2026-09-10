@@ -68,6 +68,48 @@ jobs:
       - name: cargo test (platform crate)
         run: cargo test -p selara-platform
 
+  desktop-package:
+    name: package desktop (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/selara-desktop/package-lock.json
+
+      - name: Test release helpers
+        run: node --test scripts/release/*.test.mjs
+
+      - name: Install frontend dependencies
+        working-directory: apps/selara-desktop
+        run: npm ci --no-audit --no-fund
+
+      # Reproduce GitHub's empty optional-secret environment. A cargo build
+      # alone never reaches certificate import, DMG creation, or updater signing.
+      - name: Build app and DMG without credentials
+        env:
+          APPLE_CERTIFICATE: ''
+          APPLE_CERTIFICATE_PASSWORD: ''
+          APPLE_SIGNING_IDENTITY: ''
+          APPLE_ID: ''
+          APPLE_PASSWORD: ''
+          APPLE_TEAM_ID: ''
+        run: node scripts/release/build-desktop.mjs apps/selara-desktop
+
+      - name: Verify app signature, bundled CLI, and DMG
+        run: bash scripts/release/verify-desktop.sh .
+
   desktop-dist:
     name: desktop dist is up to date
     runs-on: ubuntu-latest
