@@ -32,7 +32,7 @@ cd apps/selara-desktop && npx tauri dev
 
 (`serve` / hotkeys still need a separate `cargo run -p selara -- serve`.)
 
-CI on GitHub Actions runs four jobs: fmt/clippy/test on Linux (`ubuntu-latest`, excluding the Tauri `selara-desktop` package), a `macos-latest` job that builds and lints the `selara` CLI/`serve` shell and `selara-platform` so the `cfg(target_os = "macos")` code is at least compiled, a check that `apps/selara-desktop/dist/index.html` matches `npm run build`, and the unit tests for the Python helpers under `.cursor/skills/e2e-qa-orchestrator`. Clippy runs with `-D warnings`, so any new warning fails CI; the `objc` macro `cfg` noise on macOS code paths is declared through `check-cfg` in `crates/selara-platform/Cargo.toml` rather than allowed.
+CI on GitHub Actions runs five jobs: fmt/clippy/test on Linux (`ubuntu-latest`, excluding the Tauri `selara-desktop` package), a macOS CLI/platform build and lint job, a macOS desktop packaging job, a check that the committed desktop dist matches `npm run build`, and the Python skill tests. The desktop job runs `node --test scripts/release/*.test.mjs`, builds the app and DMG with the same helper as releases and empty Apple signing variables, then verifies the app signature, bundled CLI, and DMG integrity. This reaches packaging failures that `cargo build` cannot catch. Linux Clippy runs with `-D warnings`; macOS FFI `cfg` declarations live in `crates/selara-platform/Cargo.toml`.
 
 Dependency upkeep is automated: Dependabot opens weekly PRs for Cargo, npm (`apps/selara-desktop`), and GitHub Actions, grouping minor and patch bumps into one PR per ecosystem (`.github/dependabot.yml`). `cargo audit` runs in CI against the RustSec advisory database on every `Cargo.toml`/`Cargo.lock` change and on a weekly schedule (`.github/workflows/audit.yml`). `rust-toolchain.toml` pins the `stable` channel with `rustfmt` and `clippy`, so local builds and CI use the same toolchain.
 
@@ -45,7 +45,7 @@ Dependency upkeep is automated: Dependabot opens weekly PRs for Cargo, npm (`app
 | macOS Accessibility / hotkey / clipboard backends | cfg-gated out | Compiled only; no AX at runtime | Needs local testing |
 | `selara` CLI | Tested | Built | Covered |
 | `selara` `serve` (egui picker) | cfg-gated out | Compiled only | Needs local macOS testing |
-| `selara-desktop` (Tauri) | `dist/index.html` freshness only | Not built | Needs local macOS testing |
+| `selara-desktop` (Tauri) | `dist/index.html` freshness only | App/DMG built and verified; release helper tests | GUI behavior needs local testing |
 
 If you change hotkeys, selection replace, Accessibility behavior, or the Settings UI, please verify on macOS locally and attach screenshots when UI changes.
 
@@ -65,19 +65,16 @@ Versions follow [semantic versioning](https://semver.org) and are cut automatica
 - Pull requests are squash-merged, so the PR title (not the branch commits) is what release-please reads. Keep titles in the `type(scope): Subject` form; CI rejects other titles.
 - Commit types decide the bump: `feat` raises the minor version, `fix` and `perf` raise the patch version, and a `!` after the type or a `BREAKING CHANGE:` footer raises the major version. While Selara is `0.x`, a breaking change raises the minor version instead.
 - After every merge to `main`, the Release workflow keeps one pull request open titled `chore(main): release X.Y.Z`. It bumps the workspace version in `Cargo.toml`, the desktop `package.json` and `tauri.conf.json`, refreshes `Cargo.lock`, and updates `CHANGELOG.md`.
-- Merging that pull request creates the `vX.Y.Z` tag and the GitHub Release, and attaches a macOS build of the `selara` CLI, a DMG of the Tauri app, and a rendered Homebrew cask and formula (`homebrew/*.tmpl` via `scripts/release/render-homebrew.sh`). Signing and notarization run when the `APPLE_*` repository secrets are set (see the comment block above the `desktop` job in `.github/workflows/release.yml`); without them the DMG is ad-hoc signed. The cask's Gatekeeper caveat is dropped only when `xcrun stapler validate` finds a notarization ticket on the built DMG, so a signed-but-unnotarized build keeps the workaround. The cask and formula are attached as `selara-cask.rb` and `selara-formula.rb` (both files are named `selara.rb`, and release asset names have to be unique). `HOMEBREW_TAP_TOKEN` enables the push to `snowopsdev/homebrew-selara`.
+- Merging that pull request creates the `vX.Y.Z` tag and the GitHub Release. After the CLI assets are published, the normal release path calls the reusable `.github/workflows/desktop-release.yml` workflow, which builds the macOS app and DMG with `scripts/release/build-desktop.mjs`, verifies the app signature, bundled CLI, and DMG, and publishes the DMG and rendered Homebrew files. Empty optional Apple credentials are omitted and the default build uses the ad-hoc identity `-`. A real Developer ID build requires both `APPLE_CERTIFICATE` and `APPLE_SIGNING_IDENTITY`; the certificate password may be empty. Notarization credentials must be either all absent or all set with real signing; partial settings fail before compilation. The cask's Gatekeeper caveat is removed only when `xcrun stapler validate` succeeds; a signed-but-unnotarized build keeps the workaround. `HOMEBREW_TAP_TOKEN` enables the push to `snowopsdev/homebrew-selara`.
+- For manual recovery from an old tag, preserve the tag's source and existing release assets, then run the current workflow from `main`: `gh workflow run desktop-release.yml --ref main -f tag=v0.4.0`. Check the run with `gh run list --workflow desktop-release.yml` and `gh run watch <run-id>`. Existing assets are reused; conflicts fail rather than being overwritten.
 - All crates share the workspace version (`version.workspace = true`). Do not set a crate version by hand.
 - Commits whose type is `build`, `ci`, `chore`, `test`, `style`, `meta`, or `license` do not appear in the changelog and do not trigger a release on their own.
 
 ### Desktop auto-update signing
 
-The menu-bar app checks GitHub Releases for a newer build through `tauri-plugin-updater` (Status tab → Updates, or the tray's "Check for updates…"). The plugin only accepts artifacts signed with the project's updater key, and until that key exists `apps/selara-desktop/src-tauri/tauri.conf.json` ships the placeholder `REPLACE_WITH_TAURI_UPDATER_PUBKEY`. The app treats the placeholder as "updates not configured" and never contacts the network, so nothing breaks in the meantime; it just does not update itself.
+The menu-bar app has the updater integration, but updater artifact generation is currently disabled and the checked-in public key is a placeholder. The runtime therefore remains unconfigured and does not offer updates. The release helper also disables updater artifacts for placeholder or empty keys.
 
-A maintainer enables it once:
-
-1. Generate the keypair (never inside the repo): `npx tauri signer generate -w ~/.tauri/selara.key` from `apps/selara-desktop`. Choose a password when prompted.
-2. Put the printed **public** key into `plugins.updater.pubkey` in `tauri.conf.json` and commit that change.
-3. Add the **private** key (`~/.tauri/selara.key` contents) and its password as repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The release workflow's `desktop` job passes them to `tauri build` and uploads `Selara.app.tar.gz`, its `.sig`, and `latest.json`; see `docs/release-updater.md`.
+Full updater publishing is future work. Activation requires a real `plugins.updater.pubkey`, the matching `TAURI_SIGNING_PRIVATE_KEY` and password, enabling `bundle.createUpdaterArtifacts`, and workflow steps that upload and verify the matching signed tarball, signature, and `latest.json`. See [docs/release-updater.md](docs/release-updater.md) for the activation requirements.
 
 The private key and password must never be committed or pasted into an issue. Losing the private key means shipping a new public key in a release users must install by hand, so keep a copy somewhere safe.
 
