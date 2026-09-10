@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::CoreError;
-use crate::providers::{CompletionRequest, LlmProvider};
+use crate::providers::{CompletionRequest, DeltaSink, LlmProvider};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,6 +25,63 @@ pub struct WritingCommand {
     /// Proofread and a frontier model for Rewrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Apps this command is offered in. Empty (the default) means every app.
+    /// Entries match the frontmost app's name or bundle id, case-insensitively
+    /// and whitespace-trimmed, with a trailing `*` acting as a prefix glob —
+    /// the same matching style as `excluded_apps`. See [`command_applies_to`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
+}
+
+/// True when `cmd` should be offered in the app a selection came from.
+///
+/// An empty `apps` list (or one holding only blank entries) means the command
+/// is universal. Otherwise an entry matches when it equals the app name or the
+/// bundle id, compared trimmed and lowercased; a trailing `*` matches by
+/// prefix, and a bare `*` matches every app. A command that names apps but is
+/// checked against an unknown app (no name and no bundle id) does not apply —
+/// an allow-list only allows what it can identify.
+pub fn command_applies_to(
+    cmd: &WritingCommand,
+    app_name: Option<&str>,
+    bundle_id: Option<&str>,
+) -> bool {
+    let entries: Vec<String> = cmd
+        .apps
+        .iter()
+        .map(|a| a.trim().to_lowercase())
+        .filter(|a| !a.is_empty())
+        .collect();
+    if entries.is_empty() {
+        return true;
+    }
+    let name = app_name
+        .map(|n| n.trim().to_lowercase())
+        .filter(|n| !n.is_empty());
+    let bundle = bundle_id
+        .map(|b| b.trim().to_lowercase())
+        .filter(|b| !b.is_empty());
+    let candidates = [name.as_deref(), bundle.as_deref()];
+    entries.iter().any(|entry| {
+        if entry == "*" {
+            return true;
+        }
+        match entry.strip_suffix('*') {
+            Some(prefix) => candidates.iter().flatten().any(|c| c.starts_with(prefix)),
+            None => candidates.iter().flatten().any(|c| *c == entry),
+        }
+    })
+}
+
+/// The commands from `cmds` that apply to this app, in their original order.
+pub fn commands_for_app<'a>(
+    cmds: &'a [WritingCommand],
+    app_name: Option<&str>,
+    bundle_id: Option<&str>,
+) -> Vec<&'a WritingCommand> {
+    cmds.iter()
+        .filter(|c| command_applies_to(c, app_name, bundle_id))
+        .collect()
 }
 
 pub fn builtin_commands() -> Vec<WritingCommand> {
@@ -36,6 +93,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             prompt: "Proofread the text. Fix grammar, spelling, and punctuation only. Keep meaning and voice. Return only the corrected text.".into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         },
         WritingCommand {
             id: "rewrite".into(),
@@ -44,6 +102,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             prompt: "Rewrite the text for clarity and flow. Keep the original meaning. Return only the rewritten text.".into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         },
         WritingCommand {
             id: "friendly".into(),
@@ -52,6 +111,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             prompt: "Rewrite the text in a warm, friendly tone. Return only the rewritten text.".into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         },
         WritingCommand {
             id: "professional".into(),
@@ -60,6 +120,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             prompt: "Rewrite the text in a clear, professional tone. Return only the rewritten text.".into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         },
         WritingCommand {
             id: "concise".into(),
@@ -68,6 +129,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             prompt: "Make the text more concise without losing key meaning. Return only the rewritten text.".into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         },
         WritingCommand {
             id: "summary".into(),
@@ -76,6 +138,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             prompt: "Summarize the text clearly in markdown. Use short paragraphs or bullets as needed.".into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         },
         WritingCommand {
             id: "key_points".into(),
@@ -84,6 +147,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             prompt: "Extract the key points as a markdown bullet list.".into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         },
         WritingCommand {
             id: "table".into(),
@@ -92,6 +156,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             prompt: "Convert the useful information in the text into a markdown table.".into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         },
         WritingCommand {
             id: "translate".into(),
@@ -100,6 +165,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             prompt: "Translate the text to {{language}}. Return only the translation.".into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         },
     ]
 }
@@ -440,10 +506,49 @@ pub async fn run_command_with(
             user: input.to_string(),
         })
         .await?;
-    Ok(match command.kind {
+    Ok(finish_output(command.kind, out, input))
+}
+
+/// [`run_command_with`] that streams the reply: `on_delta` receives each text
+/// fragment as the model produces it, and the finished text is returned at
+/// the end exactly as `run_command_with` would have returned it.
+///
+/// Fragments are forwarded raw. Only the returned text has
+/// [`clean_replace_output`] applied for `Replace` commands, so a caller that
+/// writes over the user's selection must wait for the return value instead
+/// of assembling the fragments itself; fragments are for progress display.
+pub async fn run_command_stream(
+    provider: &dyn LlmProvider,
+    command: &WritingCommand,
+    input: &str,
+    custom_instruction: Option<&str>,
+    vars: PromptVars<'_>,
+    on_delta: &mut DeltaSink<'_>,
+) -> Result<String, CoreError> {
+    if input.trim().is_empty() {
+        return Err(CoreError::EmptyInput);
+    }
+    let system = build_system_prompt_with(command, custom_instruction, vars);
+
+    let out = provider
+        .complete_stream(
+            CompletionRequest {
+                system,
+                user: input.to_string(),
+            },
+            on_delta,
+        )
+        .await?;
+    Ok(finish_output(command.kind, out, input))
+}
+
+/// Post-process a finished reply for its command kind: `Replace` output is
+/// cleaned of chat framing, `Popup` markdown is returned as-is.
+fn finish_output(kind: CommandKind, out: String, input: &str) -> String {
+    match kind {
         CommandKind::Replace => clean_replace_output(&out, input),
         CommandKind::Popup => out,
-    })
+    }
 }
 
 /// Strip the chat framing models add around `Replace` output: an outer code
@@ -593,6 +698,7 @@ mod tests {
             prompt: "Proofread the text.".into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         }
     }
 
@@ -604,6 +710,7 @@ mod tests {
             prompt: "Summarize the text.".into(),
             hotkey: None,
             model: None,
+            apps: Vec::new(),
         }
     }
 
@@ -851,6 +958,129 @@ mod tests {
         assert!(system.contains("Preferred language: de."));
     }
 
+    fn app_cmd(id: &str, apps: &[&str]) -> WritingCommand {
+        WritingCommand {
+            apps: apps.iter().map(|a| (*a).to_string()).collect(),
+            ..cmd_with_id(id)
+        }
+    }
+
+    fn cmd_with_id(id: &str) -> WritingCommand {
+        WritingCommand {
+            id: id.into(),
+            label: id.to_uppercase(),
+            kind: CommandKind::Replace,
+            prompt: format!("Do {id}."),
+            hotkey: None,
+            model: None,
+            apps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_command_without_apps_applies_everywhere() {
+        let c = cmd_with_id("proofread");
+        assert!(command_applies_to(&c, Some("Mail"), Some("com.apple.mail")));
+        assert!(command_applies_to(&c, None, None));
+    }
+
+    #[test]
+    fn blank_app_entries_are_ignored_and_leave_the_command_universal() {
+        let c = app_cmd("proofread", &["  ", ""]);
+        assert!(command_applies_to(&c, Some("Xcode"), None));
+    }
+
+    #[test]
+    fn a_command_with_apps_does_not_apply_to_another_app() {
+        let c = app_cmd("reply", &["Mail"]);
+        assert!(command_applies_to(&c, Some("Mail"), Some("com.apple.mail")));
+        assert!(!command_applies_to(
+            &c,
+            Some("Slack"),
+            Some("com.tinyspeck.slackmacgap")
+        ));
+        assert!(!command_applies_to(&c, Some("Notes"), None));
+    }
+
+    #[test]
+    fn app_entries_match_names_and_bundle_ids_case_insensitively() {
+        let by_name = app_cmd("reply", &["  mAiL  "]);
+        assert!(command_applies_to(&by_name, Some("Mail"), None));
+        let by_bundle = app_cmd("post", &["COM.TinySpeck.SlackMacGap"]);
+        assert!(command_applies_to(
+            &by_bundle,
+            Some("Slack"),
+            Some("com.tinyspeck.slackmacgap")
+        ));
+        // The name alone does not satisfy an entry written as a bundle id.
+        assert!(!command_applies_to(&by_bundle, Some("Slack"), None));
+    }
+
+    #[test]
+    fn a_trailing_star_matches_by_prefix_and_a_bare_star_matches_everything() {
+        let prefixed = app_cmd("code", &["Xcode*"]);
+        assert!(command_applies_to(&prefixed, Some("Xcode-beta"), None));
+        assert!(command_applies_to(&prefixed, Some("Xcode"), None));
+        assert!(!command_applies_to(&prefixed, Some("Terminal"), None));
+
+        let bundle_prefix = app_cmd("note", &["com.apple.*"]);
+        assert!(command_applies_to(
+            &bundle_prefix,
+            Some("Notes"),
+            Some("com.apple.notes")
+        ));
+        assert!(!command_applies_to(
+            &bundle_prefix,
+            Some("Slack"),
+            Some("com.tinyspeck.slackmacgap")
+        ));
+
+        let everywhere = app_cmd("any", &["*"]);
+        assert!(command_applies_to(&everywhere, Some("Anything"), None));
+    }
+
+    #[test]
+    fn a_restricted_command_does_not_apply_to_an_unidentified_app() {
+        let c = app_cmd("reply", &["Mail"]);
+        assert!(!command_applies_to(&c, None, None));
+        assert!(!command_applies_to(&c, Some("   "), Some("")));
+    }
+
+    #[test]
+    fn commands_for_app_keeps_order_and_drops_the_ones_that_do_not_apply() {
+        let all = vec![
+            cmd_with_id("proofread"),
+            app_cmd("reply", &["Mail"]),
+            app_cmd("standup", &["com.tinyspeck.slackmacgap"]),
+            cmd_with_id("summary"),
+        ];
+        let ids: Vec<&str> = commands_for_app(&all, Some("Mail"), Some("com.apple.mail"))
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["proofread", "reply", "summary"]);
+
+        let slack: Vec<&str> =
+            commands_for_app(&all, Some("Slack"), Some("com.tinyspeck.slackmacgap"))
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect();
+        assert_eq!(slack, vec!["proofread", "standup", "summary"]);
+    }
+
+    #[test]
+    fn apps_round_trip_through_a_command_pack_and_stay_off_the_wire_when_empty() {
+        let cmds = vec![app_cmd("reply", &["Mail", "com.apple.notes"])];
+        let toml_text = render_command_pack(&cmds).unwrap();
+        assert!(toml_text.contains("apps"), "{toml_text}");
+        let back = parse_command_pack(&toml_text).unwrap();
+        assert_eq!(back[0].apps, vec!["Mail", "com.apple.notes"]);
+
+        let plain = render_command_pack(&[cmd_with_id("proofread")]).unwrap();
+        assert!(!plain.contains("apps"), "{plain}");
+        assert!(parse_command_pack(&plain).unwrap()[0].apps.is_empty());
+    }
+
     fn pack_cmd(id: &str, hotkey: Option<&str>) -> WritingCommand {
         WritingCommand {
             id: id.into(),
@@ -859,6 +1089,7 @@ mod tests {
             prompt: format!("Do {id}."),
             hotkey: hotkey.map(str::to_string),
             model: None,
+            apps: Vec::new(),
         }
     }
 
@@ -1105,5 +1336,131 @@ mod tests {
             clean_replace_output("```\n    indented line\n```", "    indented line\n"),
             "    indented line\n"
         );
+    }
+
+    /// Streams the input back one line at a time (newline included), so
+    /// tests can see exactly which fragments the sink received.
+    /// Streams a fixed reply line by line whatever the input, so the finished
+    /// text can differ from the selection the cleaner compares it against.
+    struct CannedStreamProvider(&'static str);
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CannedStreamProvider {
+        async fn complete(&self, _req: CompletionRequest) -> Result<String, CoreError> {
+            Ok(self.0.to_string())
+        }
+
+        async fn complete_stream(
+            &self,
+            _req: CompletionRequest,
+            on_delta: &mut DeltaSink<'_>,
+        ) -> Result<String, CoreError> {
+            for line in self.0.split_inclusive('\n') {
+                on_delta(line);
+            }
+            Ok(self.0.to_string())
+        }
+    }
+
+    struct LineStreamProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for LineStreamProvider {
+        async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+            Ok(req.user)
+        }
+
+        async fn complete_stream(
+            &self,
+            req: CompletionRequest,
+            on_delta: &mut DeltaSink<'_>,
+        ) -> Result<String, CoreError> {
+            for line in req.user.split_inclusive('\n') {
+                on_delta(line);
+            }
+            Ok(req.user)
+        }
+    }
+
+    #[tokio::test]
+    async fn run_command_stream_cleans_replace_final_text_but_forwards_raw_deltas() {
+        // The selection is plain, so the fence and preamble the model added
+        // are framing and are stripped from the returned text - but not from
+        // the deltas, which are for progress display only.
+        let fenced = "```\nHere is the corrected text:\nTwo cats.\n```";
+        let mut seen: Vec<String> = Vec::new();
+        let out = run_command_stream(
+            &CannedStreamProvider(fenced),
+            &cmd(),
+            "Two cats!",
+            None,
+            PromptVars::default(),
+            &mut |d: &str| seen.push(d.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "Two cats.", "final Replace text is cleaned");
+        assert_eq!(
+            seen,
+            vec![
+                "```\n",
+                "Here is the corrected text:\n",
+                "Two cats.\n",
+                "```"
+            ],
+            "deltas are forwarded exactly as the provider sent them"
+        );
+        assert_eq!(seen.concat(), fenced);
+    }
+
+    #[tokio::test]
+    async fn run_command_stream_leaves_popup_text_alone_and_rejects_empty_input() {
+        let fenced = "```\nA summary.\n```";
+        let mut seen: Vec<String> = Vec::new();
+        let out = run_command_stream(
+            &LineStreamProvider,
+            &popup_cmd(),
+            fenced,
+            None,
+            PromptVars::default(),
+            &mut |d: &str| seen.push(d.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, fenced);
+        assert_eq!(seen.len(), 3);
+
+        let mut calls = 0usize;
+        let err = run_command_stream(
+            &LineStreamProvider,
+            &cmd(),
+            "   ",
+            None,
+            PromptVars::default(),
+            &mut |_: &str| calls += 1,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CoreError::EmptyInput), "{err}");
+        assert_eq!(calls, 0, "no provider call for empty input");
+    }
+
+    /// A provider with only `complete` still works through the streaming
+    /// entry point: the whole reply arrives as one fragment.
+    #[tokio::test]
+    async fn run_command_stream_falls_back_to_one_fragment() {
+        let mut seen: Vec<String> = Vec::new();
+        let out = run_command_stream(
+            &EchoProvider,
+            &popup_cmd(),
+            "hello",
+            None,
+            PromptVars::default(),
+            &mut |d: &str| seen.push(d.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "hello");
+        assert_eq!(seen, vec!["hello"]);
     }
 }

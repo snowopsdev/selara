@@ -322,6 +322,29 @@ button.btn:disabled { opacity: 0.5; }
   display: flex; flex-direction: column; align-items: center; gap: 10px;
 }
 .cmd-list .empty strong { color: var(--text); font-weight: 600; font-size: 13px; }
+.hist-item {
+  display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: start;
+  padding: 10px 10px; margin: 0 -6px; border-top: 1px solid var(--hairline);
+}
+.hist-item:first-child { border-top: 0; }
+.hist-item .hist-main { min-width: 0; }
+.hist-item h3 {
+  margin: 0; font-size: 13.5px; font-weight: 600;
+  display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap;
+}
+.hist-item h3 .hist-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-item .hist-meta { font-size: 11.5px; color: var(--muted); margin: 2px 0 6px; }
+.hist-item .hist-preview {
+  margin: 0; font-size: 12px; line-height: 1.4; display: grid; grid-template-columns: auto 1fr; gap: 2px 8px;
+}
+.hist-item .hist-preview dt { color: var(--muted); margin: 0; }
+.hist-item .hist-preview dd {
+  margin: 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hist-item .hist-preview dd.result { color: var(--text); }
+.hist-item .hist-preview dd.original { color: var(--muted); }
+.hist-item .row-actions { display: flex; flex-direction: column; gap: 4px; }
+.hist-item .row-actions .btn { white-space: nowrap; font-size: 11.5px; padding: 3px 9px; }
 button.icon-btn.danger:hover { color: var(--danger); }
 
 /* Sheet */
@@ -469,6 +492,21 @@ button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
   margin-top: 8px; font-size: 12.5px; font-weight: 500; color: var(--text);
 }
 .check-row input[type="checkbox"] { width: auto; height: auto; margin: 0; box-shadow: none; }
+.usage-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12.5px; }
+.usage-table th, .usage-table td { padding: 4px 0; text-align: right; white-space: nowrap; }
+.usage-table th:first-child, .usage-table td:first-child { text-align: left; }
+.usage-table th { font-weight: 500; color: var(--muted); }
+.usage-table td + td, .usage-table th + th { padding-left: 14px; }
+
+.serve-log { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.serve-log summary { cursor: default; }
+.serve-log pre {
+  margin: 8px 0 0; max-height: 180px; overflow: auto; white-space: pre-wrap;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--text);
+  padding: 8px 10px; border-radius: var(--radius-control); background: var(--glass-strong); border: 1px solid var(--hairline);
+}
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 500; color: var(--text); }
+.check-row input[type="checkbox"] { width: auto; height: auto; margin: 0; box-shadow: none; }
 
 .soon {
   border: 1px dashed var(--hairline-strong); border-radius: var(--radius-control); padding: 12px;
@@ -505,6 +543,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2.5"/><path d="M5 6l2.5 2L5 10M8.5 10h3"/></svg>
         Commands
       </button>
+      <button class="nav-item" data-section="history">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9"/><path d="M2 2.5v2.6h2.6"/><path d="M8 5v3.2l2.2 1.3"/></svg>
+        History
+      </button>
       <button class="nav-item" data-section="limits">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 11.5a5.5 5.5 0 1 1 11 0"/><path d="M8 11.5l2.6-3.6"/><circle cx="8" cy="11.5" r="1" fill="currentColor"/></svg>
         Limits
@@ -520,6 +562,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       <section id="section-general" class="section"></section>
       <section id="section-models" class="section"></section>
       <section id="section-commands" class="section"></section>
+      <section id="section-history" class="section"></section>
       <section id="section-limits" class="section"></section>
     </main>
   </div>
@@ -541,6 +584,24 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "command";
   }
   function kindLabel(k) { return k === "popup" ? "Popup" : "Replace"; }
+  // "just now", "3 min ago", "2 h ago", "5 d ago"; `ts` and `now` in unix seconds.
+  function relativeTime(ts, now) {
+    const t = Number(ts);
+    if (!Number.isFinite(t) || t <= 0) return "unknown time";
+    const d = Math.max(0, Math.floor(Number(now) - t));
+    if (d < 45) return "just now";
+    if (d < 3600) return Math.max(1, Math.round(d / 60)) + " min ago";
+    if (d < 86400) return Math.round(d / 3600) + " h ago";
+    if (d < 86400 * 30) return Math.round(d / 86400) + " d ago";
+    return new Date(t * 1000).toLocaleDateString();
+  }
+  // One line of preview: whitespace collapsed, cut to `max` chars with an ellipsis.
+  function previewLine(text, max) {
+    const one = String(text ?? "").replace(/\s+/g, " ").trim();
+    if (!one) return "(empty)";
+    const n = Number(max) || 160;
+    return one.length > n ? one.slice(0, n - 1).trimEnd() + "\u2026" : one;
+  }
   function maskEmail(email) {
     if (!email) return "";
     const at = email.indexOf("@");
@@ -569,6 +630,11 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const hay = [c.label, c.prompt, c.hotkey || "", kindLabel(c.kind)].join(" ").toLowerCase();
     return hay.includes(q);
   }
+  // `Mail, com.apple.Notes , , Xcode*` -> ["Mail", "com.apple.Notes", "Xcode*"].
+  // An empty list means the command is offered in every app.
+  function parseAppList(text) {
+    return String(text || "").split(",").map((a) => a.trim()).filter(Boolean);
+  }
   function statusDotClass(st) {
     if (!st) return "unknown";
     if (st.logged_in) return "ok";
@@ -581,7 +647,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
   // @selara-helpers-end
   const statusEl = () => $("#save-status");
-  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*)$/;
+  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*|Will start at login|Will not start at login|Update available|Installing update…)$/;
   const BAD_STATUS = /error|failed|required|before saving|not available|could not|enoent/i;
   function setStatus(msg) {
     const text = msg || "";
@@ -728,25 +794,119 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   document.querySelectorAll(".nav-item").forEach((btn) => {
-    btn.addEventListener("click", () => showSection(btn.dataset.section));
+    btn.addEventListener("click", async () => {
+      showSection(btn.dataset.section);
+      if (btn.dataset.section === "history" && config) {
+        await refreshHistoryData();
+        renderHistory();
+      }
+    });
   });
 
   // Status tab: is `serve` running, is Accessibility granted, can the
   // provider be reached, and which shortcuts are live. Read-only apart from
   // the two buttons; editing happens in the other tabs.
   let serveStatus = null;
+  let supervisor = null;
+  let serveLogLines = [];
   let axGranted = null;
+  let appVersion = "";
+  // Last result of check_for_updates (also pushed by the background check
+  // through the `update-changed` event). Never triggers a network check by
+  // itself; the user presses the button for that.
+  let updateStatus = null;
+  let usageSummary = null;
 
   async function refreshStatusData() {
+    try {
+      appVersion = String(await invoke("app_version") || "");
+    } catch (_) {
+      appVersion = "";
+    }
+    try {
+      // Rust keeps the last check's result. A webview reload, or a background
+      // check that landed before the listener was bound, would otherwise leave
+      // the card saying "Not checked" until the next daily run.
+      const stored = await invoke("update_status");
+      if (stored) updateStatus = stored;
+    } catch (_) {
+      // An older build without the command: the event listener still works.
+    }
     try {
       serveStatus = await invoke("serve_status");
     } catch (e) {
       serveStatus = { running: false, pid: null, pidfile: "", error: String(e) };
     }
     try {
+      supervisor = await invoke("serve_supervisor_status");
+    } catch (_) {
+      supervisor = null;
+    }
+    try {
+      serveLogLines = await invoke("serve_log");
+      if (!Array.isArray(serveLogLines)) serveLogLines = [];
+    } catch (_) {
+      serveLogLines = [];
+    }
+    try {
       axGranted = await invoke("accessibility_status");
     } catch (_) {
       axGranted = null;
+    }
+    try {
+      usageSummary = await invoke("usage_summary");
+    } catch (e) {
+      usageSummary = { error: String(e) };
+    }
+  }
+
+  function fmtTokens(n) {
+    return Number(n || 0).toLocaleString("en-US");
+  }
+
+  function fmtCost(bucket) {
+    if (!bucket || bucket.cost_usd === null || bucket.cost_usd === undefined) return "n/a";
+    const c = Number(bucket.cost_usd);
+    const base = "~$" + (c < 0.01 && c > 0 ? c.toFixed(4) : c.toFixed(2));
+    return bucket.unpriced ? base + " +" + bucket.unpriced + " unpriced" : base;
+  }
+
+  function usageRow(label, bucket) {
+    const b = bucket || {};
+    return "<tr><td>" + escapeHtml(label) + "</td>" +
+      "<td>" + fmtTokens(b.requests) + "</td>" +
+      "<td>" + fmtTokens(b.input) + "</td>" +
+      "<td>" + fmtTokens(b.output) + "</td>" +
+      "<td>" + escapeHtml(fmtCost(b)) + "</td></tr>";
+  }
+
+  // The supervisor emits "serve-changed" whenever serve starts, stops, exits or
+  // is restarted automatically after a crash — which happens from the tray menu
+  // and from the crash-loop guard, not just from the Status buttons. Without a
+  // listener an open Status tab keeps showing whatever it last read until the
+  // user presses Refresh.
+  let serveChangedPending = false;
+  async function onServeChanged() {
+    // Coalesce a burst (stop + start of a restart arrive back to back).
+    if (serveChangedPending) return;
+    serveChangedPending = true;
+    try {
+      await refreshStatusData();
+      renderStatus();
+    } finally {
+      serveChangedPending = false;
+    }
+  }
+
+  async function listenForServeChanges() {
+    const g = window.__TAURI__;
+    const listen =
+      g && g.event && typeof g.event.listen === "function" ? g.event.listen.bind(g.event) : null;
+    if (!listen) return;
+    try {
+      await listen("serve-changed", onServeChanged);
+    } catch (e) {
+      console.warn("serve-changed listener unavailable:", e);
     }
   }
 
@@ -779,17 +939,39 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const auth = p.auth === "chatgpt" && kind === "open_ai_compatible" ? "chatgpt" : "api_key";
     const sv = serveStatus || {};
 
-    // 1. serve
-    const serveDot = sv.error ? "unknown" : (sv.running ? "ok" : "bad");
-    const serveState = sv.error ? "Unknown" : (sv.running ? "Running (pid " + sv.pid + ")" : "Not running");
+    // 1. serve (managed by this app, running elsewhere, or stopped)
+    const sup = supervisor || {};
+    const running = !!(sv.running || sup.managed);
+    const pid = sup.pid || sv.pid;
+    const serveDot = sv.error ? "unknown" : (running ? "ok" : "bad");
+    const serveState = sv.error
+      ? "Unknown"
+      : (sup.managed ? "Managed by the Settings app (pid " + pid + ")"
+        : (running ? "Running outside the app (pid " + pid + ")" : "Not running"));
+    const serveActions =
+      "<div class=\"actions\">" +
+      (running
+        ? (sup.managed
+          ? "<button type=\"button\" class=\"btn secondary\" id=\"serve-stop\">Stop</button>" +
+            "<button type=\"button\" class=\"btn secondary\" id=\"serve-restart\">Restart</button>"
+          : "<p class=\"field-hint\">Started outside the app; stop it with Ctrl+C in its terminal. The app will not start a second copy.</p>")
+        : "<button type=\"button\" class=\"btn\" id=\"serve-start\">Start</button>") +
+      "</div>";
+    const logLines = (serveLogLines || []).slice(-40);
+    const serveLog = logLines.length
+      ? "<details class=\"serve-log\"><summary>Recent output (" + logLines.length + " lines)</summary><pre>" + escapeHtml(logLines.join("\n")) + "</pre></details>"
+      : "";
     const serveBody =
       "<p class=\"field-hint\">" +
-      (sv.running
-        ? "The global hotkey is live. Stop it with Ctrl+C in the terminal that runs it."
-        : "Hotkeys only work while it runs. Start it from the repo with <code>cargo run -p selara -- serve</code>, or <code>selara serve</code> from an installed build.") +
+      (running
+        ? "The global hotkey is live."
+        : "Hotkeys only work while it runs. Start it here, or from a terminal with <code>cargo run -p selara -- serve</code> / <code>selara serve</code>.") +
       "</p>" +
+      serveActions +
       "<dl class=\"status-meta\"><dt>Pidfile</dt><dd>" + escapeHtml(sv.pidfile || "unknown") + "</dd></dl>" +
-      (sv.error ? "<p class=\"field-hint error\">" + escapeHtml(sv.error) + "</p>" : "");
+      (sup.last_error ? "<p class=\"field-hint error\">" + escapeHtml(sup.last_error) + "</p>" : "") +
+      (sv.error ? "<p class=\"field-hint error\">" + escapeHtml(sv.error) + "</p>" : "") +
+      serveLog;
 
     // 2. Accessibility
     const axKnown = typeof axGranted === "boolean";
@@ -831,16 +1013,136 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       (cmdKeys.length ? "" : "No command has its own shortcut yet; add one from the Commands tab. ") +
       "Shortcuts work while serve is running and pick up saved changes within about a second.</p>";
 
+    // 5. Updates (signed releases via tauri-plugin-updater)
+    const up = updateStatus || {};
+    const upAvailable = up.state === "available";
+    const upDot = up.state === "available" ? "ok"
+      : (up.state === "up_to_date" ? "ok" : (up.state === "error" ? "bad" : "unknown"));
+    const upState = up.state === "available" ? "v" + up.version + " available"
+      : (up.state === "up_to_date" ? "Up to date"
+        : (up.state === "error" ? "Check failed"
+          : (up.state === "unconfigured" ? "Not configured" : "Not checked")));
+    const upResult = up.state === "available"
+      ? "Selara v" + up.version + " is ready to install" + (up.date ? " (released " + up.date + ")" : "") + "."
+      : (up.state === "up_to_date" ? "You are on the latest release."
+        : (up.state === "error" ? String(up.message || "Update check failed.")
+          : (up.state === "unconfigured"
+            ? "This build has no updater signing key, so checks are skipped. Download new releases from GitHub."
+            : "Checks the GitHub release feed for a newer signed build. Nothing is downloaded until you choose to install.")));
+    const updatesBody =
+      "<dl class=\"status-meta\">" +
+      "<dt>Installed</dt><dd>" + escapeHtml(appVersion ? "v" + appVersion : "unknown") + "</dd>" +
+      (upAvailable ? "<dt>Latest</dt><dd>v" + escapeHtml(up.version) + "</dd>" : "") +
+      "</dl>" +
+      (upAvailable && up.notes
+        ? "<details class=\"serve-log\"><summary>Release notes</summary><pre>" + escapeHtml(String(up.notes)) + "</pre></details>"
+        : "") +
+      "<div class=\"actions\">" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"status-check-update\">Check for updates</button>" +
+      (upAvailable ? "<button type=\"button\" class=\"btn\" id=\"status-install-update\">Install and restart</button>" : "") +
+      "<span class=\"field-hint" + (up.state === "error" ? " error" : "") + "\" id=\"status-update-result\">" + escapeHtml(upResult) + "</span>" +
+      "</div>";
+    // 5. usage (local ledger next to the config; never leaves the machine)
+    const u = usageSummary || {};
+    const all = u.all_time || {};
+    const usageState = u.error ? "Unavailable" : (all.requests ? fmtTokens(all.requests) + (all.requests === 1 ? " request" : " requests") : "No requests yet");
+    const usageBody = u.error
+      ? "<p class=\"field-hint error\">" + escapeHtml(u.error) + "</p>"
+      : "<table class=\"usage-table\">" +
+        "<thead><tr><th>Window</th><th>Requests</th><th>Tokens in</th><th>Tokens out</th><th>Est. cost</th></tr></thead>" +
+        "<tbody>" + usageRow("Today", u.today) + usageRow("Last 30 days", u.last_30_days) + usageRow("All time", u.all_time) + "</tbody>" +
+        "</table>" +
+        "<div class=\"actions\">" +
+        "<p class=\"field-hint\">Counted locally from provider replies and kept in <code>usage.jsonl</code> next to the config; never sent anywhere. Costs are estimates from a built-in list-price table (n/a for local or unlisted models).</p>" +
+        "<button type=\"button\" class=\"btn secondary\" id=\"usage-clear\"" + (all.requests ? "" : " disabled") + ">Clear</button>" +
+        "</div>";
+
     s.innerHTML =
       "<h1>Status</h1>" +
       "<div class=\"status-toolbar\">" +
-      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, and the shortcuts.</p>" +
+      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, the shortcuts, and updates.</p>" +
+      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, the shortcuts, and what it has cost.</p>" +
       "<button type=\"button\" class=\"btn secondary\" id=\"status-refresh\">Refresh</button>" +
       "</div>" +
       statusCard("serve", "selara serve", serveDot, serveState, serveBody) +
       statusCard("accessibility", "Accessibility", axDot, axState, axBody) +
       statusCard("provider", "Provider", "unknown", "Not checked", providerBody) +
-      statusCard("shortcuts", "Shortcuts", "", shortcutCount + (shortcutCount === 1 ? " shortcut" : " shortcuts"), shortcutsBody);
+      statusCard("shortcuts", "Shortcuts", "", shortcutCount + (shortcutCount === 1 ? " shortcut" : " shortcuts"), shortcutsBody) +
+      statusCard("updates", "Updates", upDot, upState, updatesBody);
+
+    $("#status-check-update").onclick = async () => {
+      const btn = $("#status-check-update");
+      const out = $("#status-update-result");
+      btn.disabled = true;
+      out.classList.remove("error");
+      out.textContent = "Checking for updates…";
+      setStatus("Checking for updates…");
+      try {
+        updateStatus = await invoke("check_for_updates");
+        renderStatus();
+        setStatus(updateStatus && updateStatus.state === "available"
+          ? "Update available"
+          : (updateStatus && updateStatus.state === "error" ? String(updateStatus.message) : "Status refreshed"));
+      } catch (e) {
+        updateStatus = { state: "error", message: String(e) };
+        renderStatus();
+        setStatus(String(e));
+      }
+    };
+    const installBtn = $("#status-install-update");
+    if (installBtn) {
+      installBtn.onclick = async () => {
+        const out = $("#status-update-result");
+        installBtn.disabled = true;
+        $("#status-check-update").disabled = true;
+        out.classList.remove("error");
+        out.textContent = "Downloading and installing… Selara restarts when it is done.";
+        setStatus("Installing update…");
+        try {
+          await invoke("install_update");
+        } catch (e) {
+          updateStatus = { state: "error", message: String(e) };
+          renderStatus();
+            }
+        }
+    }
+
+      statusCard("usage", "Usage", u.error ? "unknown" : "", usageState, usageBody);
+
+    const clearBtn = $("#usage-clear");
+    if (clearBtn) {
+      clearBtn.onclick = async () => {
+        clearBtn.disabled = true;
+        setStatus("Clearing usage…");
+        try {
+          usageSummary = await invoke("clear_usage");
+          renderStatus();
+          setStatus("Usage cleared");
+        } catch (e) {
+          clearBtn.disabled = false;
+          setStatus(String(e));
+        }
+      };
+    }
+
+    async function serveAction(cmd, busy) {
+      setStatus(busy);
+      try {
+        await invoke(cmd);
+        await new Promise((r) => setTimeout(r, 600));
+        await refreshStatusData();
+        renderStatus();
+        setStatus("Status refreshed");
+      } catch (e) {
+        setStatus(String(e));
+      }
+    }
+    const startBtn = $("#serve-start");
+    if (startBtn) startBtn.onclick = () => serveAction("serve_start", "Starting serve…");
+    const stopBtn = $("#serve-stop");
+    if (stopBtn) stopBtn.onclick = () => serveAction("serve_stop", "Stopping serve…");
+    const restartBtn = $("#serve-restart");
+    if (restartBtn) restartBtn.onclick = () => serveAction("serve_restart", "Restarting serve…");
 
     $("#status-refresh").onclick = async () => {
       setStatus("Refreshing status…");
@@ -933,13 +1235,43 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<input id=\"undo-hotkey\" value=\"" + escapeAttr(config.undo_hotkey || "") + "\" placeholder=\"Optional, e.g. ctrl+shift+z\" autocomplete=\"off\" spellcheck=\"false\" />" +
       "<p class=\"field-hint\">Puts back the text the last Replace overwrote. The picker also has an Undo button.</p>" +
       "</div></div>" +
+      "<div class=\"section-label\">Excluded apps</div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"excluded-apps\">Ignore hotkeys in</label>" +
+      "<div class=\"control-stack\">" +
+      "<textarea id=\"excluded-apps\" rows=\"4\" placeholder=\"1Password&#10;com.apple.Terminal&#10;com.googlecode.iterm2\" autocomplete=\"off\" spellcheck=\"false\">" + escapeHtml((config.excluded_apps || []).join("\n")) + "</textarea>" +
+      "<p class=\"field-hint\">One app per line, by name (1Password) or bundle id (com.apple.Terminal). End an entry with * to match a prefix, for example com.apple.* or iTerm*. In these apps the hotkeys do nothing: no picker, no selection or clipboard read.</p>" +
+      "</div></div>" +
+      "<div class=\"section-label\">Startup</div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"autostart\">Start at login</label>" +
+      "<div class=\"control-stack\">" +
+      "<label class=\"check-row\" for=\"autostart\"><input type=\"checkbox\" id=\"autostart\" /> Open the Settings app (and start serve) when you log in</label>" +
+      "<p class=\"field-hint\" id=\"autostart-hint\">Applies immediately; no save needed.</p>" +
+      "</div></div>" +
       "</div>" +
       "<div class=\"general-save\"><button class=\"btn\" id=\"save-general\">Save changes</button></div>";
+    const autostart = $("#autostart");
+    invoke("plugin:autostart|is_enabled").then((on) => { autostart.checked = !!on; }).catch((e) => {
+      autostart.disabled = true;
+      const hint = $("#autostart-hint");
+      if (hint) hint.textContent = "Start at login is unavailable: " + String(e);
+    });
+    autostart.onchange = async () => {
+      try {
+        await invoke(autostart.checked ? "plugin:autostart|enable" : "plugin:autostart|disable");
+        setStatus(autostart.checked ? "Will start at login" : "Will not start at login");
+      } catch (e) {
+        autostart.checked = !autostart.checked;
+        setStatus(String(e));
+      }
+    };
     $("#save-general").onclick = async () => {
       await saveSection("general", {
         language: $("#language").value.trim() || "en",
         hotkey: $("#hotkey").value.trim() || "ctrl+shift+space",
         undo_hotkey: $("#undo-hotkey").value.trim() || null,
+        excluded_apps: $("#excluded-apps").value.split("\n").map((l) => l.trim()).filter(Boolean),
       });
     };
   }
@@ -1443,7 +1775,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       const badges =
         "<span class=\"badge\">" + escapeHtml(kindLabel(c.kind)) + "</span>" +
         (c.model ? "<span class=\"badge key\" title=\"Runs on this model\">" + escapeHtml(c.model) + "</span>" : "") +
-        (c.hotkey ? "<span class=\"badge key\" title=\"" + escapeAttr(c.hotkey) + "\">" + escapeHtml(prettyHotkey(c.hotkey)) + "</span>" : "");
+        (c.hotkey ? "<span class=\"badge key\" title=\"" + escapeAttr(c.hotkey) + "\">" + escapeHtml(prettyHotkey(c.hotkey)) + "</span>" : "") +
+        ((c.apps && c.apps.length) ? "<span class=\"badge\" title=\"Only in " + escapeAttr(c.apps.join(", ")) + "\">" + c.apps.length + (c.apps.length === 1 ? " app" : " apps") + "</span>" : "");
       return (
         "<div class=\"cmd-item\" data-id=\"" + escapeAttr(c.id) + "\" role=\"button\" tabindex=\"0\" aria-label=\"Edit " + escapeAttr(c.label) + "\">" +
         "<div class=\"cmd-main\"><h3><span class=\"cmd-name\">" + escapeHtml(c.label) + "</span>" + badges + "</h3>" +
@@ -1622,6 +1955,12 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<input id=\"cmd-model\" list=\"model-options\" value=\"" + escapeAttr((editing && editing.model) || "") + "\" placeholder=\"Optional, defaults to " + escapeAttr((config.provider && config.provider.model) || "the provider model") + "\" autocomplete=\"off\" spellcheck=\"false\" />" +
       "<p class=\"field-hint\">Override the provider's model for this command only (same provider and key). Load models on the Models tab to get suggestions.</p>" +
       "</div></div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"cmd-apps\">Apps</label>" +
+      "<div class=\"control-stack\">" +
+      "<input id=\"cmd-apps\" value=\"" + escapeAttr(((editing && editing.apps) || []).join(", ")) + "\" placeholder=\"Mail, com.tinyspeck.slackmacgap, Xcode*\" autocomplete=\"off\" spellcheck=\"false\" />" +
+      "<p class=\"field-hint\">Comma-separated app names or bundle ids. Leave empty to offer this command in every app. A trailing * matches by prefix.</p>" +
+      "</div></div>" +
       "<div class=\"sheet-foot\">" +
       (editing ? "<button type=\"button\" class=\"btn linkish danger-text\" id=\"cmd-delete\">Delete command</button>" : "") +
       "<span class=\"spacer\"></span>" +
@@ -1658,6 +1997,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       const hotkey = hotkeyRaw ? hotkeyRaw : null;
       const modelRaw = $("#cmd-model").value.trim();
       const cmdModel = modelRaw ? modelRaw : null;
+      const apps = parseAppList($("#cmd-apps").value);
       if (!label || !prompt) {
         setStatus("Label and prompt are required");
         (!label ? $("#cmd-label") : $("#cmd-prompt")).focus();
@@ -1665,10 +2005,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       }
       if (editingId) {
         const i = config.commands.findIndex((c) => c.id === editingId);
-        if (i >= 0) config.commands[i] = Object.assign({}, config.commands[i], { label, prompt, kind, hotkey, model: cmdModel });
+        if (i >= 0) config.commands[i] = Object.assign({}, config.commands[i], { label, prompt, kind, hotkey, model: cmdModel, apps });
       } else {
         const newId = slug(label) + "-" + Math.random().toString(36).slice(2, 7);
-        config.commands.push({ id: newId, label, prompt, kind, hotkey, model: cmdModel });
+        config.commands.push({ id: newId, label, prompt, kind, hotkey, model: cmdModel, apps });
       }
       await saveSection("commands", config.commands);
       closeCommandSheet();
@@ -1704,6 +2044,11 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<input id=\"replace_warn\" type=\"number\" min=\"0\" value=\"" + (L.replace_warn_chars ?? 4000) + "\" />" +
       "<p class=\"field-hint\">Ask again before replacing a selection larger than this.</p>" +
       "</div></div>" +
+      "<div class=\"section-label\">Secrets</div>" +
+      "<div class=\"form-row\">" +
+      "<label class=\"check-row\" for=\"secret_guard\"><input type=\"checkbox\" id=\"secret_guard\"" + (L.secret_guard === false ? "" : " checked") + " /> Warn before sending secret-shaped text to a hosted provider</label>" +
+      "<p class=\"field-hint\">Looks for API keys, private key blocks, JWTs, and card numbers. Local servers (localhost, .local, private IPs) are exempt.</p>" +
+      "</div>" +
       "</div>" +
       "<div class=\"limits-actions\">" +
       "<button class=\"btn linkish\" id=\"reset-limits\">Reset to defaults</button>" +
@@ -1714,10 +2059,11 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         soft_warn_chars: num($("#soft_warn").value),
         hard_max_chars: num($("#hard_max").value),
         replace_warn_chars: num($("#replace_warn").value),
+        secret_guard: $("#secret_guard").checked,
       });
     };
     $("#reset-limits").onclick = async () => {
-      await saveSection("limits", { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000 });
+      await saveSection("limits", { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000, secret_guard: true });
       renderLimits();
     };
   }
@@ -1738,8 +2084,137 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     }
   }
 
+  // The background check (10 s after launch, then daily) and the tray's
+  // "Check for updates…" item report through this event; keep the card in step.
+  let updateListenerBound = false;
+  function listenForUpdates() {
+    if (updateListenerBound) return;
+    const g = window.__TAURI__;
+    if (!g || !g.event || typeof g.event.listen !== "function") return;
+    updateListenerBound = true;
+    g.event.listen("update-changed", (ev) => {
+      updateStatus = ev && ev.payload ? ev.payload : null;
+      if ($("#section-status").classList.contains("active")) renderStatus();
+      else if ($("#status-updates")) renderStatus();
+    }).catch(() => { updateListenerBound = false; });
+    }
+
+  // History tab: what `serve` wrote to history.jsonl, newest first. Read-only
+  // apart from the copy buttons and Clear; restoring text into the source
+  // app needs its focus and Accessibility, so the picker's Undo covers that.
+  let historyEntries = [];
+  let historyError = "";
+
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) { /* fall through to the execCommand path */ }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  async function refreshHistoryData() {
+    try {
+      const list = await invoke("history_list");
+      historyEntries = Array.isArray(list) ? list : [];
+      historyError = "";
+    } catch (e) {
+      historyEntries = [];
+      historyError = String(e);
+    }
+  }
+
+  function renderHistory() {
+    const s = $("#section-history");
+    const now = Math.floor(Date.now() / 1000);
+    const rows = historyEntries.map((h, i) => {
+      const when = relativeTime(h.ts, now);
+      const app = h.app ? " · " + escapeHtml(h.app) : "";
+      const isInsert = !h.original && h.kind !== "popup";
+      return (
+        "<div class=\"hist-item\" data-index=\"" + i + "\">" +
+        "<div class=\"hist-main\">" +
+        "<h3><span class=\"hist-name\">" + escapeHtml(h.label || h.command_id || "Command") + "</span>" +
+        "<span class=\"badge\">" + escapeHtml(isInsert ? "Insert below" : kindLabel(h.kind)) + "</span></h3>" +
+        "<div class=\"hist-meta\" title=\"" + escapeAttr(h.ts ? new Date(h.ts * 1000).toLocaleString() : "") + "\">" + escapeHtml(when) + app + "</div>" +
+        "<dl class=\"hist-preview\">" +
+        "<dt>Original</dt><dd class=\"original\" title=\"" + escapeAttr(previewLine(h.original, 400)) + "\">" + escapeHtml(previewLine(h.original, 160)) + "</dd>" +
+        "<dt>Result</dt><dd class=\"result\" title=\"" + escapeAttr(previewLine(h.result, 400)) + "\">" + escapeHtml(previewLine(h.result, 160)) + "</dd>" +
+        "</dl></div>" +
+        "<div class=\"row-actions\">" +
+        "<button type=\"button\" class=\"btn secondary\" data-act=\"copy-result\" title=\"Copy the result to the clipboard\">Copy result</button>" +
+        "<button type=\"button\" class=\"btn secondary\" data-act=\"copy-original\" title=\"Copy the text that was selected\"" + (h.original ? "" : " disabled") + ">Copy original</button>" +
+        "</div></div>"
+      );
+    }).join("");
+
+    let listInner = rows;
+    if (historyError) {
+      listInner = "<div class=\"empty\"><strong>Could not read history</strong><span>" + escapeHtml(historyError) + "</span></div>";
+    } else if (!historyEntries.length) {
+      listInner =
+        "<div class=\"empty\"><strong>No history yet</strong>" +
+        "<span>Every command that finishes while <code>selara serve</code> runs shows up here, newest first (last 50).</span></div>";
+    }
+
+    s.innerHTML =
+      "<h1>History</h1>" +
+      "<p class=\"lead\">What Selara wrote and what it replaced. Copy a result or the original text back to the clipboard; " +
+      "to put text back into the app itself, use Undo in the picker right after a Replace. " +
+      "The file holds the selected text verbatim and is readable only by you.</p>" +
+      "<div class=\"toolbar\">" +
+      "<span class=\"field-hint\" id=\"history-count\" style=\"flex:1\">" + historyEntries.length + (historyEntries.length === 1 ? " entry" : " entries") + "</span>" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"history-refresh\">Refresh</button>" +
+      "<button type=\"button\" class=\"btn danger\" id=\"history-clear\"" + (historyEntries.length ? "" : " disabled") + ">Clear history</button>" +
+      "</div>" +
+      "<div class=\"cmd-list\" id=\"history-list\">" + listInner + "</div>";
+
+    $("#history-refresh").onclick = async () => {
+      setStatus("Refreshing history…");
+      await refreshHistoryData();
+      renderHistory();
+      setStatus("History refreshed");
+    };
+    $("#history-clear").onclick = async () => {
+      if (!confirm("Clear the history? This deletes every saved original and result.")) return;
+      try {
+        await invoke("history_clear");
+        await refreshHistoryData();
+        renderHistory();
+        setStatus("History cleared");
+      } catch (e) {
+        setStatus(String(e));
+      }
+    };
+    $("#history-list").addEventListener("click", async (ev) => {
+      const btn = ev.target.closest("button[data-act]");
+      if (!btn) return;
+      const row = btn.closest(".hist-item");
+      const h = historyEntries[Number(row && row.dataset.index)];
+      if (!h) return;
+      const text = btn.dataset.act === "copy-original" ? h.original : h.result;
+      const ok = await copyText(text || "");
+      setStatus(ok ? (btn.dataset.act === "copy-original" ? "Copied original" : "Copied result") : "Copy failed");
+    });
+  }
+
   async function load() {
     setStatus("Loading config…");
+    // Before the first await: the startup check fires 10 s after launch and a
+    // slow load must not miss it.
+    listenForUpdates();
     try {
       config = await invoke("get_config");
       await refreshChatgptStatus();
@@ -1748,7 +2223,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       renderGeneral();
       renderModels();
       renderCommands();
+      await refreshHistoryData();
+      renderHistory();
       renderLimits();
+      await listenForServeChanges();
       setStatus("Loaded");
     } catch (e) {
       const msg = String(e);

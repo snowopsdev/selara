@@ -7,6 +7,20 @@
     "core:default",
     "core:window:allow-start-dragging",
     "shell:allow-open",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [{ "name": "binaries/selara", "sidecar": true, "args": true }]
+    },
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [{ "name": "binaries/selara", "sidecar": true, "args": true }]
+    },
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
+    "updater:allow-check",
+    "updater:allow-download-and-install",
+    "process:allow-restart",
     "allow-get-config",
     "allow-save-config",
     "allow-save-config-section",
@@ -16,13 +30,26 @@
     "allow-export-commands",
     "allow-import-commands",
     "allow-config-path",
+    "allow-history-list",
+    "allow-history-clear",
+    "allow-history-path",
     "allow-chatgpt-auth-status",
     "allow-chatgpt-login",
     "allow-chatgpt-logout",
     "allow-list-chatgpt-models",
     "allow-list-provider-models",
     "allow-serve-status",
+    "allow-serve-start",
+    "allow-serve-stop",
+    "allow-serve-restart",
+    "allow-serve-log",
+    "allow-serve-supervisor-status",
     "allow-accessibility-status",
-    "allow-open-accessibility-settings"
+    "allow-open-accessibility-settings",
+    "allow-app-version",
+    "allow-check-for-updates",
+    "allow-install-update",
+    "allow-usage-summary",
+    "allow-clear-usage"
   ]
 }

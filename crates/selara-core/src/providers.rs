@@ -10,6 +10,7 @@ use crate::chatgpt_auth::{
     ChatGptAuth, CODEX_MODELS_URL, CODEX_ORIGINATOR, CODEX_RESPONSES_URL, CODEX_USER_AGENT,
 };
 use crate::error::CoreError;
+use crate::usage::{self, TokenUsage};
 
 /// Fail fast on a black hole, but do not cap a still-progressing completion.
 /// `timeout()` is a total deadline through the last body byte; a local model or
@@ -355,9 +356,98 @@ pub struct CompletionRequest {
     pub user: String,
 }
 
+/// Receiver for streamed text fragments, see [`LlmProvider::complete_stream`].
+/// A named alias so the `&str` stays higher-ranked (`for<'a>`) through the
+/// `async_trait` rewrite, which would otherwise pin it to one lifetime.
+pub type DeltaSink<'a> = dyn FnMut(&str) + Send + 'a;
+
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError>;
+
+    /// Stream the reply; `on_delta` receives each text fragment in order.
+    /// Returns the full text.
+    ///
+    /// Fragments are forwarded exactly as the model sent them, before any
+    /// trimming or truncation check, so a caller may see fragments and then an
+    /// error; only the returned `String` is safe to write over a selection.
+    /// The default buffers [`complete`](Self::complete) and delivers it as one
+    /// fragment, so providers that cannot stream still fit the same call path.
+    async fn complete_stream(
+        &self,
+        req: CompletionRequest,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<String, CoreError> {
+        let out = self.complete(req).await?;
+        on_delta(&out);
+        Ok(out)
+    }
+}
+
+/// Read an SSE response body to the end and hand every complete event block
+/// to `on_event`, including a trailing block the server did not terminate
+/// with a blank line. Framing (`take_complete_sse_events`) and UTF-8
+/// reassembly live here so the three streaming providers only differ in how
+/// they interpret an event. An `Err` from `on_event` stops reading and is
+/// returned as-is.
+async fn for_each_sse_event(
+    resp: reqwest::Response,
+    mut on_event: impl FnMut(&str) -> Result<(), CoreError> + Send,
+) -> Result<(), CoreError> {
+    let mut stream = resp.bytes_stream();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = String::new();
+    while let Some(chunk) = stream.next().await {
+        pending.extend_from_slice(&chunk?);
+        drain_utf8(&mut pending, &mut buf);
+        for event in take_complete_sse_events(&mut buf) {
+            on_event(&event)?;
+        }
+    }
+    if !pending.is_empty() {
+        buf.push_str(&String::from_utf8_lossy(&pending));
+    }
+    if !buf.trim().is_empty() {
+        on_event(&buf)?;
+    }
+    Ok(())
+}
+
+/// Move the decodable prefix of `bytes` into `out`. A multi-byte character
+/// split across two network chunks is left in `bytes` until its tail arrives
+/// instead of being replaced with U+FFFD; genuinely invalid bytes are decoded
+/// lossily so a bad server cannot stall the stream.
+fn drain_utf8(bytes: &mut Vec<u8>, out: &mut String) {
+    let valid = match std::str::from_utf8(bytes) {
+        Ok(s) => {
+            out.push_str(s);
+            bytes.clear();
+            return;
+        }
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        Err(_) => bytes.len(),
+    };
+    out.push_str(&String::from_utf8_lossy(&bytes[..valid]));
+    bytes.drain(..valid);
+}
+
+/// `Content-Type` says JSON: a server that ignored `"stream": true` and sent
+/// one buffered reply (some OpenAI-compatible proxies do). Those responses are
+/// parsed the non-streaming way and delivered as a single fragment.
+fn is_json_response(resp: &reqwest::Response) -> bool {
+    resp.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.to_ascii_lowercase().contains("application/json"))
+}
+
+/// Shape a non-2xx reply exactly as the buffered providers do: the JSON error
+/// body when there is one, otherwise the raw text with the status kept.
+async fn http_error(resp: reqwest::Response) -> CoreError {
+    match json_or_raw(resp).await {
+        Ok((status, value)) => CoreError::Provider(format!("HTTP {status}: {value}")),
+        Err(e) => e,
+    }
 }
 
 pub struct OpenAiCompatibleProvider {
@@ -368,9 +458,12 @@ pub struct OpenAiCompatibleProvider {
     pub extra_headers: Vec<(String, String)>,
 }
 
-#[async_trait]
-impl LlmProvider for OpenAiCompatibleProvider {
-    async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+impl OpenAiCompatibleProvider {
+    fn request(
+        &self,
+        req: &CompletionRequest,
+        stream: bool,
+    ) -> Result<reqwest::RequestBuilder, CoreError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let client = http_client()?;
         let mut body = json!({
@@ -383,20 +476,27 @@ impl LlmProvider for OpenAiCompatibleProvider {
         if !is_reasoning_model(&self.model) {
             body["temperature"] = json!(0.2);
         }
+        if stream {
+            body["stream"] = json!(true);
+            // Ask for a final usage-only chunk (OpenAI, vLLM; others ignore it).
+            body["stream_options"] = json!({"include_usage": true});
+        }
 
         let mut builder = client.post(url).json(&body);
+        if stream {
+            builder = builder.header("Accept", "text/event-stream");
+        }
         if !self.api_key.is_empty() {
             builder = builder.bearer_auth(&self.api_key);
         }
         for (name, value) in &self.extra_headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
+        Ok(builder)
+    }
 
-        let resp = send_with_retry(builder, "chat completion", Idempotency::NonIdempotent).await?;
-        let (status, value) = json_or_raw(resp).await?;
-        if !status.is_success() {
-            return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
-        }
+    /// Text of a buffered Chat Completions reply, or the truncation error.
+    fn parse_response(value: &serde_json::Value) -> Result<String, CoreError> {
         if value
             .pointer("/choices/0/finish_reason")
             .and_then(|v| v.as_str())
@@ -404,9 +504,140 @@ impl LlmProvider for OpenAiCompatibleProvider {
         {
             return Err(truncation_error("finish_reason=length"));
         }
-
-        openai_message_content(&value)
+        openai_message_content(value)
             .ok_or_else(|| CoreError::Provider(format!("unexpected response: {value}")))
+    }
+
+    /// Ledger label: OpenRouter is the same wire format with attribution headers.
+    fn usage_kind(&self) -> &'static str {
+        if self.extra_headers.is_empty() {
+            usage::KIND_OPENAI_COMPATIBLE
+        } else {
+            usage::KIND_OPENROUTER
+        }
+    }
+
+    fn record_usage(&self, value: &serde_json::Value) {
+        if let Some(u) = parse_openai_usage(value) {
+            usage::record(self.usage_kind(), &self.model, &self.base_url, u);
+        }
+    }
+}
+
+/// `usage.prompt_tokens` / `usage.completion_tokens` from a Chat Completions
+/// reply or its final streamed chunk. `None` when the server sent no usage.
+pub fn parse_openai_usage(value: &serde_json::Value) -> Option<TokenUsage> {
+    let u = value.get("usage")?;
+    if u.is_null() {
+        return None;
+    }
+    Some(TokenUsage {
+        input: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        output: u
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    })
+}
+
+/// `usage.input_tokens` / `usage.output_tokens` from a buffered Messages reply.
+pub fn parse_anthropic_usage(value: &serde_json::Value) -> Option<TokenUsage> {
+    let u = value.get("usage")?;
+    if u.is_null() {
+        return None;
+    }
+    Some(TokenUsage {
+        input: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        output: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiCompatibleProvider {
+    async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+        let builder = self.request(&req, false)?;
+        let resp = send_with_retry(builder, "chat completion", Idempotency::NonIdempotent).await?;
+        let (status, value) = json_or_raw(resp).await?;
+        if !status.is_success() {
+            return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        }
+        self.record_usage(&value);
+        Self::parse_response(&value)
+    }
+
+    async fn complete_stream(
+        &self,
+        req: CompletionRequest,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<String, CoreError> {
+        let builder = self.request(&req, true)?;
+        let resp = send_with_retry(builder, "chat completion", Idempotency::NonIdempotent).await?;
+        if !resp.status().is_success() {
+            return Err(http_error(resp).await);
+        }
+        if is_json_response(&resp) {
+            let (_, value) = json_or_raw(resp).await?;
+            self.record_usage(&value);
+            let out = Self::parse_response(&value)?;
+            on_delta(&out);
+            return Ok(out);
+        }
+
+        let mut out = String::new();
+        let mut truncated = false;
+        let mut terminated = false;
+        let mut used: Option<TokenUsage> = None;
+        for_each_sse_event(resp, |event| {
+            if sse_is_done_sentinel(event) {
+                terminated = true;
+            }
+            let Some((_, value)) = parse_sse_event(event) else {
+                return Ok(());
+            };
+            if let Some(err) = value.get("error") {
+                return Err(CoreError::Provider(format!("stream error: {err}")));
+            }
+            // With `include_usage` the last chunk carries `usage` and no choices.
+            if let Some(u) = parse_openai_usage(&value) {
+                used = Some(u);
+            }
+            // Role-only and keep-alive chunks carry `content: null`; skip them.
+            if let Some(text) = value
+                .pointer("/choices/0/delta/content")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                out.push_str(text);
+                on_delta(text);
+            }
+            if let Some(reason) = value
+                .pointer("/choices/0/finish_reason")
+                .and_then(|v| v.as_str())
+            {
+                terminated = true;
+                truncated |= reason == "length";
+            }
+            Ok(())
+        })
+        .await?;
+        if let Some(u) = used {
+            usage::record(self.usage_kind(), &self.model, &self.base_url, u);
+        }
+        // Drain the whole stream first so the connection closes cleanly, but
+        // never hand back partial text: the caller would write it over the selection.
+        if truncated {
+            return Err(truncation_error("finish_reason=length"));
+        }
+        if !terminated {
+            return Err(incomplete_stream_error("no finish_reason or [DONE] event"));
+        }
+        let trimmed = out.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(CoreError::Provider(
+                "unexpected response: the stream carried no content deltas".into(),
+            ));
+        }
+        Ok(trimmed)
     }
 }
 
@@ -416,13 +647,16 @@ pub struct AnthropicProvider {
     pub base_url: String,
 }
 
-#[async_trait]
-impl LlmProvider for AnthropicProvider {
-    async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+impl AnthropicProvider {
+    fn request(
+        &self,
+        req: &CompletionRequest,
+        stream: bool,
+    ) -> Result<reqwest::RequestBuilder, CoreError> {
         let base = anthropic_api_root(&self.base_url);
         let url = format!("{base}/v1/messages");
         let client = http_client()?;
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "max_tokens": anthropic_max_tokens(&self.model, req.user.chars().count()),
             "system": req.system,
@@ -430,17 +664,22 @@ impl LlmProvider for AnthropicProvider {
                 {"role": "user", "content": req.user}
             ]
         });
-        let builder = client
+        if stream {
+            body["stream"] = json!(true);
+        }
+        let mut builder = client
             .post(url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .json(&body);
-        let resp =
-            send_with_retry(builder, "anthropic messages", Idempotency::NonIdempotent).await?;
-        let (status, value) = json_or_raw(resp).await?;
-        if !status.is_success() {
-            return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        if stream {
+            builder = builder.header("Accept", "text/event-stream");
         }
+        Ok(builder)
+    }
+
+    /// Text of a buffered Messages reply, or the truncation error.
+    fn parse_response(value: &serde_json::Value) -> Result<String, CoreError> {
         if value.get("stop_reason").and_then(|v| v.as_str()) == Some("max_tokens") {
             return Err(truncation_error("stop_reason=max_tokens"));
         }
@@ -460,6 +699,123 @@ impl LlmProvider for AnthropicProvider {
     }
 }
 
+#[async_trait]
+impl LlmProvider for AnthropicProvider {
+    async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+        let builder = self.request(&req, false)?;
+        let resp =
+            send_with_retry(builder, "anthropic messages", Idempotency::NonIdempotent).await?;
+        let (status, value) = json_or_raw(resp).await?;
+        if !status.is_success() {
+            return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        }
+        if let Some(u) = parse_anthropic_usage(&value) {
+            usage::record(usage::KIND_ANTHROPIC, &self.model, &self.base_url, u);
+        }
+        Self::parse_response(&value)
+    }
+
+    async fn complete_stream(
+        &self,
+        req: CompletionRequest,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<String, CoreError> {
+        let builder = self.request(&req, true)?;
+        let resp =
+            send_with_retry(builder, "anthropic messages", Idempotency::NonIdempotent).await?;
+        if !resp.status().is_success() {
+            return Err(http_error(resp).await);
+        }
+        if is_json_response(&resp) {
+            let (_, value) = json_or_raw(resp).await?;
+            if let Some(u) = parse_anthropic_usage(&value) {
+                usage::record(usage::KIND_ANTHROPIC, &self.model, &self.base_url, u);
+            }
+            let out = Self::parse_response(&value)?;
+            on_delta(&out);
+            return Ok(out);
+        }
+
+        let mut out = String::new();
+        let mut truncated = false;
+        let mut terminated = false;
+        // `message_start` carries input tokens, `message_delta` the output count.
+        let mut used: Option<TokenUsage> = None;
+        for_each_sse_event(resp, |event| {
+            let Some((event_name, value)) = parse_sse_event(event) else {
+                return Ok(());
+            };
+            let json_type = value.get("type").and_then(|v| v.as_str());
+            let kind = event_name.as_deref().or(json_type).unwrap_or("");
+            match kind {
+                "content_block_delta" => {
+                    if value.pointer("/delta/type").and_then(|v| v.as_str()) == Some("text_delta") {
+                        if let Some(text) = value.pointer("/delta/text").and_then(|v| v.as_str()) {
+                            out.push_str(text);
+                            on_delta(text);
+                        }
+                    }
+                }
+                "message_start" => {
+                    if let Some(n) = value
+                        .pointer("/message/usage/input_tokens")
+                        .and_then(|v| v.as_u64())
+                    {
+                        used.get_or_insert_with(TokenUsage::default).input = n;
+                    }
+                }
+                "message_delta" => {
+                    // The final message_delta carries the stop reason; earlier
+                    // ones leave it null.
+                    if let Some(stop) = value.pointer("/delta/stop_reason").and_then(|v| v.as_str())
+                    {
+                        terminated = true;
+                        truncated |= stop == "max_tokens";
+                    }
+                    if let Some(n) = value
+                        .pointer("/usage/output_tokens")
+                        .and_then(|v| v.as_u64())
+                    {
+                        used.get_or_insert_with(TokenUsage::default).output = n;
+                    }
+                }
+                "message_stop" => terminated = true,
+                "error" => {
+                    let message = value
+                        .pointer("/error/message")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| value.to_string());
+                    return Err(CoreError::Provider(format!(
+                        "Anthropic stream error: {message}"
+                    )));
+                }
+                // message_start, content_block_start/stop, ping: nothing to
+                // extract; the body ends after message_stop.
+                _ => {}
+            }
+            Ok(())
+        })
+        .await?;
+        if let Some(u) = used {
+            usage::record(usage::KIND_ANTHROPIC, &self.model, &self.base_url, u);
+        }
+        if truncated {
+            return Err(truncation_error("stop_reason=max_tokens"));
+        }
+        if !terminated {
+            return Err(incomplete_stream_error("no message_stop event"));
+        }
+        let trimmed = out.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(CoreError::Provider(
+                "unexpected Anthropic response: the stream carried no text deltas".into(),
+            ));
+        }
+        Ok(trimmed)
+    }
+}
+
 /// Experimental: ChatGPT subscription via Codex CLI auth (`~/.codex/auth.json`).
 pub struct ChatGptCodexProvider {
     pub model: String,
@@ -474,7 +830,16 @@ impl ChatGptCodexProvider {
 
 #[async_trait]
 impl LlmProvider for ChatGptCodexProvider {
+    /// The Responses endpoint is always streamed; buffering is just a no-op sink.
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+        self.complete_stream(req, &mut |_: &str| {}).await
+    }
+
+    async fn complete_stream(
+        &self,
+        req: CompletionRequest,
+        on_delta: &mut DeltaSink<'_>,
+    ) -> Result<String, CoreError> {
         let mut auth = self.auth.clone();
         auth.ensure_fresh().await?;
 
@@ -523,31 +888,40 @@ impl LlmProvider for ChatGptCodexProvider {
             )));
         }
 
-        let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
         let mut out = String::new();
         let mut incomplete: Option<String> = None;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            for event in take_complete_sse_events(&mut buf) {
-                if let Some(delta) = parse_sse_output_text_delta(&event) {
-                    out.push_str(&delta);
-                }
-                incomplete = incomplete.or_else(|| sse_event_incomplete_reason(&event));
-            }
-        }
-        // Trailing event without final blank line
-        if !buf.trim().is_empty() {
-            if let Some(delta) = parse_sse_output_text_delta(&buf) {
+        let mut terminated = false;
+        let mut used: Option<TokenUsage> = None;
+        for_each_sse_event(resp, |event| {
+            if let Some(delta) = parse_sse_output_text_delta(event) {
                 out.push_str(&delta);
+                on_delta(&delta);
             }
-            incomplete = incomplete.or_else(|| sse_event_incomplete_reason(&buf));
+            if incomplete.is_none() {
+                incomplete = sse_event_incomplete_reason(event);
+            }
+            terminated |= sse_event_is_terminal(event);
+            if let Some(u) = parse_sse_response_usage(event) {
+                used = Some(u);
+            }
+            Ok(())
+        })
+        .await?;
+        if let Some(u) = used {
+            usage::record(
+                usage::KIND_CHATGPT_CODEX,
+                &self.model,
+                CODEX_RESPONSES_URL,
+                u,
+            );
         }
         // Drain the whole stream first so the connection closes cleanly, but
         // never hand back partial text: the caller would write it over the selection.
         if let Some(reason) = incomplete {
             return Err(incomplete_response_error(&reason));
+        }
+        if !terminated {
+            return Err(incomplete_stream_error("no response.completed event"));
         }
 
         let trimmed = out.trim().to_string();
@@ -558,6 +932,46 @@ impl LlmProvider for ChatGptCodexProvider {
         }
         Ok(trimmed)
     }
+}
+
+/// A stream that ends without the provider's terminal event may have been cut
+/// short by a proxy or a dropped connection, and the text collected so far can
+/// stop mid-sentence. Replace would paste that over the whole selection, so an
+/// unterminated stream is an error rather than a silently partial answer.
+fn incomplete_stream_error(detail: &str) -> CoreError {
+    CoreError::Provider(format!(
+        "the response stream ended before the model finished ({detail}); \
+         nothing was written, try again"
+    ))
+}
+
+/// True when the block is the `[DONE]` sentinel that closes an OpenAI-style
+/// stream. `parse_sse_event` deliberately returns `None` for it, so terminal
+/// detection has to look at the raw block.
+fn sse_is_done_sentinel(event_block: &str) -> bool {
+    event_block
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .any(|data| data.trim() == "[DONE]")
+}
+
+/// True when the block is a Responses API terminal event, i.e. the server said
+/// the response is over instead of the connection merely ending.
+pub fn sse_event_is_terminal(event_block: &str) -> bool {
+    if sse_is_done_sentinel(event_block) {
+        return true;
+    }
+    let Some((event_name, value)) = parse_sse_event(event_block) else {
+        return false;
+    };
+    let kind = event_name
+        .as_deref()
+        .or_else(|| value.get("type").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    matches!(
+        kind,
+        "response.completed" | "response.incomplete" | "response.failed" | "error"
+    )
 }
 
 /// Split one SSE event block into its `event:` name and parsed JSON `data:`
@@ -623,6 +1037,25 @@ pub fn sse_event_incomplete_reason(event_block: &str) -> Option<String> {
 
 /// Extract text from an SSE event whose `event:` is `response.output_text.delta`
 /// (or whose JSON `type` field matches). Data may be split across multiple `data:` lines.
+/// `response.usage.{input_tokens,output_tokens}` from a Responses API
+/// `response.completed` (or `response.incomplete`) event; `None` otherwise.
+pub fn parse_sse_response_usage(event_block: &str) -> Option<TokenUsage> {
+    let (event_name, value) = parse_sse_event(event_block)?;
+    let json_type = value.get("type").and_then(|v| v.as_str());
+    let kind = event_name.as_deref().or(json_type)?;
+    if kind != "response.completed" && kind != "response.incomplete" {
+        return None;
+    }
+    let u = value.pointer("/response/usage")?;
+    if u.is_null() {
+        return None;
+    }
+    Some(TokenUsage {
+        input: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        output: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
+}
+
 pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
     let (event_name, value) = parse_sse_event(event_block)?;
     let type_field = value.get("type").and_then(|v| v.as_str());
@@ -1347,6 +1780,192 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
         }
     }
 
+    /// The usage store is process-wide and tests run in parallel: hold this
+    /// while a test sets a store path, and use a unique model id per test so
+    /// concurrent recordings from other tests never match its assertions.
+    static USAGE_STORE_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct UsageStore {
+        path: std::path::PathBuf,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl UsageStore {
+        fn new(tag: &str) -> Self {
+            let guard = USAGE_STORE_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+            let path = std::env::temp_dir().join(format!(
+                "selara-usage-test-{}-{tag}.jsonl",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            usage::set_store(Some(path.clone()));
+            Self {
+                path,
+                _guard: guard,
+            }
+        }
+
+        /// The ledger entry for `model`.
+        ///
+        /// The store is process-global while only the usage tests take
+        /// `USAGE_STORE_GUARD`, so any other test running in parallel that
+        /// completes a request also appends to whichever ledger is currently
+        /// set. `summary` orders models by their own totals, so indexing
+        /// `models[0]` picks up whichever entry that race produced; looking the
+        /// model up by id is stable no matter who else wrote.
+        fn model<'a>(&self, s: &'a usage::UsageSummary, model: &str) -> &'a usage::ModelUsage {
+            s.models
+                .iter()
+                .find(|m| m.model == model)
+                .unwrap_or_else(|| panic!("`{model}` is in the ledger: {:?}", s.models))
+        }
+
+        fn model_totals(&self, model: &str) -> Option<(u64, u64, u64)> {
+            let s = usage::summary(&self.path).unwrap();
+            s.models
+                .iter()
+                .find(|m| m.model == model)
+                .map(|m| (m.totals.requests, m.totals.input, m.totals.output))
+        }
+    }
+
+    impl Drop for UsageStore {
+        fn drop(&mut self) {
+            usage::set_store(None);
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_records_usage_from_buffered_reply() {
+        let store = UsageStore::new("openai-buffered");
+        let payload = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}"#;
+        let base = spawn_http(200, payload, "application/json");
+        openai_provider(&base, "usage-test-openai-buffered")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.model_totals("usage-test-openai-buffered"),
+            Some((1, 12, 3))
+        );
+        let s = usage::summary(&store.path).unwrap();
+        let m = store.model(&s, "usage-test-openai-buffered");
+        assert_eq!(m.kind, usage::KIND_OPENAI_COMPATIBLE);
+        assert_eq!(m.totals.cost_usd, None, "unknown model has no cost");
+    }
+
+    #[tokio::test]
+    async fn openai_missing_usage_is_skipped() {
+        let store = UsageStore::new("openai-no-usage");
+        let base = spawn_http(200, OPENAI_OK, "application/json");
+        openai_provider(&base, "usage-test-openai-none")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(store.model_totals("usage-test-openai-none"), None);
+    }
+
+    #[tokio::test]
+    async fn openai_stream_records_final_usage_chunk() {
+        let store = UsageStore::new("openai-stream");
+        let d1 = openai_delta("\"Hello\"");
+        let fin = openai_finish("stop");
+        let usage_chunk =
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5}}\n\n";
+        let (base, rx) = spawn_http_chunked(
+            200,
+            "text/event-stream",
+            vec![&d1, &fin, usage_chunk, "data: [DONE]\n\n"],
+        );
+        let out = openai_provider(&base, "usage-test-openai-stream")
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap();
+        assert_eq!(out, "Hello");
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["stream_options"]["include_usage"], true, "{sent}");
+        assert_eq!(
+            store.model_totals("usage-test-openai-stream"),
+            Some((1, 20, 5))
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_records_usage_from_buffered_reply() {
+        let store = UsageStore::new("anthropic-buffered");
+        let payload = r#"{"content":[{"type":"text","text":"claude-ok"}],"stop_reason":"end_turn","usage":{"input_tokens":30,"output_tokens":7}}"#;
+        let base = spawn_http(200, payload, "application/json");
+        AnthropicProvider {
+            api_key: "k".into(),
+            model: "usage-test-anthropic-buffered".into(),
+            base_url: base,
+        }
+        .complete(simple_req())
+        .await
+        .unwrap();
+        assert_eq!(
+            store.model_totals("usage-test-anthropic-buffered"),
+            Some((1, 30, 7))
+        );
+        let s = usage::summary(&store.path).unwrap();
+        let m = store.model(&s, "usage-test-anthropic-buffered");
+        assert_eq!(m.kind, usage::KIND_ANTHROPIC);
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_records_start_and_delta_usage() {
+        let store = UsageStore::new("anthropic-stream");
+        let start = anthropic_event(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"m1","role":"assistant","content":[],"usage":{"input_tokens":41,"output_tokens":1}}}"#,
+        );
+        let d1 = anthropic_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+        );
+        let msg_delta = anthropic_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}"#,
+        );
+        let stop = anthropic_event("message_stop", r#"{"type":"message_stop"}"#);
+        let (base, _rx) = spawn_http_chunked(
+            200,
+            "text/event-stream",
+            vec![&start, &d1, &msg_delta, &stop],
+        );
+        let mut provider = anthropic_provider(base);
+        provider.model = "usage-test-anthropic-stream".into();
+        let out = provider
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap();
+        assert_eq!(out, "hi");
+        assert_eq!(
+            store.model_totals("usage-test-anthropic-stream"),
+            Some((1, 41, 9))
+        );
+    }
+
+    #[test]
+    fn codex_usage_parses_response_completed_only() {
+        let done = "event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"total_tokens\":125}}}\n";
+        assert_eq!(
+            parse_sse_response_usage(done),
+            Some(TokenUsage {
+                input: 100,
+                output: 25
+            })
+        );
+        let delta = "event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n";
+        assert_eq!(parse_sse_response_usage(delta), None);
+        let no_usage =
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n";
+        assert_eq!(parse_sse_response_usage(no_usage), None);
+    }
+
     const OPENAI_OK: &str =
         r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
 
@@ -1686,5 +2305,339 @@ data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",
         let msg = err.to_string();
         assert!(msg.contains("401"), "{msg}");
         assert!(msg.contains("denied"), "{msg}");
+    }
+    /// Fake HTTP server that answers one request with a `Transfer-Encoding:
+    /// chunked` body, one HTTP chunk per entry in `chunks` with a short pause
+    /// between them, so SSE framing across network reads is exercised. Returns
+    /// the base URL and the captured request body.
+    fn spawn_http_chunked(
+        status: u16,
+        content_type: &str,
+        chunks: Vec<&str>,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let content_type = content_type.to_string();
+        let chunks: Vec<String> = chunks.into_iter().map(str::to_string).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request_body = read_http_request(&mut stream);
+            let _ = tx.send(request_body);
+            let head = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(head.as_bytes());
+            for chunk in chunks {
+                let framed = format!("{:x}\r\n{chunk}\r\n", chunk.len());
+                let _ = stream.write_all(framed.as_bytes());
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    fn openai_delta(content: &str) -> String {
+        format!("data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{content}}},\"finish_reason\":null}}]}}\n\n")
+    }
+
+    fn openai_finish(reason: &str) -> String {
+        format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"{reason}\"}}]}}\n\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn openai_stream_yields_deltas_in_order() {
+        let role = "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null},\"finish_reason\":null}]}\n\n";
+        let d1 = openai_delta("\"Hel\"");
+        let d2 = openai_delta("\"lo, \"");
+        let d3 = openai_delta("\"world\"");
+        let fin = openai_finish("stop");
+        let (base, rx) = spawn_http_chunked(
+            200,
+            "text/event-stream",
+            vec![role, &d1, &d2, &d3, &fin, "data: [DONE]\n\n"],
+        );
+        let mut seen: Vec<String> = Vec::new();
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |d: &str| seen.push(d.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(out, "Hello, world");
+        assert_eq!(seen, vec!["Hel", "lo, ", "world"]);
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["stream"], true, "{sent}");
+        assert_eq!(sent["temperature"], 0.2, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn openai_stream_finish_reason_length_is_an_error_after_draining() {
+        let d1 = openai_delta("\"partial\"");
+        let fin = openai_finish("length");
+        let (base, _rx) = spawn_http_chunked(
+            200,
+            "text/event-stream",
+            vec![&d1, &fin, "data: [DONE]\n\n"],
+        );
+        let mut seen = 0usize;
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |_: &str| seen += 1)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off"), "{msg}");
+        assert!(msg.contains("finish_reason=length"), "{msg}");
+        assert!(
+            !msg.contains("partial"),
+            "must not leak partial output: {msg}"
+        );
+        assert_eq!(seen, 1, "the delta before the cut-off is still forwarded");
+    }
+
+    #[tokio::test]
+    async fn openai_stream_without_a_terminal_event_is_an_error() {
+        // The server closes cleanly after two deltas: no finish_reason, no
+        // [DONE]. The text so far may be cut off mid-sentence.
+        let d1 = openai_delta("\"Half a \"");
+        let d2 = openai_delta("\"sente\"");
+        let (base, _rx) = spawn_http_chunked(200, "text/event-stream", vec![&d1, &d2]);
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ended before the model finished"), "{msg}");
+        assert!(
+            !msg.contains("sente"),
+            "must not leak partial output: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_stream_accepts_done_without_finish_reason() {
+        // Some OpenAI-compatible servers close with [DONE] only; that is a
+        // complete stream.
+        let d1 = openai_delta("\"whole answer\"");
+        let (base, _rx) =
+            spawn_http_chunked(200, "text/event-stream", vec![&d1, "data: [DONE]\n\n"]);
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap();
+        assert_eq!(out, "whole answer");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_without_message_stop_is_an_error() {
+        let d1 = anthropic_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"half a sente"}}"#,
+        );
+        let (base, _rx) = spawn_http_chunked(200, "text/event-stream", vec![&d1]);
+        let err = anthropic_provider(base)
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ended before the model finished"), "{msg}");
+        assert!(
+            !msg.contains("sente"),
+            "must not leak partial output: {msg}"
+        );
+    }
+
+    #[test]
+    fn sse_terminal_events_are_recognised() {
+        assert!(sse_event_is_terminal("data: [DONE]\n"));
+        assert!(sse_event_is_terminal(
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n"
+        ));
+        assert!(sse_event_is_terminal(
+            "data: {\"type\":\"response.incomplete\"}\n"
+        ));
+        assert!(!sse_event_is_terminal(
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n"
+        ));
+        assert!(!sse_event_is_terminal("event: ping\n"));
+    }
+
+    #[tokio::test]
+    async fn openai_stream_http_error_keeps_status_and_body() {
+        let base = spawn_http(
+            401,
+            r#"{"error":{"message":"bad key"}}"#,
+            "application/json",
+        );
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("401") && msg.contains("bad key"), "{msg}");
+    }
+
+    /// A server that ignores `stream: true` and answers with one JSON body is
+    /// still usable: the reply is delivered as a single fragment.
+    #[tokio::test]
+    async fn openai_stream_accepts_buffered_json_reply() {
+        let base = spawn_http(200, OPENAI_OK, "application/json");
+        let mut seen: Vec<String> = Vec::new();
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete_stream(simple_req(), &mut |d: &str| seen.push(d.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+        assert_eq!(seen, vec!["ok"]);
+    }
+
+    fn anthropic_event(name: &str, data: &str) -> String {
+        format!("event: {name}\ndata: {data}\n\n")
+    }
+
+    fn anthropic_provider(base: String) -> AnthropicProvider {
+        AnthropicProvider {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url: base,
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_yields_text_deltas() {
+        let start = anthropic_event(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"m1","role":"assistant","content":[]}}"#,
+        );
+        let block_start = anthropic_event(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        );
+        let d1 = anthropic_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"claude"}}"#,
+        );
+        let d2 = anthropic_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-ok"}}"#,
+        );
+        let block_stop = anthropic_event(
+            "content_block_stop",
+            r#"{"type":"content_block_stop","index":0}"#,
+        );
+        let msg_delta = anthropic_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}"#,
+        );
+        let stop = anthropic_event("message_stop", r#"{"type":"message_stop"}"#);
+        let (base, rx) = spawn_http_chunked(
+            200,
+            "text/event-stream",
+            vec![
+                &start,
+                &block_start,
+                &d1,
+                &d2,
+                &block_stop,
+                &msg_delta,
+                &stop,
+            ],
+        );
+        let mut seen: Vec<String> = Vec::new();
+        let out = anthropic_provider(base)
+            .complete_stream(simple_req(), &mut |d: &str| seen.push(d.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(out, "claude-ok");
+        assert_eq!(seen, vec!["claude", "-ok"]);
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["stream"], true, "{sent}");
+        assert_eq!(sent["max_tokens"], 4096, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_max_tokens_is_an_error() {
+        let d1 = anthropic_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}"#,
+        );
+        let msg_delta = anthropic_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+        );
+        let stop = anthropic_event("message_stop", r#"{"type":"message_stop"}"#);
+        let (base, _rx) =
+            spawn_http_chunked(200, "text/event-stream", vec![&d1, &msg_delta, &stop]);
+        let err = anthropic_provider(base)
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off"), "{msg}");
+        assert!(msg.contains("stop_reason=max_tokens"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_error_event_is_an_error() {
+        let start = anthropic_event(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"m1"}}"#,
+        );
+        let error = anthropic_event(
+            "error",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        );
+        let (base, _rx) = spawn_http_chunked(200, "text/event-stream", vec![&start, &error]);
+        let err = anthropic_provider(base)
+            .complete_stream(simple_req(), &mut |_: &str| {})
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Overloaded"), "{msg}");
+    }
+
+    /// A provider that only implements `complete` still streams: the default
+    /// `complete_stream` delivers the whole reply as one fragment.
+    #[tokio::test]
+    async fn default_complete_stream_delivers_one_fragment() {
+        struct Buffered;
+        #[async_trait]
+        impl LlmProvider for Buffered {
+            async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+                Ok(format!("echo:{}", req.user))
+            }
+        }
+        let mut seen: Vec<String> = Vec::new();
+        let out = Buffered
+            .complete_stream(simple_req(), &mut |d: &str| seen.push(d.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(out, "echo:u");
+        assert_eq!(seen, vec!["echo:u"]);
+    }
+
+    #[test]
+    fn drain_utf8_waits_for_a_split_multibyte_character() {
+        // "é" is 0xC3 0xA9; deliver the two bytes in separate chunks.
+        let mut pending = vec![b'a', 0xC3];
+        let mut out = String::new();
+        drain_utf8(&mut pending, &mut out);
+        assert_eq!(out, "a");
+        assert_eq!(pending, vec![0xC3]);
+        pending.push(0xA9);
+        pending.push(b'b');
+        drain_utf8(&mut pending, &mut out);
+        assert_eq!(out, "a\u{e9}b");
+        assert!(pending.is_empty());
+        // A truly invalid byte is decoded lossily rather than held forever.
+        let mut bad = vec![0xFF, b'x'];
+        let mut out = String::new();
+        drain_utf8(&mut bad, &mut out);
+        assert_eq!(out, "\u{fffd}x");
+        assert!(bad.is_empty());
     }
 }

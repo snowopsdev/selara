@@ -44,6 +44,21 @@ description = "Read config file path"
 commands.allow = ["config_path"]
 
 [[permission]]
+identifier = "allow-history-list"
+description = "Read the transformation history `selara serve` keeps next to the config"
+commands.allow = ["history_list"]
+
+[[permission]]
+identifier = "allow-history-clear"
+description = "Delete the transformation history file"
+commands.allow = ["history_clear"]
+
+[[permission]]
+identifier = "allow-history-path"
+description = "Read the history file path"
+commands.allow = ["history_path"]
+
+[[permission]]
 identifier = "allow-chatgpt-auth-status"
 description = "Read ChatGPT / Codex CLI login status (Experimental)"
 commands.allow = ["chatgpt_auth_status"]
@@ -82,3 +97,53 @@ commands.allow = ["accessibility_status"]
 identifier = "allow-open-accessibility-settings"
 description = "Open System Settings on the Accessibility privacy pane"
 commands.allow = ["open_accessibility_settings"]
+
+[[permission]]
+identifier = "allow-serve-start"
+description = "Start the bundled `selara serve` sidecar under the app's supervisor"
+commands.allow = ["serve_start"]
+
+[[permission]]
+identifier = "allow-serve-stop"
+description = "Stop the `selara serve` sidecar the app started"
+commands.allow = ["serve_stop"]
+
+[[permission]]
+identifier = "allow-serve-restart"
+description = "Restart the `selara serve` sidecar the app started"
+commands.allow = ["serve_restart"]
+
+[[permission]]
+identifier = "allow-serve-log"
+description = "Read the last lines `selara serve` printed while supervised by the app"
+commands.allow = ["serve_log"]
+
+[[permission]]
+identifier = "allow-serve-supervisor-status"
+description = "Report whether the app manages `selara serve`, or an external one runs"
+commands.allow = ["serve_supervisor_status"]
+
+[[permission]]
+identifier = "allow-app-version"
+description = "Read the running app's version"
+commands.allow = ["app_version"]
+
+[[permission]]
+identifier = "allow-check-for-updates"
+description = "Check the release feed for a newer Selara build (no download)"
+commands.allow = ["check_for_updates"]
+
+[[permission]]
+identifier = "allow-install-update"
+description = "Download, install, and restart into the update found by the last check"
+commands.allow = ["install_update"]
+
+[[permission]]
+identifier = "allow-usage-summary"
+description = "Read the local usage ledger (tokens and estimated cost)"
+commands.allow = ["usage_summary"]
+
+[[permission]]
+identifier = "allow-clear-usage"
+description = "Truncate the local usage ledger"
+commands.allow = ["clear_usage"]

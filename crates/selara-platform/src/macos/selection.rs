@@ -17,6 +17,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use arboard::Clipboard;
 use async_trait::async_trait;
+use cocoa::foundation::{NSPoint, NSRect};
 use core_foundation::base::{CFRange, TCFType};
 use core_foundation::string::CFString;
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, KeyCode};
@@ -171,7 +172,9 @@ fn set_ax_selected_range(element: &AXUIElement, location: i64, length: i64) -> R
     }
 }
 
-fn frontmost_app_name() -> Option<String> {
+/// Localized name of the frontmost app (`NSRunningApplication.localizedName`).
+/// Call before showing our UI so it does not report Selara itself.
+pub fn frontmost_app_name() -> Option<String> {
     unsafe {
         let workspace: cocoa::base::id = msg_send![class!(NSWorkspace), sharedWorkspace];
         let app: cocoa::base::id = msg_send![workspace, frontmostApplication];
@@ -183,6 +186,32 @@ fn frontmost_app_name() -> Option<String> {
             return None;
         }
         let utf8: *const std::os::raw::c_char = msg_send![name, UTF8String];
+        if utf8.is_null() {
+            return None;
+        }
+        Some(
+            std::ffi::CStr::from_ptr(utf8)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+}
+
+/// Bundle identifier of the frontmost app (`NSRunningApplication.bundleIdentifier`),
+/// e.g. `com.apple.Terminal`. `None` for unbundled processes. Call before
+/// showing our UI so it does not report Selara itself.
+pub fn frontmost_bundle_id() -> Option<String> {
+    unsafe {
+        let workspace: cocoa::base::id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let app: cocoa::base::id = msg_send![workspace, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        let bundle: cocoa::base::id = msg_send![app, bundleIdentifier];
+        if bundle.is_null() {
+            return None;
+        }
+        let utf8: *const std::os::raw::c_char = msg_send![bundle, UTF8String];
         if utf8.is_null() {
             return None;
         }
@@ -224,6 +253,100 @@ pub fn activate_pid(pid: i32) -> Result<()> {
     // Activation is async; give the target time to become key.
     thread::sleep(Duration::from_millis(220));
     Ok(())
+}
+
+/// `(frame, visibleFrame)` of every attached display, in AppKit's global
+/// bottom-left-origin point space. Index 0 is the primary display (the one
+/// with the menu bar, whose frame origin is `(0, 0)`).
+fn screen_frames() -> Vec<(NSRect, NSRect)> {
+    use objc::rc::autoreleasepool;
+    // SAFETY: plain AppKit getters on the shared NSScreen list; every object
+    // is null-checked and only by-value structs escape the autorelease pool.
+    autoreleasepool(|| unsafe {
+        let screens: cocoa::base::id = msg_send![class!(NSScreen), screens];
+        if screens.is_null() {
+            return Vec::new();
+        }
+        let count: usize = msg_send![screens, count];
+        (0..count)
+            .filter_map(|i| {
+                let screen: cocoa::base::id = msg_send![screens, objectAtIndex: i];
+                if screen.is_null() {
+                    return None;
+                }
+                let frame: NSRect = msg_send![screen, frame];
+                let visible: NSRect = msg_send![screen, visibleFrame];
+                Some((frame, visible))
+            })
+            .collect()
+    })
+}
+
+/// Height of the primary display. AppKit's global y axis is flipped around it
+/// (not around whichever display a point happens to be on), which is also how
+/// winit maps a top-left `OuterPosition` back to AppKit coordinates.
+fn primary_height(screens: &[(NSRect, NSRect)]) -> Option<f64> {
+    screens
+        .iter()
+        .find(|(frame, _)| frame.origin.x == 0.0 && frame.origin.y == 0.0)
+        .or(screens.first())
+        .map(|(frame, _)| frame.size.height)
+}
+
+fn rect_contains(rect: &NSRect, x: f64, y: f64) -> bool {
+    let (x0, y0) = (rect.origin.x, rect.origin.y);
+    x >= x0 && x <= x0 + rect.size.width && y >= y0 && y <= y0 + rect.size.height
+}
+
+/// Flip a y coordinate between AppKit's bottom-left origin and a top-left
+/// origin. The mapping is its own inverse.
+fn flip_y(primary_height: f64, y: f64) -> f64 {
+    primary_height - y
+}
+
+/// Convert a bottom-left-origin `(x, y, w, h)` rect to top-left origin: same
+/// size, origin moved from the bottom edge to the top edge.
+fn rect_to_top_left(
+    primary_height: f64,
+    (x, y, w, h): (f64, f64, f64, f64),
+) -> (f64, f64, f64, f64) {
+    (x, primary_height - (y + h), w, h)
+}
+
+/// Current mouse position in top-left-origin screen points, the space
+/// `ViewportCommand::OuterPosition` uses. `None` when no display contains the
+/// cursor (a display was just unplugged, or AppKit has no screens yet).
+pub fn mouse_location() -> Option<(f64, f64)> {
+    let screens = screen_frames();
+    let primary_h = primary_height(&screens)?;
+    // SAFETY: argument-less class method returning a plain C struct by value.
+    let point: NSPoint = unsafe { msg_send![class!(NSEvent), mouseLocation] };
+    screens
+        .iter()
+        .find(|(frame, _)| rect_contains(frame, point.x, point.y))?;
+    Some((point.x, flip_y(primary_h, point.y)))
+}
+
+/// `visibleFrame` as `(x, y, w, h)` of the display containing the given
+/// top-left-origin point, converted to top-left origin as well. The visible
+/// frame excludes the menu bar and the Dock, so a window clamped into it stays
+/// fully reachable. `None` when no display contains the point.
+pub fn screen_visible_frame_at(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+    let screens = screen_frames();
+    let primary_h = primary_height(&screens)?;
+    let y_bottom_left = flip_y(primary_h, y);
+    let (_, visible) = screens
+        .iter()
+        .find(|(frame, _)| rect_contains(frame, x, y_bottom_left))?;
+    Some(rect_to_top_left(
+        primary_h,
+        (
+            visible.origin.x,
+            visible.origin.y,
+            visible.size.width,
+            visible.size.height,
+        ),
+    ))
 }
 
 fn post_key(keycode: u16, flags: CGEventFlags, key_down: bool) -> Result<()> {
@@ -558,6 +681,16 @@ impl MacosSelection {
         })
     }
 
+    /// Text sitting on the pasteboard right now, or `None` when it is empty
+    /// or holds nothing but whitespace.
+    ///
+    /// Reads through the same process-wide pasteboard lock as the copy/paste
+    /// fallbacks, so a delayed restore cannot land in the middle of the read.
+    /// Nothing is written and no key event is synthesized.
+    pub fn clipboard_text(&self) -> Result<Option<String>> {
+        Ok(clip_get(&self.clipboard)?.filter(|t| !t.trim().is_empty()))
+    }
+
     fn read_via_clipboard_fallback(&self) -> Result<Option<String>> {
         let snap = snapshot_pasteboard().context("snapshot pasteboard before ⌘C")?;
         clipboard_copy()?;
@@ -842,6 +975,7 @@ impl SelectionService for MacosSelection {
         }
 
         let app_name = frontmost_app_name();
+        let bundle_id = frontmost_bundle_id();
 
         match focused_element() {
             Ok(el) => {
@@ -852,6 +986,7 @@ impl SelectionService for MacosSelection {
                         return Ok(Some(SelectionSnapshot {
                             text,
                             app_name,
+                            bundle_id,
                             range,
                         }));
                     }
@@ -868,6 +1003,7 @@ impl SelectionService for MacosSelection {
         Ok(text.map(|text| SelectionSnapshot {
             text,
             app_name,
+            bundle_id,
             range: None,
         }))
     }
@@ -917,6 +1053,35 @@ mod tests {
     };
     use arboard::Clipboard;
     use std::sync::{Mutex, MutexGuard};
+
+    #[test]
+    fn flip_y_is_its_own_inverse() {
+        // Primary display 1080 pt tall: 20 pt above the bottom edge is 1060 pt
+        // below the top edge, and flipping again gets the original back.
+        assert_eq!(super::flip_y(1080.0, 20.0), 1060.0);
+        assert_eq!(super::flip_y(1080.0, super::flip_y(1080.0, 20.0)), 20.0);
+    }
+
+    #[test]
+    fn visible_frame_flips_to_top_left_on_the_primary_display() {
+        // Menu bar 25 pt, Dock 70 pt on a 1920×1080 display: AppKit reports the
+        // visible frame as origin (0, 70) with height 985.
+        assert_eq!(
+            super::rect_to_top_left(1080.0, (0.0, 70.0, 1920.0, 985.0)),
+            (0.0, 25.0, 1920.0, 985.0)
+        );
+    }
+
+    #[test]
+    fn visible_frame_on_a_secondary_display_uses_the_primary_height() {
+        // A 1440-pt-tall display to the right whose top is 200 pt above the
+        // primary's top edge: AppKit frame origin y is 1080 + 200 - 1440 = -160.
+        // Its top edge in top-left coordinates is therefore -200.
+        assert_eq!(
+            super::rect_to_top_left(1080.0, (1920.0, -160.0, 2560.0, 1440.0)),
+            (1920.0, -200.0, 2560.0, 1440.0)
+        );
+    }
 
     /// Both tests own the one general pasteboard for their whole body; without
     /// this, one test's teardown restore lands between another test's steps.

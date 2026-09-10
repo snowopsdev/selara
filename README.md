@@ -19,17 +19,25 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 ## Features
 
 - **Works everywhere you can select text.** A global hotkey (default `ctrl+shift+space`) reads the selection through macOS Accessibility, with a clipboard fallback for apps that do not expose it.
+- **Runs on the clipboard when nothing is selected.** Press the hotkey with an empty selection and Selara picks up whatever is on the clipboard instead of showing an error; the picker header says **From clipboard** so it is never a surprise, and a Replace pastes the result at the caret.
+- **Keyboard-first picker.** The picker opens next to the mouse cursor on whichever display it is on, clear of the menu bar and Dock. Type to filter the commands, use ↑/↓ to choose, ⏎ to run, or press 1–9 to run a row directly. Clicking still works.
+- **Free-form instruction.** Type anything into the picker's box and press ⌘⏎ (or ⏎ when no command matches) to run it as a one-off Replace, ⇧⏎ for a Popup. The picker remembers the last ten instructions (↑ in the empty box recalls them) and offers **Save as command…** afterwards, which adds the instruction to your commands.
 - **Replace or popup.** Replace commands (Proofread, Rewrite, Friendly, Professional, Concise) write the result back over the selection. Popup commands (Summary, Key Points, Table) open a scrollable result window that renders the markdown (headings, lists, tables) and offers Copy, Replace selection, Insert below, and Retry.
+- **Streaming results.** Popup results stream into the window as the model writes them, rendered as markdown while they arrive, instead of a spinner until the end. Replace commands show a running character count and write back only the finished text. The CLI streams popup output by default; pass `--no-stream` to print only the finished result.
 - **Your prompts.** Every command is a labeled prompt. Edit the built-ins, add your own, duplicate one to make a variation, and search the list. Prompts can use `{{language}}` (your preferred language) and `{{app}}` (the app the selection came from); the built-in **Translate** command is `Translate the text to {{language}}`.
 - **Per-command hotkeys.** Give a command its own shortcut and it runs on the selection immediately, skipping the picker. If the selection trips a size limit, the picker opens with the warning and the command runs once you confirm.
+- **Excluded apps.** List password managers, terminals, or anything else by name or bundle id and the hotkeys do nothing there: no picker, no selection or clipboard read.
 - **Undo and cancel.** Pressing Escape while a command is running discards its result instead of pasting it later. After a Replace, **Undo last replace** in the picker (or an optional `undo_hotkey`) puts the original text back.
+- **History.** The last 50 transformations (original and result, which command, which app) are kept in `history.jsonl` next to the config, and the Settings app lists them with **Copy result** and **Copy original** buttons, so a result you overwrote or a popup you closed is not lost.
 - **Any provider.** OpenAI-compatible `/chat/completions` (OpenAI, Ollama, LM Studio, vLLM), the Anthropic Messages API, or OpenRouter. Leave the base URL blank for the provider default or point it at a local server.
 - **Model discovery.** Load the model list straight from the provider. A bad key or URL shows up right there, so it doubles as a connection test.
 - **ChatGPT via Codex (experimental).** Reuse an existing ChatGPT subscription by signing in with the Codex CLI. Tokens stay in Codex's own auth store, never in Selara's config.
 - **Size limits.** A soft warning, a replace caution, and a hard maximum, so a stray select-all never sends 100k characters to a metered API. They apply to picker and shortcut runs alike.
+- **Secret guard.** If the selection looks like it holds an API key, a private key block, a JWT, or a card number, the picker asks before sending it to a hosted provider; local servers are exempt.
 - **Live config.** Everything lives in one TOML file. The `serve` process watches the config directory for changes and re-registers hotkeys as soon as the Settings app saves (with a 5-second poll as a fallback), while staying idle otherwise.
-- **Menu-bar Settings app.** A Tauri tray app with Status, General, Models, Commands, and Limits tabs. The Status tab shows whether `serve` is running, whether Accessibility is granted, and whether the provider answers. No Dock icon, closes to the tray.
-- **Scriptable CLI.** `selara init`, `selara list-commands`, `selara run <command>`, and `selara key set|clear|status` for pipelines and quick checks.
+- **Menu-bar Settings app.** A Tauri tray app with Status, General, Models, Commands, History, and Limits tabs. The Status tab shows whether `serve` is running, whether Accessibility is granted, and whether the provider answers. No Dock icon, closes to the tray.
+- **Local usage and cost.** Every request's token counts are appended to `usage.jsonl` next to the config, so the Status tab and `selara usage` can show today, last 30 days, and all-time totals with an estimated cost for well-known models called on their own vendor's API. The numbers are local only and never sent anywhere; costs are estimates from a built-in list-price table, and local or custom endpoints stay unpriced.
+- **Scriptable CLI.** `selara init`, `selara list-commands`, `selara run <command>`, `selara usage`, and `selara key set|clear|status` for pipelines and quick checks.
 - **Keys in the keychain.** API keys go into the OS credential store (macOS Keychain) by default; `config.toml` stays free of secrets unless you choose otherwise.
 
 ## How it works
@@ -48,7 +56,7 @@ flowchart LR
 | `apps/selara` | CLI + macOS `serve` desktop shell |
 | `apps/selara-desktop` | Tauri tray + Settings UI |
 
-The `serve` shell registers the hotkey, reads the selection, shows a small command picker, sends `{prompt, selection}` to the configured provider, and writes the result back. The Settings app edits the same config file.
+The `serve` shell registers the hotkey, reads the selection, shows a small command picker next to the cursor (type to filter, ↑/↓, ⏎, or 1–9 to run; text that matches nothing, or ⌘⏎ with any text, runs as a free-form instruction), sends `{prompt, selection}` to the configured provider, and writes the result back. The Settings app edits the same config file.
 
 ## Install (macOS)
 
@@ -80,11 +88,13 @@ Until the release is signed and notarized by Apple, macOS may report the app as 
 
 3. **Grant Accessibility.** System Settings → Privacy & Security → Accessibility, then enable Terminal or iTerm (whichever runs `cargo run`) or the `selara` binary itself. macOS may prompt on first launch, and starting `serve` also triggers the prompt.
 
-4. **Start the shell:**
+4. **Start the shell.** The Settings app (next section) starts `serve` for you, restarts it if it crashes, and can start at login (General → Start at login). From a terminal it also works on its own:
 
    ```bash
    cargo run -p selara -- serve
    ```
+
+   The app never starts a second copy while one is running elsewhere. Accessibility must be granted to whatever runs `serve`: the app bundle when it is managed, or the terminal / sidecar binary under `apps/selara-desktop/src-tauri/binaries/` during `tauri dev`.
 
 5. Select text in TextEdit, Notes, Mail, or anywhere else, press `ctrl+shift+space`, and pick **Proofread**.
 
@@ -104,18 +114,21 @@ Every tab writes to the same `config.toml`. If `serve` is running, saved changes
 
 ### Status
 
-The tab the app opens on. Four read-only cards answer "is everything in place?" without reading `serve`'s terminal output:
+The tab the app opens on. Five cards answer "is everything in place?" and "what has this cost?" without reading `serve`'s terminal output:
 
 - **selara serve**: whether the shell is running, with its pid. `serve` writes `serve.pid` next to the config file while it runs and removes it on exit; the card shows the path and the command to start it.
 - **Accessibility**: whether macOS Accessibility is granted, with an **Open Accessibility settings** button when it is not. The grant shown is the Settings app's own; the program that runs `serve` (Terminal, iTerm, or the `selara` binary) needs the same grant.
 - **Provider**: the saved provider, model, base URL, and auth mode. **Check connection** lists models with the saved key (or checks the Codex sign-in for ChatGPT via Codex) and reports "Reachable · N models" or the error text. The API key is never displayed.
 - **Shortcuts**: the picker hotkey, the undo hotkey if set, and every command that has its own shortcut.
+- **Usage**: tokens in and out for today (your local calendar day), the last 30 days, and all time, with an estimated cost when the model is in the built-in price table *and* the request went to that vendor's own API ("n/a" for local, custom, or unlisted endpoints — an alias served by Ollama or a proxy is never billed at OpenAI's rate). The ledger is `usage.jsonl` next to the config, local only and never sent anywhere; **Clear** empties it. Costs are estimates, not a bill.
 
 **Refresh** re-reads the config and re-runs the checks. No screenshot yet; it will be added with the next screenshot pass.
 
 ### General
 
 The global shortcut that opens the picker, an optional undo shortcut, plus a preferred language code. The language fills `{{language}}` in prompts and is added to every prompt as a hint: the model replies in that language unless the command itself names an output language (a "Translate to French" command wins) or the selected text is clearly written in another one, in which case it keeps the text's language.
+
+**Excluded apps** lists apps where the hotkeys should do nothing, one per line, by localized name (`1Password`) or bundle id (`com.apple.Terminal`), matched case-insensitively. End an entry with `*` to match a prefix (`com.apple.*`, `iTerm*`). When the frontmost app is on the list, `serve` logs the ignored press and neither opens a window nor reads the selection or clipboard.
 
 <img alt="General tab with the Language field set to en and the Shortcut field set to ctrl+shift+space" src="docs/screenshots/settings-general.png" width="820">
 
@@ -139,7 +152,26 @@ The list of prompts the picker offers. Each row shows whether the command replac
 
 Click a row to edit it. The editor holds the label, the replace-or-popup mode, the prompt itself, an optional hotkey that runs the command directly without the picker, and an optional model that overrides the provider's model for that command only (a cheap local model for Proofread, a frontier model for Rewrite; same provider and key). `⌘↩` saves.
 
+**Apps** narrows a command to the apps it belongs in: the picker offers it only when the selection came from one of them, and its shortcut says `“Reply” is not enabled for Xcode` instead of running. The field is comma-separated app names or bundle ids (a trailing `*` matches by prefix), and leaving it empty — the default for every built-in command — offers the command everywhere. Typing a free-form instruction in the picker always works, whatever the frontmost app.
+
+```toml
+[[commands]]
+id = "reply"
+label = "Draft reply"
+kind = "popup"
+prompt = "Draft a short reply to this message."
+apps = ["Mail", "com.apple.Notes"]
+```
+
 <img alt="Command editor sheet for Proofread showing the label, the Replace selection mode, the full prompt text, and the ctrl+shift+p shortcut" src="docs/screenshots/settings-command-editor.png" width="820">
+
+### History
+
+Every command that finishes while `serve` runs is recorded: the time, the command and whether it replaced the selection, opened a popup, or inserted below it, the app the selection came from, a preview of the original text and the result, and **Copy result** / **Copy original** buttons that put either back on the clipboard. **Clear history** deletes the whole list after a confirmation.
+
+Restoring is a clipboard copy on purpose: putting text back into the source app needs that app's focus and Accessibility, which the Settings window does not have. Right after a Replace, **Undo last replace** in the picker (or the `undo_hotkey`) still does that live.
+
+Privacy: the list lives in `history.jsonl` in the config directory (`~/.config/selara/` by default), is kept readable only by you (mode 0600, re-applied on every append), holds the selected text and the results verbatim, and is trimmed to the newest 50 entries. Clear it from the tab, or delete the file, if you would rather not keep it around.
 
 ### Limits
 
@@ -150,6 +182,7 @@ Guard rails for large selections. Set any value to `0` to disable it. The soft w
 | Soft warn | 8000 chars | Ask before sending a large selection |
 | Hard max | 100000 chars | Refuse anything larger |
 | Replace caution | 4000 chars | Ask again before overwriting a large selection |
+| Secret guard | on | Ask before sending secret-shaped text (API keys, private keys, JWTs, card numbers) to a hosted provider; local servers (`localhost`, `.local`, private IPs) are exempt |
 
 <img alt="Limits tab with Soft warn 8000, Hard max 100000, and Replace caution 4000, plus Reset to defaults and Save changes buttons" src="docs/screenshots/settings-limits.png" width="820">
 
@@ -204,6 +237,7 @@ Default is `ctrl+shift+space`. Plain `ctrl+space` often conflicts with macOS Inp
 hotkey = "option+space"
 # or: "cmd+shift+w", "ctrl+shift+space", …
 undo_hotkey = "ctrl+shift+z"   # optional; restores the last replaced text
+excluded_apps = ["1Password", "com.apple.Terminal"]   # optional; hotkeys are ignored in these apps
 ```
 
 Supported tokens: `ctrl`/`control`, `shift`, `alt`/`option`, `cmd`/`command`/`super`, plus a key: `space`, `a`–`z`, `0`–`9`, `enter`, `tab`, `escape`; function keys `f1`–`f12`; arrows `up`/`down`/`left`/`right`; editing keys `backspace`, `delete`, `home`, `end`, `pageup`, `pagedown`; and the punctuation characters `-` `=` `[` `]` `;` `'` `,` `.` `/` `` ` `` `\`. Tokens are case-insensitive and may be padded with spaces. The same grammar applies to per-command hotkeys.
@@ -220,8 +254,9 @@ Supported tokens: `ctrl`/`control`, `shift`, `alt`/`option`, `cmd`/`command`/`su
 - The paste fallback snapshots the whole pasteboard (every type, images included) and only restores it if nothing else was copied in between, so a copy you make during that window wins and the pre-Selara clipboard is dropped.
 - Some apps (Electron, browsers, certain rich-text fields) ignore the Accessibility write. The paste fallback usually still works if the original selection remains.
 - The picker steals focus. Selara re-activates the previous app before replacing.
+- Clipboard mode has no selection to write over, so a Replace pastes at the caret of the app that was frontmost when the hotkey fired. Put the caret where you want the text before pressing the hotkey; **Undo last replace** takes the pasted text back out.
 - Undo relies on the selection range Accessibility reported when the text was captured. In apps that only work through the clipboard fallback, Selara assumes the caret is right after the pasted text and refuses to undo if that does not hold; the app's own ⌘Z still works.
-- Global hotkeys need the `serve` process running. There is no LaunchAgent yet.
+- Global hotkeys need the `serve` process running. The Settings app keeps it running and can register itself as a login item; a bare terminal `serve` still stops when the terminal closes.
 - If a hotkey fails to register or never fires, pick another chord.
 
 ## CLI
@@ -233,7 +268,7 @@ cargo run -p selara -- run proofread --text "Their going to the store tommorow."
 cargo run -p selara -- run summary --text "$(pbpaste)"
 ```
 
-`run` reads stdin when `--text` is omitted, and `--instruct` appends a one-off instruction to the command's prompt.
+`run` reads stdin when `--text` is omitted, and `--instruct` appends a one-off instruction to the command's prompt. `selara usage` prints the local usage ledger as a table (tokens in/out per window and per model, with estimated costs).
 
 ## Status
 

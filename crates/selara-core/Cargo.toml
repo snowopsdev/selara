@@ -8,6 +8,7 @@ description = "Provider-agnostic writing commands and config for Selara"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 futures-util.workspace = true
 keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native", "windows-native"] }
 reqwest.workspace = true

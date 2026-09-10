@@ -69,6 +69,18 @@ Versions follow [semantic versioning](https://semver.org) and are cut automatica
 - All crates share the workspace version (`version.workspace = true`). Do not set a crate version by hand.
 - Commits whose type is `build`, `ci`, `chore`, `test`, `style`, `meta`, or `license` do not appear in the changelog and do not trigger a release on their own.
 
+### Desktop auto-update signing
+
+The menu-bar app checks GitHub Releases for a newer build through `tauri-plugin-updater` (Status tab → Updates, or the tray's "Check for updates…"). The plugin only accepts artifacts signed with the project's updater key, and until that key exists `apps/selara-desktop/src-tauri/tauri.conf.json` ships the placeholder `REPLACE_WITH_TAURI_UPDATER_PUBKEY`. The app treats the placeholder as "updates not configured" and never contacts the network, so nothing breaks in the meantime; it just does not update itself.
+
+A maintainer enables it once:
+
+1. Generate the keypair (never inside the repo): `npx tauri signer generate -w ~/.tauri/selara.key` from `apps/selara-desktop`. Choose a password when prompted.
+2. Put the printed **public** key into `plugins.updater.pubkey` in `tauri.conf.json` and commit that change.
+3. Add the **private** key (`~/.tauri/selara.key` contents) and its password as repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The release workflow's `desktop` job passes them to `tauri build` and uploads `Selara.app.tar.gz`, its `.sig`, and `latest.json`; see `docs/release-updater.md`.
+
+The private key and password must never be committed or pasted into an issue. Losing the private key means shipping a new public key in a release users must install by hand, so keep a copy somewhere safe.
+
 ## No secrets
 
 Do **not** commit:
