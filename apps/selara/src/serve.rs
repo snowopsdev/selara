@@ -142,9 +142,7 @@ impl ServeApp {
             "Picker: {} · {} cmds · {} · Access: {}",
             config.hotkey,
             config.commands.len(),
-            if cmd_hk == 0 {
-                shortcut_hint
-            } else if cmd_hk == 1 {
+            if cmd_hk <= 1 {
                 shortcut_hint
             } else {
                 format!("{cmd_hk} shortcuts incl. {shortcut_hint}")
@@ -169,13 +167,13 @@ impl ServeApp {
                     .map(|h| (c.id.clone(), h))
             })
             .collect();
-        eprintln!(
+        tracing::info!(
             "selara: registering picker `{}` + {} command shortcut(s)",
             config.hotkey,
             cmd_keys.len()
         );
         for (id, spec) in &cmd_keys {
-            eprintln!("selara:   command `{id}` → `{spec}`");
+            tracing::info!("selara:   command `{id}` → `{spec}`");
         }
         hotkey
             .reregister_all(&config.hotkey, &cmd_keys)
@@ -303,14 +301,14 @@ then restart `selara serve`."
                 if self.needs_confirmation(&cmd) {
                     // Same rails as the picker: show it with the banner and run
                     // the command once the user confirms.
-                    eprintln!(
+                    tracing::info!(
                         "selara: command hotkey `{}` → waiting for confirmation",
                         cmd.id
                     );
                     self.pending_direct = Some(cmd);
                     self.phase = UiPhase::Picker;
                 } else {
-                    eprintln!("selara: command hotkey `{}` → running", cmd.id);
+                    tracing::info!("selara: command hotkey `{}` → running", cmd.id);
                     self.start_command(cmd);
                 }
             }
@@ -476,31 +474,6 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
                 }
             },
         }
-    }
-}
-
-fn block_on_ready<T>(fut: impl std::future::Future<Output = T>) -> T {
-    use std::task::{Context as TaskCtx, Poll, RawWaker, RawWakerVTable, Waker};
-
-    fn noop_raw_waker() -> RawWaker {
-        fn no_op(_: *const ()) {}
-        fn clone(_: *const ()) -> RawWaker {
-            noop_raw_waker()
-        }
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
-        RawWaker::new(std::ptr::null(), &VTABLE)
-    }
-
-    let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
-    let mut cx = TaskCtx::from_waker(&waker);
-    let mut fut = Box::pin(fut);
-    match fut.as_mut().poll(&mut cx) {
-        Poll::Ready(v) => v,
-        Poll::Pending => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime")
-            .block_on(fut),
     }
 }
 

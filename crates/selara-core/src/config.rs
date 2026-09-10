@@ -330,8 +330,10 @@ auth = "chatgpt"
         let legacy_dir = home.join(".config").join("writing-tools");
         std::fs::create_dir_all(&legacy_dir).unwrap();
         let legacy = legacy_dir.join("config.toml");
-        let mut cfg = AppConfig::default();
-        cfg.hotkey = "option+space".into();
+        let cfg = AppConfig {
+            hotkey: "option+space".into(),
+            ..Default::default()
+        };
         cfg.save(&legacy).unwrap();
 
         let prev_home = std::env::var_os("HOME");

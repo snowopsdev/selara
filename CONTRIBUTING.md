@@ -32,7 +32,7 @@ cd apps/selara-desktop && npx tauri dev
 
 (`serve` / hotkeys still need a separate `cargo run -p selara -- serve`.)
 
-CI on GitHub Actions runs fmt/clippy/test on Linux (`ubuntu-latest`), excluding the Tauri `selara-desktop` package. Clippy is currently **not** run with `-D warnings` because of known noise (including `objc`-related `cfg` warnings on macOS code paths and a few existing lints). Prefer leaving the tree warning-clean when you can.
+CI on GitHub Actions runs fmt/clippy/test on Linux (`ubuntu-latest`), excluding the Tauri `selara-desktop` package. Clippy runs with `-D warnings`, so any new warning fails CI; the `objc` macro `cfg` noise on macOS code paths is declared through `check-cfg` in `crates/selara-platform/Cargo.toml` rather than allowed.
 
 ### Platform notes
 

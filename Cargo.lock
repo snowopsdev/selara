@@ -4718,7 +4718,6 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
- "dirs",
  "eframe",
  "egui",
  "selara-core",

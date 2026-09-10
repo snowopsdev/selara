@@ -19,11 +19,11 @@ struct Cli {
     config: Option<PathBuf>,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Action,
 }
 
 #[derive(Subcommand, Debug)]
-enum Commands {
+enum Action {
     /// Create a default config file if missing, then print its path
     Init,
     /// List built-in / configured writing commands
@@ -44,15 +44,21 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    // Default to info so `serve` still reports hotkey registration on stderr
+    // when RUST_LOG is unset; RUST_LOG overrides as usual.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
     let config_path = cli.config.clone().unwrap_or_else(AppConfig::default_path);
 
     match cli.command {
-        Commands::Serve => {
+        Action::Serve => {
             #[cfg(target_os = "macos")]
             {
                 serve::run(config_path)?;
@@ -74,9 +80,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-async fn async_cli(command: Commands, config_path: PathBuf) -> Result<()> {
+async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
     match command {
-        Commands::Init => {
+        Action::Init => {
             let cfg = AppConfig::load_or_init(&config_path)?;
             println!("config: {}", config_path.display());
             println!(
@@ -86,13 +92,13 @@ async fn async_cli(command: Commands, config_path: PathBuf) -> Result<()> {
             println!("hotkey: {}", cfg.hotkey);
             println!("commands: {}", cfg.commands.len());
         }
-        Commands::ListCommands => {
+        Action::ListCommands => {
             let cfg = AppConfig::load_or_init(&config_path)?;
             for c in &cfg.commands {
                 println!("{:<14} {:<12} {}", c.id, format!("{:?}", c.kind), c.label);
             }
         }
-        Commands::Run { id, text, instruct } => {
+        Action::Run { id, text, instruct } => {
             let cfg = AppConfig::load_or_init(&config_path)?;
             let input = match text {
                 Some(t) => t,
@@ -117,7 +123,7 @@ async fn async_cli(command: Commands, config_path: PathBuf) -> Result<()> {
             .await?;
             println!("{out}");
         }
-        Commands::Serve => unreachable!("handled in main"),
+        Action::Serve => unreachable!("handled in main"),
     }
 
     Ok(())
