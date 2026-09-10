@@ -1028,6 +1028,13 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<input id=\"undo-hotkey\" value=\"" + escapeAttr(config.undo_hotkey || "") + "\" placeholder=\"Optional, e.g. ctrl+shift+z\" autocomplete=\"off\" spellcheck=\"false\" />" +
       "<p class=\"field-hint\">Puts back the text the last Replace overwrote. The picker also has an Undo button.</p>" +
       "</div></div>" +
+      "<div class=\"section-label\">Excluded apps</div>" +
+      "<div class=\"form-row\">" +
+      "<label for=\"excluded-apps\">Ignore hotkeys in</label>" +
+      "<div class=\"control-stack\">" +
+      "<textarea id=\"excluded-apps\" rows=\"4\" placeholder=\"1Password&#10;com.apple.Terminal&#10;com.googlecode.iterm2\" autocomplete=\"off\" spellcheck=\"false\">" + escapeHtml((config.excluded_apps || []).join("\n")) + "</textarea>" +
+      "<p class=\"field-hint\">One app per line, by name (1Password) or bundle id (com.apple.Terminal). End an entry with * to match a prefix, for example com.apple.* or iTerm*. In these apps the hotkeys do nothing: no picker, no selection or clipboard read.</p>" +
+      "</div></div>" +
       "<div class=\"section-label\">Startup</div>" +
       "<div class=\"form-row\">" +
       "<label for=\"autostart\">Start at login</label>" +
@@ -1057,6 +1064,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         language: $("#language").value.trim() || "en",
         hotkey: $("#hotkey").value.trim() || "ctrl+shift+space",
         undo_hotkey: $("#undo-hotkey").value.trim() || null,
+        excluded_apps: $("#excluded-apps").value.split("\n").map((l) => l.trim()).filter(Boolean),
       });
     };
   }

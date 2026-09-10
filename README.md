@@ -24,6 +24,7 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 - **Streaming results.** Popup results stream into the window as the model writes them, rendered as markdown while they arrive, instead of a spinner until the end. Replace commands show a running character count and write back only the finished text. The CLI streams popup output by default; pass `--no-stream` to print only the finished result.
 - **Your prompts.** Every command is a labeled prompt. Edit the built-ins, add your own, duplicate one to make a variation, and search the list. Prompts can use `{{language}}` (your preferred language) and `{{app}}` (the app the selection came from); the built-in **Translate** command is `Translate the text to {{language}}`.
 - **Per-command hotkeys.** Give a command its own shortcut and it runs on the selection immediately, skipping the picker. If the selection trips a size limit, the picker opens with the warning and the command runs once you confirm.
+- **Excluded apps.** List password managers, terminals, or anything else by name or bundle id and the hotkeys do nothing there: no picker, no selection or clipboard read.
 - **Undo and cancel.** Pressing Escape while a command is running discards its result instead of pasting it later. After a Replace, **Undo last replace** in the picker (or an optional `undo_hotkey`) puts the original text back.
 - **Any provider.** OpenAI-compatible `/chat/completions` (OpenAI, Ollama, LM Studio, vLLM), the Anthropic Messages API, or OpenRouter. Leave the base URL blank for the provider default or point it at a local server.
 - **Model discovery.** Load the model list straight from the provider. A bad key or URL shows up right there, so it doubles as a connection test.
@@ -121,6 +122,8 @@ The tab the app opens on. Four read-only cards answer "is everything in place?" 
 
 The global shortcut that opens the picker, an optional undo shortcut, plus a preferred language code. The language fills `{{language}}` in prompts and is added to every prompt as a hint: the model replies in that language unless the command itself names an output language (a "Translate to French" command wins) or the selected text is clearly written in another one, in which case it keeps the text's language.
 
+**Excluded apps** lists apps where the hotkeys should do nothing, one per line, by localized name (`1Password`) or bundle id (`com.apple.Terminal`), matched case-insensitively. End an entry with `*` to match a prefix (`com.apple.*`, `iTerm*`). When the frontmost app is on the list, `serve` logs the ignored press and neither opens a window nor reads the selection or clipboard.
+
 <img alt="General tab with the Language field set to en and the Shortcut field set to ctrl+shift+space" src="docs/screenshots/settings-general.png" width="820">
 
 ### Models
@@ -208,6 +211,7 @@ Default is `ctrl+shift+space`. Plain `ctrl+space` often conflicts with macOS Inp
 hotkey = "option+space"
 # or: "cmd+shift+w", "ctrl+shift+space", …
 undo_hotkey = "ctrl+shift+z"   # optional; restores the last replaced text
+excluded_apps = ["1Password", "com.apple.Terminal"]   # optional; hotkeys are ignored in these apps
 ```
 
 Supported tokens: `ctrl`/`control`, `shift`, `alt`/`option`, `cmd`/`command`/`super`, plus a key: `space`, `a`–`z`, `0`–`9`, `enter`, `tab`, `escape`; function keys `f1`–`f12`; arrows `up`/`down`/`left`/`right`; editing keys `backspace`, `delete`, `home`, `end`, `pageup`, `pagedown`; and the punctuation characters `-` `=` `[` `]` `;` `'` `,` `.` `/` `` ` `` `\`. Tokens are case-insensitive and may be padded with spaces. The same grammar applies to per-command hotkeys.

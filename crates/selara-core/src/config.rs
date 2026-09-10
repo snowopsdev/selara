@@ -63,6 +63,12 @@ pub struct AppConfig {
     /// Selection / request size rails. Editable in the Settings UI; 0 disables a knob.
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Apps where the hotkeys do nothing (no window, no selection or clipboard
+    /// read). Each entry is a localized app name (`1Password`), a bundle id
+    /// (`com.apple.Terminal`), or a `prefix*` glob matching either; see
+    /// [`app_is_excluded`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_apps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +139,44 @@ pub struct GeneralSection {
     #[serde(default)]
     pub undo_hotkey: Option<String>,
     pub language: String,
+    /// Absent (older Settings builds) leaves the list on disk untouched.
+    #[serde(default)]
+    pub excluded_apps: Option<Vec<String>>,
+}
+
+/// Whether the frontmost app matches an `excluded_apps` entry, in which case
+/// the hotkeys must not open the picker or touch the selection.
+///
+/// Entries are trimmed and compared case-insensitively against both the
+/// localized app name and the bundle id. An entry ending in `*` matches any
+/// name or bundle id starting with the part before the `*`, so
+/// `com.apple.*` covers every Apple app and `1Password*` covers
+/// `1Password 8`. Blank entries never match.
+pub fn app_is_excluded(
+    excluded: &[String],
+    app_name: Option<&str>,
+    bundle_id: Option<&str>,
+) -> bool {
+    let name = app_name
+        .map(|n| n.trim().to_lowercase())
+        .filter(|n| !n.is_empty());
+    let bundle = bundle_id
+        .map(|b| b.trim().to_lowercase())
+        .filter(|b| !b.is_empty());
+    if name.is_none() && bundle.is_none() {
+        return false;
+    }
+    let candidates = [name.as_deref(), bundle.as_deref()];
+    excluded.iter().any(|entry| {
+        let entry = entry.trim().to_lowercase();
+        if entry.is_empty() || entry == "*" {
+            return false;
+        }
+        match entry.strip_suffix('*') {
+            Some(prefix) => candidates.iter().flatten().any(|c| c.starts_with(prefix)),
+            None => candidates.iter().flatten().any(|c| *c == entry),
+        }
+    })
 }
 
 impl Default for AppConfig {
@@ -151,6 +195,7 @@ impl Default for AppConfig {
             language: default_language(),
             commands: builtin_commands(),
             limits: LimitsConfig::default(),
+            excluded_apps: Vec::new(),
         }
     }
 }
@@ -243,6 +288,13 @@ impl AppConfig {
                 } else {
                     g.language.trim().to_string()
                 };
+                if let Some(apps) = g.excluded_apps {
+                    self.excluded_apps = apps
+                        .into_iter()
+                        .map(|a| a.trim().to_string())
+                        .filter(|a| !a.is_empty())
+                        .collect();
+                }
             }
             "provider" => self.provider = serde_json::from_value(value).map_err(bad)?,
             "commands" => self.commands = serde_json::from_value(value).map_err(bad)?,
@@ -652,6 +704,30 @@ model = "gpt-4o-mini"
         .unwrap();
         assert_eq!(cfg.hotkey, "ctrl+shift+space", "blank hotkey falls back");
         assert_eq!(cfg.undo_hotkey.as_deref(), Some("ctrl+shift+z"));
+        assert!(
+            cfg.excluded_apps.is_empty(),
+            "general save without excluded_apps leaves the list alone"
+        );
+
+        cfg.apply_section(
+            "general",
+            serde_json::json!({
+                "hotkey": "", "undo_hotkey": null, "language": "",
+                "excluded_apps": [" 1Password ", "", "com.apple.Terminal"]
+            }),
+        )
+        .unwrap();
+        assert_eq!(cfg.excluded_apps, vec!["1Password", "com.apple.Terminal"]);
+        cfg.apply_section(
+            "general",
+            serde_json::json!({"hotkey": "", "undo_hotkey": null, "language": ""}),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.excluded_apps,
+            vec!["1Password", "com.apple.Terminal"],
+            "absent excluded_apps keeps the on-disk list"
+        );
 
         cfg.apply_section(
             "provider",
@@ -921,5 +997,97 @@ auth = "chatgpt"
             Some(v) => std::env::set_var("WRITING_TOOLS_API_KEY", v),
             None => std::env::remove_var("WRITING_TOOLS_API_KEY"),
         }
+    }
+
+    #[test]
+    fn excluded_apps_round_trip_and_default() {
+        let cfg = AppConfig::default();
+        let toml_str = toml::to_string(&cfg).unwrap();
+        assert!(
+            !toml_str.contains("excluded_apps"),
+            "empty list is omitted from TOML"
+        );
+        let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(parsed.excluded_apps.is_empty());
+
+        let with_apps: AppConfig = toml::from_str(
+            "excluded_apps = [\"1Password\", \"com.apple.Terminal\"]\n\
+             [provider]\nkind = \"open_ai_compatible\"\nbase_url = \"\"\nmodel = \"m\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            with_apps.excluded_apps,
+            vec!["1Password", "com.apple.Terminal"]
+        );
+        let out = toml::to_string(&with_apps).unwrap();
+        assert!(out.contains("excluded_apps = [\"1Password\", \"com.apple.Terminal\"]"));
+    }
+
+    #[test]
+    fn app_is_excluded_matches_name_bundle_and_prefix() {
+        let ex = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // Exact, case-insensitive name and bundle id.
+        let list = ex(&["1Password", "com.apple.Terminal"]);
+        assert!(app_is_excluded(
+            &list,
+            Some("1password"),
+            Some("com.1password.1password")
+        ));
+        assert!(app_is_excluded(
+            &list,
+            Some("Terminal"),
+            Some("COM.APPLE.TERMINAL")
+        ));
+        assert!(app_is_excluded(&list, None, Some("com.apple.terminal")));
+        assert!(app_is_excluded(&list, Some("1Password"), None));
+        assert!(!app_is_excluded(
+            &list,
+            Some("Safari"),
+            Some("com.apple.Safari")
+        ));
+        assert!(!app_is_excluded(&list, None, None));
+
+        // Prefix globs against either field.
+        let list = ex(&["com.apple.*", "iTerm*"]);
+        assert!(app_is_excluded(
+            &list,
+            Some("Safari"),
+            Some("com.apple.Safari")
+        ));
+        assert!(app_is_excluded(
+            &list,
+            Some("iTerm2"),
+            Some("com.googlecode.iterm2")
+        ));
+        assert!(!app_is_excluded(
+            &list,
+            Some("Ghostty"),
+            Some("com.mitchellh.ghostty")
+        ));
+
+        // Whitespace, blanks, and a bare `*` never match everything.
+        let list = ex(&["  Terminal  ", "", "   ", "*"]);
+        assert!(app_is_excluded(&list, Some("Terminal"), None));
+        assert!(!app_is_excluded(
+            &list,
+            Some("Notes"),
+            Some("com.apple.Notes")
+        ));
+
+        // Empty list never excludes.
+        assert!(!app_is_excluded(
+            &[],
+            Some("1Password"),
+            Some("com.1password.1password")
+        ));
+
+        // Substrings without `*` do not match.
+        let list = ex(&["Term"]);
+        assert!(!app_is_excluded(
+            &list,
+            Some("Terminal"),
+            Some("com.apple.Terminal")
+        ));
     }
 }
