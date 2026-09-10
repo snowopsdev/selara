@@ -22,6 +22,10 @@ pub struct AppConfig {
     pub provider: ProviderConfig,
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
+    /// Optional global shortcut that restores the text the last Replace
+    /// overwrote. Unset means no shortcut (the picker still offers a button).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo_hotkey: Option<String>,
     /// Preferred content/UI language code (e.g. "en", "es").
     #[serde(default = "default_language")]
     pub language: String,
@@ -105,6 +109,7 @@ impl Default for AppConfig {
                 auth: ProviderAuth::ApiKey,
             },
             hotkey: default_hotkey(),
+            undo_hotkey: None,
             language: default_language(),
             commands: builtin_commands(),
             limits: LimitsConfig::default(),
@@ -278,6 +283,30 @@ model = "llama3.1:8b"
         let cfg: AppConfig = toml::from_str(raw).unwrap();
         assert_eq!(cfg.provider.kind, ProviderKind::OpenAiCompatible);
         assert_eq!(cfg.commands.len(), builtin_commands().len());
+    }
+
+    #[test]
+    fn undo_hotkey_is_optional_and_round_trips() {
+        let without = r#"
+[provider]
+kind = "open_ai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+"#;
+        let cfg: AppConfig = toml::from_str(without).unwrap();
+        assert_eq!(cfg.undo_hotkey, None);
+        let raw = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            !raw.contains("undo_hotkey"),
+            "unset undo hotkey must not be written: {raw}"
+        );
+
+        let with = format!("undo_hotkey = \"ctrl+shift+z\"\n{without}");
+        let cfg: AppConfig = toml::from_str(&with).unwrap();
+        assert_eq!(cfg.undo_hotkey.as_deref(), Some("ctrl+shift+z"));
+        let raw = toml::to_string_pretty(&cfg).unwrap();
+        let back: AppConfig = toml::from_str(&raw).unwrap();
+        assert_eq!(back.undo_hotkey.as_deref(), Some("ctrl+shift+z"));
     }
 
     #[test]

@@ -332,6 +332,92 @@ impl MacosSelection {
     }
 }
 
+impl MacosSelection {
+    /// Put `original` back where a previous Replace wrote `replacement`.
+    ///
+    /// `range` is the location of the original selection when it was captured
+    /// (from `AXSelectedTextRange`). When it is missing (the clipboard fallback
+    /// read the selection) the caret is assumed to sit right after the pasted
+    /// text, which is where ⌘V leaves it; if that assumption cannot be
+    /// verified the caller gets an error rather than a paste in the wrong place.
+    /// Where the replaced text sits: the captured range when we have one,
+    /// otherwise derived from the caret, which ⌘V leaves just after the paste.
+    fn undo_target(
+        range: Option<(i64, i64)>,
+        selection: Option<(i64, i64)>,
+        replaced_len: i64,
+    ) -> Result<(i64, i64)> {
+        if let Some((loc, _)) = range {
+            return Ok((loc, replaced_len));
+        }
+        match selection {
+            Some((loc, 0)) if loc >= replaced_len => Ok((loc - replaced_len, replaced_len)),
+            Some((loc, len)) if len == replaced_len => Ok((loc, len)),
+            other => bail!(
+                "undo: cannot locate the replaced text (selection is {other:?}); \
+                 use Undo (⌘Z) in the app instead"
+            ),
+        }
+    }
+
+    /// Put `original` back where a previous Replace wrote `replacement`.
+    ///
+    /// Undo only ever overwrites text it can prove is still its own: it acts on
+    /// the process that received the replacement (never on whatever happens to
+    /// be focused now), and it re-reads the target range and refuses unless the
+    /// contents still equal `replacement`. There is deliberately no clipboard
+    /// paste fallback here: a paste cannot be verified, and guessing would mean
+    /// overwriting text the user wrote after the replacement.
+    pub fn undo_replace(
+        &self,
+        pid: Option<i32>,
+        original: &str,
+        replacement: &str,
+        range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        if !accessibility_trusted() {
+            bail!(
+                "Accessibility permission missing. Enable Selara (or the Terminal/binary \
+                 you launched) under System Settings → Privacy & Security → Accessibility."
+            );
+        }
+        // Strict: if the app that received the replacement is gone, undoing
+        // into the current frontmost app would corrupt an unrelated document.
+        let element = match pid {
+            Some(pid) => focused_element_for_pid(pid)
+                .context("undo: the app that received the replacement is no longer available")?,
+            None => focused_element().context("undo: no focused element")?,
+        };
+
+        // AX ranges are NSRange-like: UTF-16 code units.
+        let replaced_len = replacement.encode_utf16().count() as i64;
+        let (loc, len) = Self::undo_target(range, read_ax_selected_range(&element), replaced_len)?;
+        set_ax_selected_range(&element, loc, len)
+            .context("undo: cannot select the replaced text")?;
+        thread::sleep(Duration::from_millis(40));
+
+        let current = read_ax_selected_text(&element)
+            .context("undo: cannot read the text to restore over")?;
+        if current != replacement {
+            bail!(
+                "undo: the text changed since the replacement, so Selara will not \
+                 overwrite it; use Undo (⌘Z) in the app instead"
+            );
+        }
+
+        set_ax_selected_text(&element, original)
+            .context("undo: could not write the original text back")?;
+        // Some apps report success without changing anything; an emptied
+        // selection is a normal post-edit state and counts as applied.
+        let after = read_ax_selected_text(&element).unwrap_or_default();
+        if !after.is_empty() && after != original {
+            bail!("undo: the app did not accept the restored text; use Undo (⌘Z) instead");
+        }
+        debug!(len = original.len(), "restored original via AX undo");
+        Ok(())
+    }
+}
+
 impl Default for MacosSelection {
     fn default() -> Self {
         Self::new().expect("clipboard")
@@ -381,5 +467,39 @@ impl SelectionService for MacosSelection {
 
     async fn replace_selection(&self, text: &str) -> Result<()> {
         self.replace_in_app(None, text, "", None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MacosSelection;
+
+    #[test]
+    fn undo_target_prefers_the_captured_range() {
+        // The captured location wins; the length always comes from what was written.
+        let t = MacosSelection::undo_target(Some((10, 3)), Some((99, 99)), 7).unwrap();
+        assert_eq!(t, (10, 7));
+    }
+
+    #[test]
+    fn undo_target_derives_from_a_caret_after_the_paste() {
+        // ⌘V leaves the caret just past the pasted text.
+        let t = MacosSelection::undo_target(None, Some((20, 0)), 5).unwrap();
+        assert_eq!(t, (15, 5));
+    }
+
+    #[test]
+    fn undo_target_accepts_a_selection_of_the_written_length() {
+        let t = MacosSelection::undo_target(None, Some((4, 6)), 6).unwrap();
+        assert_eq!(t, (4, 6));
+    }
+
+    #[test]
+    fn undo_target_refuses_when_the_caret_moved() {
+        // Caret before the paste could even fit, a wrong-length selection, or
+        // no selection at all: all unverifiable, so refuse rather than guess.
+        assert!(MacosSelection::undo_target(None, Some((2, 0)), 5).is_err());
+        assert!(MacosSelection::undo_target(None, Some((4, 3)), 6).is_err());
+        assert!(MacosSelection::undo_target(None, None, 5).is_err());
     }
 }
