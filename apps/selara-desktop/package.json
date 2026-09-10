@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
+    "esbuild": "^0.28.2",
     "vite": "^8"
   }
 }
