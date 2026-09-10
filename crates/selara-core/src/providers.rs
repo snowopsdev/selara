@@ -42,6 +42,107 @@ async fn json_or_raw(
     }
 }
 
+/// Error for a Responses API response that ended incomplete.
+///
+/// Only `max_output_tokens` is a token limit; every other reason gets its own
+/// message naming what the API actually reported, so a `content_filter` stop is
+/// not dressed up as "pick a model with a larger output limit". Either way the
+/// partial text is discarded.
+fn incomplete_response_error(reason: &str) -> CoreError {
+    if reason == "max_output_tokens" {
+        return truncation_error("response incomplete: max_output_tokens");
+    }
+    CoreError::Provider(format!(
+        "the model stopped before finishing (incomplete_details.reason = {reason}); \
+         the partial result was discarded because it would have replaced your selection"
+    ))
+}
+
+/// Error returned when a provider stopped generating because it hit its output
+/// token limit. Callers replace the user's selection with the result, so a
+/// silently truncated rewrite would destroy text; surfacing it as an error is
+/// the only safe option.
+fn truncation_error(detail: &str) -> CoreError {
+    CoreError::Provider(format!(
+        "output was cut off by the model's token limit ({detail}); \
+         shorten the selection or pick a model with a larger output limit"
+    ))
+}
+
+/// OpenAI reasoning models (`o1`, `o3`, `o4-mini`, `gpt-5*`) reject any
+/// non-default `temperature` with HTTP 400, so the request must omit it. An
+/// optional `openai/` vendor prefix is stripped first because OpenRouter ids
+/// look like `openai/o3`. The `o` + digit rule deliberately excludes ids such
+/// as `omni-moderation`, and `gpt-4o*` never matches because it starts with `gpt-4`.
+pub fn is_reasoning_model(id: &str) -> bool {
+    let lower = id.trim().to_ascii_lowercase();
+    let bare = lower.strip_prefix("openai/").unwrap_or(&lower);
+    let mut chars = bare.chars();
+    let o_series = matches!(
+        (chars.next(), chars.next()),
+        (Some('o'), Some(d)) if d.is_ascii_digit()
+    );
+    o_series || bare.starts_with("gpt-5")
+}
+
+/// Every Claude model has always accepted this many output tokens, so it is the
+/// safe request size for a model id this build does not recognise.
+const ANTHROPIC_MIN_MAX_TOKENS: u32 = 4_096;
+/// The most this helper ever asks for. Chosen because every Claude model from
+/// 3.7 / 4 onwards accepts at least this much.
+const ANTHROPIC_MAX_MAX_TOKENS: u32 = 32_000;
+
+/// The output-token ceiling of `model`.
+///
+/// Anthropic rejects a `max_tokens` above the selected model's output limit
+/// with HTTP 400, and that limit is per model: the original Claude 3 family
+/// caps at 4,096 and Claude 3.5 at 8,192, while Claude 3.7 and everything after
+/// it accepts at least 64,000. Because the provider takes arbitrary model ids
+/// — a custom gateway, or a model released after this build — an id that
+/// matches nothing known gets the floor rather than an optimistic guess, which
+/// is exactly the fixed 4,096 that used to be sent unconditionally.
+///
+/// A vendor prefix is stripped first, so OpenRouter-style `anthropic/claude-…`
+/// ids classify the same as bare ones.
+///
+/// The dynamic alternative is `GET /v1/models/{id}`, whose `max_tokens` field
+/// reports this per model; that costs an extra round trip on every completion,
+/// and this covers the published families with a safe fallback for the rest.
+fn anthropic_model_max_tokens(model: &str) -> u32 {
+    let id = model.trim().to_ascii_lowercase();
+    let bare = id.rsplit('/').next().unwrap_or(id.as_str());
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|p| bare.starts_with(p));
+
+    if starts(&["claude-3-5-", "claude-3.5-"]) {
+        8_192
+    } else if starts(&["claude-3-7-", "claude-3.7-"]) {
+        // 64,000, i.e. more than this helper ever asks for.
+        ANTHROPIC_MAX_MAX_TOKENS
+    } else if starts(&["claude-3-", "claude-3."]) {
+        // Claude 3 Opus / Sonnet / Haiku.
+        4_096
+    } else if bare.starts_with("claude-") {
+        // Claude 4 and later. The lowest ceiling in that range is Opus 4 /
+        // Opus 4.1 at 32,000; the rest are 64,000 or more.
+        ANTHROPIC_MAX_MAX_TOKENS
+    } else {
+        ANTHROPIC_MIN_MAX_TOKENS
+    }
+}
+
+/// `max_tokens` for an Anthropic request sized to the input, then held to what
+/// `model` actually accepts. A rewrite's output is roughly the length of its
+/// input; at ~4 chars per token, `chars / 2` gives about 2x headroom. The floor
+/// keeps short inputs generous, and the model's own ceiling has the last word
+/// so a long selection cannot produce a request the API rejects outright.
+pub fn anthropic_max_tokens(model: &str, input_chars: usize) -> u32 {
+    let want = (input_chars / 2).clamp(
+        ANTHROPIC_MIN_MAX_TOKENS as usize,
+        ANTHROPIC_MAX_MAX_TOKENS as usize,
+    ) as u32;
+    want.min(anthropic_model_max_tokens(model))
+}
+
 /// Chat Completions `message.content` is a string, or an array of text parts.
 fn openai_message_content(value: &serde_json::Value) -> Option<String> {
     let content = value.pointer("/choices/0/message/content")?;
@@ -157,14 +258,16 @@ impl LlmProvider for OpenAiCompatibleProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let client = http_client()?;
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": [
                 {"role": "system", "content": req.system},
                 {"role": "user", "content": req.user}
-            ],
-            "temperature": 0.2
+            ]
         });
+        if !is_reasoning_model(&self.model) {
+            body["temperature"] = json!(0.2);
+        }
 
         let mut builder = client.post(url).json(&body);
         if !self.api_key.is_empty() {
@@ -178,6 +281,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        }
+        if value
+            .pointer("/choices/0/finish_reason")
+            .and_then(|v| v.as_str())
+            == Some("length")
+        {
+            return Err(truncation_error("finish_reason=length"));
         }
 
         openai_message_content(&value)
@@ -199,7 +309,7 @@ impl LlmProvider for AnthropicProvider {
         let client = http_client()?;
         let body = json!({
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": anthropic_max_tokens(&self.model, req.user.chars().count()),
             "system": req.system,
             "messages": [
                 {"role": "user", "content": req.user}
@@ -215,6 +325,9 @@ impl LlmProvider for AnthropicProvider {
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
+        }
+        if value.get("stop_reason").and_then(|v| v.as_str()) == Some("max_tokens") {
+            return Err(truncation_error("stop_reason=max_tokens"));
         }
         // content is an array of blocks; take first text block
         if let Some(arr) = value.get("content").and_then(|v| v.as_array()) {
@@ -291,6 +404,7 @@ impl LlmProvider for ChatGptCodexProvider {
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
         let mut out = String::new();
+        let mut incomplete: Option<String> = None;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -298,6 +412,7 @@ impl LlmProvider for ChatGptCodexProvider {
                 if let Some(delta) = parse_sse_output_text_delta(&event) {
                     out.push_str(&delta);
                 }
+                incomplete = incomplete.or_else(|| sse_event_incomplete_reason(&event));
             }
         }
         // Trailing event without final blank line
@@ -305,6 +420,12 @@ impl LlmProvider for ChatGptCodexProvider {
             if let Some(delta) = parse_sse_output_text_delta(&buf) {
                 out.push_str(&delta);
             }
+            incomplete = incomplete.or_else(|| sse_event_incomplete_reason(&buf));
+        }
+        // Drain the whole stream first so the connection closes cleanly, but
+        // never hand back partial text: the caller would write it over the selection.
+        if let Some(reason) = incomplete {
+            return Err(incomplete_response_error(&reason));
         }
 
         let trimmed = out.trim().to_string();
@@ -317,9 +438,10 @@ impl LlmProvider for ChatGptCodexProvider {
     }
 }
 
-/// Extract text from an SSE event whose `event:` is `response.output_text.delta`
-/// (or whose JSON `type` field matches). Data may be split across multiple `data:` lines.
-pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
+/// Split one SSE event block into its `event:` name and parsed JSON `data:`
+/// payload. Data may be split across multiple `data:` lines. Returns `None` for
+/// blocks with no data, the `[DONE]` sentinel, or non-JSON data.
+fn parse_sse_event(event_block: &str) -> Option<(Option<String>, serde_json::Value)> {
     let mut event_name: Option<String> = None;
     let mut data_lines: Vec<&str> = Vec::new();
     for line in event_block.lines() {
@@ -337,6 +459,50 @@ pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(&data).ok()?;
+    Some((event_name, value))
+}
+
+/// Stand-in when a terminal event says the response is incomplete but names no
+/// `incomplete_details.reason`.
+pub const UNKNOWN_INCOMPLETE_REASON: &str = "unspecified";
+
+/// Why a Responses API terminal event says the output was cut short, if it was.
+///
+/// Terminal-and-incomplete means a `response.incomplete` event, a
+/// `response.completed` whose `response.status` is not `completed`, or any
+/// terminal event carrying an `incomplete_details.reason`. The reason itself is
+/// returned rather than folded into a boolean: `max_output_tokens` is a token
+/// limit the user can act on by shortening the selection or changing model, but
+/// `content_filter` and the other reasons are not, and telling someone to pick
+/// a bigger model for a content filter is wrong advice. A reason-less incomplete
+/// yields `UNKNOWN_INCOMPLETE_REASON`, so the partial output is still rejected.
+pub fn sse_event_incomplete_reason(event_block: &str) -> Option<String> {
+    let (event_name, value) = parse_sse_event(event_block)?;
+    let json_type = value.get("type").and_then(|v| v.as_str());
+    let is_type = |name: &str| event_name.as_deref() == Some(name) || json_type == Some(name);
+    let reason = value
+        .pointer("/response/incomplete_details/reason")
+        .and_then(|v| v.as_str());
+
+    if is_type("response.incomplete") {
+        return Some(reason.unwrap_or(UNKNOWN_INCOMPLETE_REASON).to_string());
+    }
+    if let Some(reason) = reason {
+        return Some(reason.to_string());
+    }
+    if is_type("response.completed") {
+        let status = value.pointer("/response/status").and_then(|v| v.as_str());
+        if status.is_some_and(|s| s != "completed") {
+            return Some(UNKNOWN_INCOMPLETE_REASON.to_string());
+        }
+    }
+    None
+}
+
+/// Extract text from an SSE event whose `event:` is `response.output_text.delta`
+/// (or whose JSON `type` field matches). Data may be split across multiple `data:` lines.
+pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
+    let (event_name, value) = parse_sse_event(event_block)?;
     let type_field = value.get("type").and_then(|v| v.as_str());
     let is_delta = event_name.as_deref() == Some("response.output_text.delta")
         || type_field == Some("response.output_text.delta");
@@ -783,23 +949,347 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
     }
 
     fn spawn_http(status: u16, body: &str, content_type: &str) -> String {
+        spawn_http_capture(status, body, content_type).0
+    }
+
+    /// One-shot fake HTTP server. Reads the full request (headers, then
+    /// `Content-Length` bytes of body), sends the captured request body on the
+    /// returned channel, and answers with the canned response.
+    fn spawn_http_capture(
+        status: u16,
+        body: &str,
+        content_type: &str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let body = body.to_string();
         let content_type = content_type.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 8192];
-            let _ = stream.read(&mut buf);
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let header_end = loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break None;
+                }
+                raw.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break Some(pos + 4);
+                }
+            };
+            let request_body = match header_end {
+                Some(end) => {
+                    let head = String::from_utf8_lossy(&raw[..end]).to_string();
+                    let len = head
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    while raw.len() < end + len {
+                        let n = stream.read(&mut chunk).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        raw.extend_from_slice(&chunk[..n]);
+                    }
+                    String::from_utf8_lossy(&raw[end..raw.len().min(end + len)]).to_string()
+                }
+                None => String::new(),
+            };
+            let _ = tx.send(request_body);
             let resp = format!(
                 "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = stream.write_all(resp.as_bytes());
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), rx)
+    }
+
+    fn openai_provider(base: &str, model: &str) -> OpenAiCompatibleProvider {
+        OpenAiCompatibleProvider {
+            base_url: format!("{base}/v1"),
+            api_key: "k".into(),
+            model: model.into(),
+            extra_headers: Vec::new(),
+        }
+    }
+
+    fn simple_req() -> CompletionRequest {
+        CompletionRequest {
+            system: "s".into(),
+            user: "u".into(),
+        }
+    }
+
+    const OPENAI_OK: &str =
+        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+
+    #[test]
+    fn reasoning_model_detection() {
+        for id in [
+            "o4-mini",
+            "o3",
+            "o1-preview",
+            "gpt-5",
+            "gpt-5.4-mini",
+            "openai/o3",
+            "OpenAI/GPT-5",
+        ] {
+            assert!(is_reasoning_model(id), "{id} should be a reasoning model");
+        }
+        for id in [
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "omni-moderation",
+            "llama3.1:8b",
+            "claude-opus-5",
+            "",
+            "o",
+        ] {
+            assert!(
+                !is_reasoning_model(id),
+                "{id} should not be a reasoning model"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_model_request_omits_temperature() {
+        let (base, rx) = spawn_http_capture(200, OPENAI_OK, "application/json");
+        let out = openai_provider(&base, "o4-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert!(
+            sent.get("temperature").is_none(),
+            "reasoning model body must not carry temperature: {sent}"
+        );
+        assert_eq!(sent["model"], "o4-mini");
+    }
+
+    #[tokio::test]
+    async fn non_reasoning_model_request_sends_temperature() {
+        let (base, rx) = spawn_http_capture(200, OPENAI_OK, "application/json");
+        openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["temperature"], 0.2, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn openai_finish_reason_length_is_an_error() {
+        let payload = r#"{"choices":[{"message":{"role":"assistant","content":"partial text"},"finish_reason":"length"}]}"#;
+        let base = spawn_http(200, payload, "application/json");
+        let err = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off"), "{msg}");
+        assert!(msg.contains("finish_reason=length"), "{msg}");
+        assert!(
+            !msg.contains("partial text"),
+            "must not leak partial output: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_finish_reason_stop_returns_content() {
+        let base = spawn_http(200, OPENAI_OK, "application/json");
+        let out = openai_provider(&base, "gpt-4o-mini")
+            .complete(simple_req())
+            .await
+            .unwrap();
+        assert_eq!(out, "ok");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stop_reason_max_tokens_is_an_error() {
+        let payload =
+            r#"{"content":[{"type":"text","text":"partial"}],"stop_reason":"max_tokens"}"#;
+        let base = spawn_http(200, payload, "application/json");
+        let provider = AnthropicProvider {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url: base,
+        };
+        let err = provider.complete(simple_req()).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cut off"), "{msg}");
+        assert!(msg.contains("stop_reason=max_tokens"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn anthropic_end_turn_returns_text_and_sizes_max_tokens() {
+        let payload = r#"{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}"#;
+        let (base, rx) = spawn_http_capture(200, payload, "application/json");
+        let provider = AnthropicProvider {
+            api_key: "k".into(),
+            // A real id: the sizing is now capped by the model's own output
+            // limit, so this must not be a placeholder.
+            model: "claude-sonnet-4-5".into(),
+            base_url: base,
+        };
+        let out = provider
+            .complete(CompletionRequest {
+                system: "s".into(),
+                user: "x".repeat(20_000),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out, "done");
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["max_tokens"], 10_000, "{}", sent["max_tokens"]);
+    }
+
+    /// The same request against a 8,192-token model must send 8,192, not the
+    /// 10,000 the input size alone would ask for — Anthropic rejects the larger
+    /// value with HTTP 400 before generating anything.
+    #[tokio::test]
+    async fn anthropic_request_is_held_to_the_model_output_limit() {
+        let payload = r#"{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}"#;
+        let (base, rx) = spawn_http_capture(200, payload, "application/json");
+        let provider = AnthropicProvider {
+            api_key: "k".into(),
+            model: "claude-3-5-sonnet-latest".into(),
+            base_url: base,
+        };
+        provider
+            .complete(CompletionRequest {
+                system: "s".into(),
+                user: "x".repeat(20_000),
+            })
+            .await
+            .unwrap();
+        let sent: serde_json::Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(sent["max_tokens"], 8_192, "{}", sent["max_tokens"]);
+    }
+
+    #[test]
+    fn anthropic_max_tokens_clamps_to_input_size() {
+        let model = "claude-sonnet-4-5";
+        assert_eq!(anthropic_max_tokens(model, 0), 4096);
+        assert_eq!(anthropic_max_tokens(model, 100), 4096);
+        assert_eq!(anthropic_max_tokens(model, 8192), 4096);
+        assert_eq!(anthropic_max_tokens(model, 20_000), 10_000);
+        assert_eq!(anthropic_max_tokens(model, 1_000_000), 32_000);
+    }
+
+    /// The regression: a long selection asked for up to 32,000 output tokens
+    /// regardless of model, and Anthropic answers HTTP 400 when that exceeds
+    /// the selected model's ceiling - so a request that used to succeed at the
+    /// old fixed 4,096 started failing before generation.
+    #[test]
+    fn anthropic_max_tokens_never_exceeds_the_model_ceiling() {
+        // Claude 3 family: 4,096.
+        assert_eq!(
+            anthropic_max_tokens("claude-3-opus-20240229", 1_000_000),
+            4_096
+        );
+        assert_eq!(
+            anthropic_max_tokens("claude-3-haiku-20240307", 100_000),
+            4_096
+        );
+        // Claude 3.5: 8,192.
+        assert_eq!(
+            anthropic_max_tokens("claude-3-5-sonnet-latest", 1_000_000),
+            8_192
+        );
+        assert_eq!(
+            anthropic_max_tokens("claude-3-5-haiku-latest", 30_000),
+            8_192
+        );
+        // Claude 3.7 and Claude 4+: at least 32,000, so the input sizing wins.
+        assert_eq!(
+            anthropic_max_tokens("claude-3-7-sonnet-latest", 1_000_000),
+            32_000
+        );
+        assert_eq!(anthropic_max_tokens("claude-opus-4-1", 1_000_000), 32_000);
+        // A vendor prefix must not defeat the classification.
+        assert_eq!(
+            anthropic_max_tokens("anthropic/claude-3-5-sonnet-latest", 1_000_000),
+            8_192
+        );
+        // An id this build does not know gets the always-safe floor.
+        assert_eq!(anthropic_max_tokens("my-gateway-model", 1_000_000), 4_096);
+    }
+
+    #[test]
+    fn sse_truncation_detects_incomplete_terminal_events() {
+        let incomplete = "event: response.incomplete\n\
+data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n";
+        assert_eq!(
+            sse_event_incomplete_reason(incomplete).as_deref(),
+            Some("max_output_tokens")
+        );
+
+        let completed_but_cut = "event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n";
+        assert_eq!(
+            sse_event_incomplete_reason(completed_but_cut).as_deref(),
+            Some("max_output_tokens")
+        );
+
+        let completed_wrong_status =
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"incomplete\"}}\n";
+        assert_eq!(
+            sse_event_incomplete_reason(completed_wrong_status).as_deref(),
+            Some(UNKNOWN_INCOMPLETE_REASON)
+        );
+    }
+
+    #[test]
+    fn sse_truncation_ignores_normal_events() {
+        let completed = "event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"incomplete_details\":null}}\n";
+        assert!(sse_event_incomplete_reason(completed).is_none());
+
+        let delta = "event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n";
+        assert!(sse_event_incomplete_reason(delta).is_none());
+
+        assert!(sse_event_incomplete_reason("data: [DONE]\n").is_none());
+        assert!(sse_event_incomplete_reason("event: ping\n").is_none());
+    }
+
+    /// The regression: every `response.incomplete` was reported as a token
+    /// limit, so a content-filter stop told the user to pick a model with a
+    /// larger output limit - advice that cannot help.
+    #[test]
+    fn non_token_limit_incomplete_reasons_are_reported_as_themselves() {
+        let filtered = "event: response.incomplete\n\
+data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"}}}\n";
+        assert_eq!(
+            sse_event_incomplete_reason(filtered).as_deref(),
+            Some("content_filter")
+        );
+
+        let msg = incomplete_response_error("content_filter").to_string();
+        assert!(
+            msg.contains("content_filter"),
+            "names the real reason: {msg}"
+        );
+        assert!(
+            !msg.contains("larger output limit"),
+            "does not give token-limit advice: {msg}"
+        );
+
+        // The token-limit case keeps its original wording and advice.
+        let token = incomplete_response_error("max_output_tokens").to_string();
+        assert!(token.contains("larger output limit"), "{token}");
     }
 
     #[tokio::test]
