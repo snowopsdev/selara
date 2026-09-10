@@ -118,6 +118,36 @@ fn read_ax_selected_range(element: &AXUIElement) -> Option<(i64, i64)> {
     }
 }
 
+/// Did an AX insertion of `text` at `caret` actually land?
+///
+/// An insert cannot use the Replace heuristic ("the selection no longer holds
+/// the original text"), because the text it replaces is the empty string: a
+/// field that collapses its selection after an edit reports an empty selection
+/// both when the write succeeded and when it silently did nothing. So look at
+/// where the caret ended up instead. After a real insertion the field either
+/// leaves the inserted run selected, or collapses the caret to the end of it;
+/// an app that reported success and wrote nothing leaves the caret at `caret`.
+///
+/// `selected_range` and `caret` are AX ranges, i.e. UTF-16 code units.
+fn insertion_landed(
+    selected_text: Option<&str>,
+    selected_range: Option<(i64, i64)>,
+    text: &str,
+    caret: i64,
+) -> bool {
+    if selected_text == Some(text) && !text.is_empty() {
+        return true;
+    }
+    let inserted = text.encode_utf16().count() as i64;
+    match selected_range {
+        // Caret collapsed to the end of what we wrote.
+        Some((loc, 0)) => loc == caret + inserted,
+        // The inserted run is still selected.
+        Some((loc, len)) => loc == caret && len == inserted,
+        None => false,
+    }
+}
+
 fn set_ax_selected_range(element: &AXUIElement, location: i64, length: i64) -> Result<()> {
     let mut range = CFRange {
         location: location as isize,
@@ -218,6 +248,16 @@ fn cmd_keystroke(keycode: u16) -> Result<()> {
 
 fn clipboard_copy() -> Result<()> {
     cmd_keystroke(KeyCode::ANSI_C)
+}
+
+/// Collapse the selection to its end the way a user would: a plain → press.
+fn collapse_selection_right() -> Result<()> {
+    let flags = CGEventFlags::empty();
+    post_key(KeyCode::RIGHT_ARROW, flags, true)?;
+    thread::sleep(Duration::from_millis(20));
+    post_key(KeyCode::RIGHT_ARROW, flags, false)?;
+    thread::sleep(Duration::from_millis(60));
+    Ok(())
 }
 
 fn clipboard_paste() -> Result<()> {
@@ -628,6 +668,78 @@ impl MacosSelection {
 }
 
 impl MacosSelection {
+    /// Insert `text` right after the selection that was captured, leaving the
+    /// selection itself untouched. Call after hiding our UI and re-activating
+    /// the target app.
+    ///
+    /// With a captured `range` the caret is moved to the end of the selection
+    /// through Accessibility and the text is written there, then verified by
+    /// where the caret ended up (see `insertion_landed`) before the write is
+    /// treated as done. If the range cannot be applied, or none was captured
+    /// (clipboard fallback read the selection), a plain → key press collapses
+    /// the selection to its end and the text is pasted.
+    pub fn insert_after_selection(
+        &self,
+        pid: Option<i32>,
+        text: &str,
+        range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        if !accessibility_trusted() {
+            bail!(
+                "Accessibility permission missing. Enable Selara (or the Terminal/binary \
+                 you launched) under System Settings → Privacy & Security → Accessibility."
+            );
+        }
+
+        // True once AX has already put the caret at the end of the selection, so
+        // the paste fallback must not press → again and skip a character.
+        let mut caret_collapsed = false;
+
+        if let Some((loc, len)) = range {
+            let caret = loc + len;
+            let element = match pid {
+                Some(pid) => focused_element_for_pid(pid).or_else(|_| focused_element()),
+                None => focused_element(),
+            };
+            match element {
+                Ok(el) => match set_ax_selected_range(&el, caret, 0) {
+                    Ok(()) => {
+                        caret_collapsed = true;
+                        thread::sleep(Duration::from_millis(40));
+                        match set_ax_selected_text(&el, text) {
+                            // Verify the insertion directly. Routing this through
+                            // `replace_in_app` with an empty `original` cannot tell a
+                            // real insert from a silent no-op in a field that clears
+                            // its selection after an edit, and so pasted a second copy.
+                            Ok(()) => {
+                                let landed = insertion_landed(
+                                    read_ax_selected_text(&el).ok().as_deref(),
+                                    read_ax_selected_range(&el),
+                                    text,
+                                    caret,
+                                );
+                                if landed {
+                                    debug!(len = text.len(), "inserted after selection via AX");
+                                    return Ok(());
+                                }
+                                debug!("AX insert reported ok but the caret did not move; pasting");
+                            }
+                            Err(e) => debug!("AX insert failed ({e}); using paste fallback"),
+                        }
+                    }
+                    Err(e) => debug!("collapse selection via AX failed ({e}); using → + paste"),
+                },
+                Err(e) => debug!("no focused element for insert ({e}); using → + paste"),
+            }
+        }
+
+        if !caret_collapsed {
+            collapse_selection_right()?;
+        }
+        self.replace_via_clipboard_fallback(text)
+            .context("clipboard insert fallback")
+    }
+
     /// Put `original` back where a previous Replace wrote `replacement`.
     ///
     /// `range` is the location of the original selection when it was captured
@@ -798,6 +910,7 @@ mod tests {
         assert!(MacosSelection::undo_target(None, None, 5).is_err());
     }
 
+    use super::insertion_landed;
     use super::pasteboard::{
         pasteboard_change_count, pasteboard_text, restore_pasteboard, snapshot_pasteboard,
         write_text, PasteboardSnapshot,
@@ -928,5 +1041,34 @@ mod tests {
         let theirs = write_text("someone else's copy").expect("second write");
         assert_ne!(theirs, ours);
         assert_eq!(pasteboard_text().as_deref(), Some("someone else's copy"));
+    }
+
+    /// The regression this guards: a field that clears its selection after an
+    /// AX edit reports an empty selection, which the Replace heuristic reads as
+    /// "nothing happened" and follows with a ⌘V, inserting the text twice.
+    #[test]
+    fn insertion_is_recognised_when_the_field_clears_its_selection() {
+        assert!(insertion_landed(Some(""), Some((17, 0)), "added", 12));
+    }
+
+    #[test]
+    fn insertion_is_recognised_when_the_field_keeps_it_selected() {
+        assert!(insertion_landed(Some("added"), Some((12, 5)), "added", 12));
+    }
+
+    #[test]
+    fn a_silent_no_op_is_not_mistaken_for_an_insertion() {
+        // App reported success, wrote nothing: caret still sits at the collapse
+        // point and the selection is empty. Must fall through to the paste.
+        assert!(!insertion_landed(Some(""), Some((12, 0)), "added", 12));
+        assert!(!insertion_landed(None, Some((12, 0)), "added", 12));
+        assert!(!insertion_landed(None, None, "added", 12));
+    }
+
+    #[test]
+    fn insertion_length_is_measured_in_utf16_code_units() {
+        // "🙂" is one char but two UTF-16 code units, which is what AX ranges use.
+        assert!(insertion_landed(Some(""), Some((14, 0)), "🙂", 12));
+        assert!(!insertion_landed(Some(""), Some((13, 0)), "🙂", 12));
     }
 }
