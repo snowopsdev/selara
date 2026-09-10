@@ -19,8 +19,8 @@ selara-core = { path = "../../crates/selara-core" }
 selara-platform = { path = "../../crates/selara-platform" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-eframe = "0.32"
-egui = "0.32"
-egui_commonmark = "0.21"
+eframe = "0.36"
+egui = "0.36"
+egui_commonmark = "0.25"
 libc = "0.2"
 notify = "7"
