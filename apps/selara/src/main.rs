@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use selara_core::commands::{find_command, run_command};
-use selara_core::config::AppConfig;
+use selara_core::config::{ApiKeySource, AppConfig};
+use selara_core::secrets;
 
 #[cfg(target_os = "macos")]
 mod serve;
@@ -41,6 +42,31 @@ enum Action {
     },
     /// Start the desktop shell (global hotkey + picker UI). macOS only for now.
     Serve,
+    /// Manage the provider API key in the OS keychain
+    Key {
+        #[command(subcommand)]
+        action: KeyAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum KeyAction {
+    /// Read a key from stdin and store it in the keychain for the configured
+    /// provider; a key in config.toml is removed so the keychain copy wins.
+    Set,
+    /// Remove the keychain entry for the configured provider
+    Clear,
+    /// Show where the key would come from (env, keychain, config, none)
+    Status,
+}
+
+fn describe_source(source: ApiKeySource) -> &'static str {
+    match source {
+        ApiKeySource::Env => "from environment (SELARA_API_KEY or WRITING_TOOLS_API_KEY)",
+        ApiKeySource::Keychain => "from the OS keychain",
+        ApiKeySource::Config => "from provider.api_key in config.toml (plaintext)",
+        ApiKeySource::None => "not set",
+    }
 }
 
 fn main() -> Result<()> {
@@ -91,6 +117,39 @@ async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
             );
             println!("hotkey: {}", cfg.hotkey);
             println!("commands: {}", cfg.commands.len());
+            println!("api key: {}", describe_source(cfg.api_key_source()));
+        }
+        Action::Key { action } => {
+            let mut cfg = AppConfig::load_or_init(&config_path)?;
+            let kind = cfg.provider.kind;
+            match action {
+                KeyAction::Set => {
+                    use std::io::Read;
+                    let mut raw = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut raw)
+                        .context("reading API key from stdin")?;
+                    secrets::keychain_set(kind, raw.trim())?;
+                    if cfg.provider.api_key.is_some() {
+                        cfg.provider.api_key = None;
+                        cfg.save(&config_path)?;
+                        println!("removed provider.api_key from {}", config_path.display());
+                    }
+                    println!(
+                        "stored key for {:?} in the keychain ({} / {})",
+                        kind,
+                        secrets::KEYCHAIN_SERVICE,
+                        secrets::keychain_account(kind)
+                    );
+                }
+                KeyAction::Clear => {
+                    secrets::keychain_delete(kind)?;
+                    println!("removed keychain entry for {kind:?}");
+                }
+                KeyAction::Status => {
+                    println!("{}", describe_source(cfg.api_key_source()));
+                }
+            }
         }
         Action::ListCommands => {
             let cfg = AppConfig::load_or_init(&config_path)?;

@@ -7,6 +7,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod providers;
+pub mod secrets;
 
 pub use chatgpt_auth::ChatGptAuth;
 pub use codex_cli::CodexLoginStatus;

@@ -6,6 +6,21 @@ use crate::chatgpt_auth::ChatGptAuth;
 use crate::commands::{builtin_commands, WritingCommand};
 use crate::error::CoreError;
 use crate::providers::{provider_from_config, ChatGptCodexProvider, LlmProvider, ProviderKind};
+use crate::secrets;
+
+/// Where `resolve_api_key` would take the key from, in priority order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeySource {
+    /// `SELARA_API_KEY` or the legacy `WRITING_TOOLS_API_KEY`.
+    Env,
+    /// OS credential store entry for the provider kind.
+    Keychain,
+    /// `provider.api_key` in `config.toml`.
+    Config,
+    /// Nothing found.
+    None,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -241,13 +256,17 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Environment first, then the OS keychain entry for this provider kind,
+    /// then `provider.api_key` in the file. A keychain that cannot be read
+    /// (locked, denied) is logged and skipped so a key in the file still works.
     pub fn resolve_api_key(&self) -> Result<String, CoreError> {
-        for var in ["SELARA_API_KEY", "WRITING_TOOLS_API_KEY"] {
-            if let Ok(key) = std::env::var(var) {
-                if !key.trim().is_empty() {
-                    return Ok(key);
-                }
-            }
+        if let Some(key) = env_api_key() {
+            return Ok(key);
+        }
+        match secrets::keychain_get(self.provider.kind) {
+            Ok(Some(key)) => return Ok(key),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("{e}; falling back to config.toml"),
         }
         self.provider
             .api_key
@@ -255,10 +274,30 @@ impl AppConfig {
             .filter(|k| !k.trim().is_empty())
             .ok_or_else(|| {
                 CoreError::Config(
-                    "missing API key: set SELARA_API_KEY (or WRITING_TOOLS_API_KEY) or provider.api_key in config.toml"
+                    "missing API key: set SELARA_API_KEY, store one with `selara key set` \
+(or the Settings app), or set provider.api_key in config.toml"
                         .into(),
                 )
             })
+    }
+
+    /// Which source `resolve_api_key` would use right now.
+    pub fn api_key_source(&self) -> ApiKeySource {
+        if env_api_key().is_some() {
+            return ApiKeySource::Env;
+        }
+        if matches!(secrets::keychain_get(self.provider.kind), Ok(Some(_))) {
+            return ApiKeySource::Keychain;
+        }
+        if self
+            .provider
+            .api_key
+            .as_deref()
+            .is_some_and(|k| !k.trim().is_empty())
+        {
+            return ApiKeySource::Config;
+        }
+        ApiKeySource::None
     }
 
     /// Build the LLM provider for the current config.
@@ -289,6 +328,14 @@ impl AppConfig {
 /// tell whether the shell is running.
 pub fn serve_pidfile(config_path: &Path) -> PathBuf {
     config_path.with_file_name("serve.pid")
+}
+
+fn env_api_key() -> Option<String> {
+    // Filter inside the closure: an empty SELARA_API_KEY must not stop the
+    // search before the legacy variable is examined.
+    ["SELARA_API_KEY", "WRITING_TOOLS_API_KEY"]
+        .iter()
+        .find_map(|var| std::env::var(var).ok().filter(|k| !k.trim().is_empty()))
 }
 
 fn temp_sibling(path: &Path) -> PathBuf {
@@ -732,11 +779,73 @@ auth = "chatgpt"
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn keychain_sits_between_env_and_config() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _store = secrets::lock_mock_store();
+        let prev_selara = std::env::var_os("SELARA_API_KEY");
+        let prev_wt = std::env::var_os("WRITING_TOOLS_API_KEY");
+        std::env::remove_var("SELARA_API_KEY");
+        std::env::remove_var("WRITING_TOOLS_API_KEY");
+
+        let mut cfg = AppConfig::default();
+        cfg.provider.kind = ProviderKind::Anthropic;
+        secrets::keychain_delete(ProviderKind::Anthropic).unwrap();
+
+        assert_eq!(cfg.api_key_source(), ApiKeySource::None);
+        assert!(cfg.resolve_api_key().is_err());
+
+        cfg.provider.api_key = Some("file-key".into());
+        assert_eq!(cfg.api_key_source(), ApiKeySource::Config);
+        assert_eq!(cfg.resolve_api_key().unwrap(), "file-key");
+
+        secrets::keychain_set(ProviderKind::Anthropic, "chain-key").unwrap();
+        assert_eq!(cfg.api_key_source(), ApiKeySource::Keychain);
+        assert_eq!(cfg.resolve_api_key().unwrap(), "chain-key");
+
+        std::env::set_var("SELARA_API_KEY", "env-key");
+        assert_eq!(cfg.api_key_source(), ApiKeySource::Env);
+        assert_eq!(cfg.resolve_api_key().unwrap(), "env-key");
+
+        secrets::keychain_delete(ProviderKind::Anthropic).unwrap();
+        match prev_selara {
+            Some(v) => std::env::set_var("SELARA_API_KEY", v),
+            None => std::env::remove_var("SELARA_API_KEY"),
+        }
+        match prev_wt {
+            Some(v) => std::env::set_var("WRITING_TOOLS_API_KEY", v),
+            None => std::env::remove_var("WRITING_TOOLS_API_KEY"),
+        }
+    }
+
+    #[test]
+    fn empty_preferred_env_falls_back_to_legacy_var() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _store = secrets::lock_mock_store();
+
+        let prev_selara = std::env::var_os("SELARA_API_KEY");
+        let prev_wt = std::env::var_os("WRITING_TOOLS_API_KEY");
+        std::env::set_var("SELARA_API_KEY", "   ");
+        std::env::set_var("WRITING_TOOLS_API_KEY", "legacy-key");
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.api_key_source(), ApiKeySource::Env);
+        assert_eq!(cfg.resolve_api_key().unwrap(), "legacy-key");
+        match prev_selara {
+            Some(v) => std::env::set_var("SELARA_API_KEY", v),
+            None => std::env::remove_var("SELARA_API_KEY"),
+        }
+        match prev_wt {
+            Some(v) => std::env::set_var("WRITING_TOOLS_API_KEY", v),
+            None => std::env::remove_var("WRITING_TOOLS_API_KEY"),
+        }
+    }
+
     #[test]
     fn resolve_api_key_prefers_selara_env() {
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _store = secrets::lock_mock_store();
 
         let prev_selara = std::env::var_os("SELARA_API_KEY");
         let prev_wt = std::env::var_os("WRITING_TOOLS_API_KEY");
