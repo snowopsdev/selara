@@ -21,3 +21,4 @@ selara-platform = { path = "../../crates/selara-platform" }
 [target.'cfg(target_os = "macos")'.dependencies]
 eframe = "0.32"
 egui = "0.32"
+notify = "7"
