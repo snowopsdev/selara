@@ -451,7 +451,7 @@ button.icon-btn {
 button.icon-btn svg { width: 13px; height: 13px; }
 button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
 .auth-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0 14px; border-top: 1px solid var(--hairline); }
-.auth-actions .btn:first-child { margin-left: 174px; }
+.auth-actions .btn:first-child { margin-left: 0; }
 .auth-actions .btn { min-width: 0; }
 
 /* Status tab: one glass card per check. */
@@ -477,6 +477,11 @@ button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
   font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px;
   padding: 1px 5px; border-radius: 5px; border: 1px solid var(--hairline);
   background: var(--glass-strong); color: var(--text);
+}
+.status-card a { color: var(--accent); }
+.status-card progress {
+  display: block; width: 100%; height: 8px; margin-top: 10px;
+  accent-color: var(--accent);
 }
 .status-list {
   margin: 10px 0 0; padding: 0; list-style: none;
@@ -568,7 +573,31 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   </div>
   <script>
 (function () {
-  let config = null;
+  function defaultConfig() {
+    return {
+      schema_version: 1,
+      provider: {
+        kind: "open_ai_compatible",
+        base_url: "",
+        model: "",
+        api_key: null,
+        auth: "api_key",
+        codex_home: null,
+      },
+      hotkey: "ctrl+shift+space",
+      undo_hotkey: null,
+      language: "en",
+      excluded_apps: [],
+      commands: [],
+      limits: { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000, secret_guard: true },
+    };
+  }
+  // Renderable defaults keep the Settings form usable while the native bridge
+  // is still loading. These drafts are intentionally separate from config:
+  // an async status/model response must never overwrite an in-progress edit.
+  let config = defaultConfig();
+  let providerDraft = null;
+  let generalDraft = null;
   let editingId = null;
   const $ = (sel) => document.querySelector(sel);
   // @selara-helpers-start (pure functions; tests/helpers.test.mjs evaluates this block)
@@ -637,6 +666,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
   function statusDotClass(st) {
     if (!st) return "unknown";
+    if (st.state === "error") return "bad";
+    if (st.state === "connected") return "ok";
+    if (st.state === "api_key_only" || st.state === "signed_out" || st.state === "checking") return "unknown";
     if (st.logged_in) return "ok";
     // Amber for signed-out; red only for hard errors.
     const msg = (st.message || "").toLowerCase();
@@ -649,6 +681,35 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   const statusEl = () => $("#save-status");
   const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*|Will start at login|Will not start at login|Update available|Installing update…)$/;
   const BAD_STATUS = /error|failed|required|before saving|not available|could not|enoent/i;
+
+  const AUTH_STATUS_LABELS = {
+    checking: "Checking…",
+    signed_out: "Signed out",
+    connected: "Connected",
+    api_key_only: "API key only",
+    error: "Error",
+  };
+  function normalizeAuthStatus(value) {
+    const raw = value && typeof value === "object" ? value : {};
+    let state = typeof raw.state === "string" ? raw.state.toLowerCase() : "";
+    if (!Object.prototype.hasOwnProperty.call(AUTH_STATUS_LABELS, state)) {
+      state = raw.logged_in ? (raw.via_chatgpt === false ? "api_key_only" : "connected") : "signed_out";
+    }
+    const loggedIn = state === "connected" || state === "api_key_only" || raw.logged_in === true;
+    return {
+      ...raw,
+      state,
+      logged_in: loggedIn,
+      via_chatgpt: raw.via_chatgpt === true || state === "connected",
+      email: raw.email == null ? null : String(raw.email),
+      plan: raw.plan == null ? null : String(raw.plan),
+      message: raw.message == null ? "" : String(raw.message),
+    };
+  }
+  function authStatusLabel(status) {
+    const st = normalizeAuthStatus(status);
+    return AUTH_STATUS_LABELS[st.state] || "Unknown";
+  }
   function setStatus(msg) {
     const text = msg || "";
     statusEl().textContent = text;
@@ -809,13 +870,25 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   let serveStatus = null;
   let supervisor = null;
   let serveLogLines = [];
-  let axGranted = null;
+  let axTrust = "unknown";
   let appVersion = "";
   // Last result of check_for_updates (also pushed by the background check
   // through the `update-changed` event). Never triggers a network check by
   // itself; the user presses the button for that.
   let updateStatus = null;
   let usageSummary = null;
+  let providerStatusRequestId = 0;
+
+  function normalizeAxTrust(value) {
+    if (typeof value === "string") {
+      const state = value.toLowerCase();
+      if (state === "granted" || state === "missing" || state === "unknown") return state;
+    }
+    // Older sidecars returned a boolean. Keep that response readable while
+    // the current command returns the explicit AxTrust string.
+    if (typeof value === "boolean") return value ? "granted" : "missing";
+    return "unknown";
+  }
 
   async function refreshStatusData() {
     try {
@@ -849,9 +922,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       serveLogLines = [];
     }
     try {
-      axGranted = await invoke("accessibility_status");
+      const trust = await invoke("accessibility_status");
+      axTrust = normalizeAxTrust(trust);
     } catch (_) {
-      axGranted = null;
+      axTrust = "unknown";
     }
     try {
       usageSummary = await invoke("usage_summary");
@@ -862,6 +936,15 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
 
   function fmtTokens(n) {
     return Number(n || 0).toLocaleString("en-US");
+  }
+
+  function fmtBytes(n) {
+    const value = Number(n);
+    if (!Number.isFinite(value) || value < 0) return "0 B";
+    if (value < 1024) return Math.round(value) + " B";
+    if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KB";
+    if (value < 1024 * 1024 * 1024) return (value / (1024 * 1024)).toFixed(1) + " MB";
+    return (value / (1024 * 1024 * 1024)).toFixed(1) + " GB";
   }
 
   function fmtCost(bucket) {
@@ -932,6 +1015,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   function renderStatus() {
+    // Any pending provider check belongs to the previous card. Its response
+    // must not write into a detached status card after a refresh.
+    providerStatusRequestId += 1;
     const s = $("#section-status");
     const p = (config && config.provider) || {};
     const kind = PROVIDERS[p.kind] ? p.kind : "open_ai_compatible";
@@ -973,20 +1059,29 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       (sv.error ? "<p class=\"field-hint error\">" + escapeHtml(sv.error) + "</p>" : "") +
       serveLog;
 
-    // 2. Accessibility
-    const axKnown = typeof axGranted === "boolean";
-    const axDot = !axKnown ? "unknown" : (axGranted ? "ok" : "bad");
-    const axState = !axKnown ? "Unknown" : (axGranted ? "Granted" : "Not granted");
-    const axBody =
-      "<p class=\"field-hint\">This is the grant for the Settings app itself. <code>serve</code> reads and replaces text through Accessibility, so the program that runs it (Terminal, iTerm, or the selara binary) must also be enabled under System Settings → Privacy &amp; Security → Accessibility.</p>" +
-      (axGranted
-        ? ""
-        : "<div class=\"actions\"><button type=\"button\" class=\"btn secondary\" id=\"status-open-ax\">Open Accessibility settings</button></div>");
+    // 2. Accessibility. The command reports the trust of the managed child;
+    // an externally started service is deliberately unknown because this app
+    // cannot inspect another process's protocol status.
+    const childStatus = sup.child_status || {};
+    const managed = !!sup.managed;
+    const external = !!sup.external || (!managed && !!sv.running);
+    const trust = normalizeAxTrust(axTrust !== "unknown" ? axTrust : childStatus.ax_trust);
+    const axDot = trust === "granted" ? "ok" : (trust === "missing" ? "bad" : "unknown");
+    const axState = trust === "granted" ? "Granted" : (trust === "missing" ? "Missing" : "Unknown");
+    const axBody = external
+      ? "<p class=\"field-hint\">Accessibility trust is unknown because this <code>serve</code> process was started outside Selara. Stop that process, then start <code>serve</code> from this Settings app to inspect and manage its grant.</p>"
+      : (managed
+        ? "<p class=\"field-hint\">This is the Accessibility grant reported by Selara's managed <code>serve</code> process. It reads and replaces text through macOS Accessibility.</p>"
+        : "<p class=\"field-hint\">Start <code>serve</code> from this Settings app to inspect the managed process's Accessibility grant.</p>") +
+      (trust === "granted" ? "" : "<div class=\"actions\"><button type=\"button\" class=\"btn secondary\" id=\"status-open-ax\">Open Accessibility settings</button></div>");
 
     // 3. Provider (the key is never rendered)
     const baseUrl = auth === "chatgpt"
       ? "not used with ChatGPT via Codex"
       : ((p.base_url || "").trim() || "default (" + meta.baseUrl + ")");
+    const authSt = normalizeAuthStatus(chatgptStatus);
+    const providerAuthState = auth === "chatgpt" ? authStatusLabel(authSt) : (authSt.state === "api_key_only" ? "API key only" : "API key");
+    const providerDot = auth === "chatgpt" ? statusDotClass(authSt) : (authSt.state === "api_key_only" ? "unknown" : "unknown");
     const providerBody =
       "<dl class=\"status-meta\">" +
       "<dt>Provider</dt><dd>" + escapeHtml(meta.label) + "</dd>" +
@@ -997,7 +1092,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<div class=\"actions\">" +
       "<button type=\"button\" class=\"btn secondary\" id=\"status-check-provider\">Check connection</button>" +
       "<span class=\"field-hint\" id=\"status-provider-result\">" +
-      (auth === "chatgpt" ? "Checks the Codex CLI sign-in." : "Lists models with the saved key. The key itself is never shown here.") +
+      (auth === "chatgpt" ? escapeHtml(authSt.message || "Checks the shared Codex account sign-in.") : "Lists models with the saved key. The key itself is never shown here.") +
       "</span></div>";
 
     // 4. Shortcuts
@@ -1016,19 +1111,36 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     // 5. Updates (signed releases via tauri-plugin-updater)
     const up = updateStatus || {};
     const upAvailable = up.state === "available";
+    const upBusy = ["downloading", "waiting", "installing"].includes(up.state);
     const upDot = up.state === "available" ? "ok"
       : (up.state === "up_to_date" ? "ok" : (up.state === "error" ? "bad" : "unknown"));
-    const upState = up.state === "available" ? "v" + up.version + " available"
-      : (up.state === "up_to_date" ? "Up to date"
-        : (up.state === "error" ? "Check failed"
-          : (up.state === "unconfigured" ? "Not configured" : "Not checked")));
+    const upState = ({ available: "v" + up.version + " available", up_to_date: "Up to date", error: "Check failed", downloading: "Downloading…", waiting: "Waiting…", installing: "Installing…", unconfigured: "Not configured" }[up.state] || "Not checked");
+    const downloaded = Number(up.downloaded);
+    const total = Number(up.total);
+    const hasProgress = up.state === "downloading" && Number.isFinite(downloaded) && downloaded >= 0;
+    const progressText = hasProgress
+      ? (Number.isFinite(total) && total > 0
+        ? "Downloaded " + fmtBytes(downloaded) + " of " + fmtBytes(total) + "."
+        : "Downloaded " + fmtBytes(downloaded) + ".")
+      : "";
     const upResult = up.state === "available"
       ? "Selara v" + up.version + " is ready to install" + (up.date ? " (released " + up.date + ")" : "") + "."
       : (up.state === "up_to_date" ? "You are on the latest release."
-        : (up.state === "error" ? String(up.message || "Update check failed.")
-          : (up.state === "unconfigured"
-            ? "This build has no updater signing key, so checks are skipped. Download new releases from GitHub."
-            : "Checks the GitHub release feed for a newer signed build. Nothing is downloaded until you choose to install.")));
+        : (up.state === "downloading" ? "Downloading Selara v" + String(up.version || "the update") + ". " + progressText
+          : (up.state === "waiting" ? "Finishing active work before installing Selara v" + String(up.version || "the update") + "."
+            : (up.state === "installing" ? "Installing Selara v" + String(up.version || "the update") + ". The app will restart when installation finishes."
+              : (up.state === "error" ? String(up.message || "Update check failed.")
+                : (up.state === "unconfigured"
+                  ? "This build has no updater signing key, so checks are skipped. Download new releases from GitHub."
+                  : "Checks the GitHub release feed for a newer signed build. Nothing is downloaded until you choose to install."))))));
+    const retryHelp = up.state === "error"
+      ? "<p class=\"field-hint error\">Retry the check. If it keeps failing, install the DMG from <a href=\"https://github.com/snowopsdev/selara/releases/latest\" target=\"_blank\" rel=\"noreferrer\">GitHub releases</a>.</p>"
+      : "";
+    const progress = hasProgress
+      ? (Number.isFinite(total) && total > 0
+        ? "<progress id=\"status-update-progress\" max=\"" + total + "\" value=\"" + downloaded + "\" aria-label=\"Downloading update\"></progress>"
+        : "<progress id=\"status-update-progress\" aria-label=\"Downloading update\"></progress>")
+      : "";
     const updatesBody =
       "<dl class=\"status-meta\">" +
       "<dt>Installed</dt><dd>" + escapeHtml(appVersion ? "v" + appVersion : "unknown") + "</dd>" +
@@ -1038,10 +1150,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         ? "<details class=\"serve-log\"><summary>Release notes</summary><pre>" + escapeHtml(String(up.notes)) + "</pre></details>"
         : "") +
       "<div class=\"actions\">" +
-      "<button type=\"button\" class=\"btn secondary\" id=\"status-check-update\">Check for updates</button>" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"status-check-update\"" + (upBusy ? " disabled" : "") + ">" + (up.state === "error" ? "Retry" : "Check for updates") + "</button>" +
       (upAvailable ? "<button type=\"button\" class=\"btn\" id=\"status-install-update\">Install and restart</button>" : "") +
       "<span class=\"field-hint" + (up.state === "error" ? " error" : "") + "\" id=\"status-update-result\">" + escapeHtml(upResult) + "</span>" +
-      "</div>";
+      "</div>" + progress + retryHelp;
     // 5. usage (local ledger next to the config; never leaves the machine)
     const u = usageSummary || {};
     const all = u.all_time || {};
@@ -1060,15 +1172,15 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     s.innerHTML =
       "<h1>Status</h1>" +
       "<div class=\"status-toolbar\">" +
-      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, the shortcuts, and updates.</p>" +
-      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, the shortcuts, and what it has cost.</p>" +
+      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, the shortcuts, updates, and usage.</p>" +
       "<button type=\"button\" class=\"btn secondary\" id=\"status-refresh\">Refresh</button>" +
       "</div>" +
       statusCard("serve", "selara serve", serveDot, serveState, serveBody) +
       statusCard("accessibility", "Accessibility", axDot, axState, axBody) +
-      statusCard("provider", "Provider", "unknown", "Not checked", providerBody) +
+      statusCard("provider", "Provider", providerDot, providerAuthState, providerBody) +
       statusCard("shortcuts", "Shortcuts", "", shortcutCount + (shortcutCount === 1 ? " shortcut" : " shortcuts"), shortcutsBody) +
-      statusCard("updates", "Updates", upDot, upState, updatesBody);
+      statusCard("updates", "Updates", upDot, upState, updatesBody) +
+      statusCard("usage", "Usage", u.error ? "unknown" : "", usageState, usageBody);
 
     $("#status-check-update").onclick = async () => {
       const btn = $("#status-check-update");
@@ -1106,8 +1218,6 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
             }
         }
     }
-
-      statusCard("usage", "Usage", u.error ? "unknown" : "", usageState, usageBody);
 
     const clearBtn = $("#usage-clear");
     if (clearBtn) {
@@ -1170,27 +1280,31 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       const out = $("#status-provider-result");
       const dot = document.querySelector("#status-provider .status-dot");
       const state = $("#status-provider-state");
+      const requestId = ++providerStatusRequestId;
+      const expectedOut = out;
       btn.disabled = true;
       out.classList.remove("error");
       out.textContent = "Contacting " + (auth === "chatgpt" ? "the Codex CLI" : meta.label) + "…";
       setStatus("Checking provider…");
       try {
         if (auth === "chatgpt") {
-          const st = await invoke("chatgpt_auth_status");
+          const st = normalizeAuthStatus(await invoke("chatgpt_auth_status"));
+          if (requestId !== providerStatusRequestId || $("#status-provider-result") !== expectedOut || !expectedOut.isConnected) return;
           chatgptStatus = st;
-          const ok = !!(st && st.logged_in);
+          const ok = isChatgptConnected(st);
           setDot(dot, ok ? "ok" : statusDotClass(st));
-          state.textContent = ok ? "Signed in" : "Not signed in";
+          state.textContent = authStatusLabel(st);
           out.textContent = ok
-            ? "Codex CLI is signed in" + (st.email ? " as " + maskEmail(st.email) : "") + "."
-            : ((st && st.message) || "Not signed in. Use the Models tab to sign in.");
-          setStatus(ok ? "Provider reachable" : "Not signed in");
+            ? "The shared Codex account is signed in" + (st.email ? " as " + maskEmail(st.email) : "") + "."
+            : authStatusMessage(st);
+          setStatus(ok ? "Provider reachable" : authStatusMessage(st));
         } else {
           const models = await invoke("list_provider_models_cmd", {
             kind: kind,
             baseUrl: (p.base_url || "").trim(),
             apiKey: (p.api_key && String(p.api_key).trim()) || null,
           });
+          if (requestId !== providerStatusRequestId || $("#status-provider-result") !== expectedOut || !expectedOut.isConnected) return;
           const n = Array.isArray(models) ? models.length : 0;
           setDot(dot, "ok");
           state.textContent = "Reachable · " + n + (n === 1 ? " model" : " models");
@@ -1198,19 +1312,21 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
           setStatus("Provider reachable");
         }
       } catch (e) {
+        if (requestId !== providerStatusRequestId || $("#status-provider-result") !== expectedOut || !expectedOut.isConnected) return;
         setDot(dot, "bad");
         state.textContent = "Unreachable";
         out.textContent = String(e);
         out.classList.add("error");
         setStatus(String(e));
       } finally {
-        btn.disabled = false;
+        if (requestId === providerStatusRequestId && $("#status-provider-result") === expectedOut && expectedOut.isConnected) btn.disabled = false;
       }
     };
   }
 
   function renderGeneral() {
     const s = $("#section-general");
+    const g = generalDraft ? { ...config, ...generalDraft } : config;
     s.innerHTML =
       "<h1>General</h1>" +
       "<p class=\"lead\">Language and the global shortcut for the writing picker.</p>" +
@@ -1219,40 +1335,55 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<div class=\"form-row\">" +
       "<label for=\"language\">Default language</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"language\" value=\"" + escapeAttr(config.language || "en") + "\" placeholder=\"en\" />" +
+      "<input id=\"language\" value=\"" + escapeAttr(g.language || "en") + "\" placeholder=\"en\" />" +
       "<p class=\"field-hint\">Preferred language for the model, for example en, es, or fr.</p>" +
       "</div></div>" +
       "<div class=\"section-label\">Shortcut</div>" +
       "<div class=\"form-row\">" +
       "<label for=\"hotkey\">Picker hotkey</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"hotkey\" value=\"" + escapeAttr(config.hotkey || "ctrl+shift+space") + "\" />" +
+      "<input id=\"hotkey\" value=\"" + escapeAttr(g.hotkey || "ctrl+shift+space") + "\" />" +
       "<p class=\"field-hint\">With selara serve running, changes apply within about a second.</p>" +
       "</div></div>" +
       "<div class=\"form-row\">" +
       "<label for=\"undo-hotkey\">Undo hotkey</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"undo-hotkey\" value=\"" + escapeAttr(config.undo_hotkey || "") + "\" placeholder=\"Optional, e.g. ctrl+shift+z\" autocomplete=\"off\" spellcheck=\"false\" />" +
+      "<input id=\"undo-hotkey\" value=\"" + escapeAttr(g.undo_hotkey || "") + "\" placeholder=\"Optional, e.g. ctrl+shift+z\" autocomplete=\"off\" spellcheck=\"false\" />" +
       "<p class=\"field-hint\">Puts back the text the last Replace overwrote. The picker also has an Undo button.</p>" +
       "</div></div>" +
       "<div class=\"section-label\">Excluded apps</div>" +
       "<div class=\"form-row\">" +
       "<label for=\"excluded-apps\">Ignore hotkeys in</label>" +
       "<div class=\"control-stack\">" +
-      "<textarea id=\"excluded-apps\" rows=\"4\" placeholder=\"1Password&#10;com.apple.Terminal&#10;com.googlecode.iterm2\" autocomplete=\"off\" spellcheck=\"false\">" + escapeHtml((config.excluded_apps || []).join("\n")) + "</textarea>" +
+      "<textarea id=\"excluded-apps\" rows=\"4\" placeholder=\"1Password&#10;com.apple.Terminal&#10;com.googlecode.iterm2\" autocomplete=\"off\" spellcheck=\"false\">" + escapeHtml((g.excluded_apps || []).join("\n")) + "</textarea>" +
       "<p class=\"field-hint\">One app per line, by name (1Password) or bundle id (com.apple.Terminal). End an entry with * to match a prefix, for example com.apple.* or iTerm*. In these apps the hotkeys do nothing: no picker, no selection or clipboard read.</p>" +
       "</div></div>" +
       "<div class=\"section-label\">Startup</div>" +
       "<div class=\"form-row\">" +
       "<label for=\"autostart\">Start at login</label>" +
       "<div class=\"control-stack\">" +
-      "<label class=\"check-row\" for=\"autostart\"><input type=\"checkbox\" id=\"autostart\" /> Open the Settings app (and start serve) when you log in</label>" +
+      "<label class=\"check-row\" for=\"autostart\"><input type=\"checkbox\" id=\"autostart\" /> Start Selara in the background when you log in</label>" +
       "<p class=\"field-hint\" id=\"autostart-hint\">Applies immediately; no save needed.</p>" +
       "</div></div>" +
       "</div>" +
       "<div class=\"general-save\"><button class=\"btn\" id=\"save-general\">Save changes</button></div>";
     const autostart = $("#autostart");
-    invoke("plugin:autostart|is_enabled").then((on) => { autostart.checked = !!on; }).catch((e) => {
+    const generalView = { language: $("#language"), hotkey: $("#hotkey"), undo: $("#undo-hotkey"), excluded: $("#excluded-apps") };
+    const captureGeneralDraft = () => {
+      generalDraft = {
+        language: generalView.language.value,
+        hotkey: generalView.hotkey.value,
+        undo_hotkey: generalView.undo.value,
+        excluded_apps: generalView.excluded.value.split("\n").map((line) => line.trim()).filter(Boolean),
+      };
+    };
+    [generalView.language, generalView.hotkey, generalView.undo, generalView.excluded].forEach((el) => {
+      el.addEventListener("input", captureGeneralDraft);
+      el.addEventListener("change", captureGeneralDraft);
+    });
+    const autostartView = autostart;
+    invoke("plugin:autostart|is_enabled").then((on) => { if (autostartView.isConnected && !generalDraft) autostart.checked = !!on; }).catch((e) => {
+      if (!autostartView.isConnected) return;
       autostart.disabled = true;
       const hint = $("#autostart-hint");
       if (hint) hint.textContent = "Start at login is unavailable: " + String(e);
@@ -1267,29 +1398,29 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       }
     };
     $("#save-general").onclick = async () => {
-      await saveSection("general", {
+      const saved = await saveSection("general", {
         language: $("#language").value.trim() || "en",
         hotkey: $("#hotkey").value.trim() || "ctrl+shift+space",
         undo_hotkey: $("#undo-hotkey").value.trim() || null,
         excluded_apps: $("#excluded-apps").value.split("\n").map((l) => l.trim()).filter(Boolean),
       });
+      if (saved) generalDraft = null;
     };
   }
 
-  let chatgptStatus = null;
-  // Sign-in runs off the main thread and the Models section can re-render while it
-  // is in flight, so the pending state has to live outside the button element.
+  let chatgptStatus = normalizeAuthStatus({ state: "checking", message: "Checking the shared Codex account…" });
+  // Sign-in and model loading can outlive a render. These counters make every
+  // response conditional on the view and request that created it.
   let chatgptLoginPending = false;
-
-  async function refreshChatgptStatus() {
-    try {
-      chatgptStatus = await invoke("chatgpt_auth_status");
-    } catch (e) {
-      chatgptStatus = { logged_in: false, message: String(e), via_chatgpt: false };
-    }
-  }
-
+  let chatgptLogoutPending = false;
   let chatgptModels = null;
+  let authStatusRequestId = 0;
+  let loginRequestId = 0;
+  let logoutRequestId = 0;
+  let chatgptModelsRequestId = 0;
+  let byokModelsRequestId = 0;
+  let modelsViewGeneration = 0;
+  let keySourceRequestId = 0;
 
   const EMAIL_VISIBLE_KEY = "wt.chatgpt.emailVisible";
   function isEmailVisible() {
@@ -1298,206 +1429,200 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   function setEmailVisible(v) {
     try { localStorage.setItem(EMAIL_VISIBLE_KEY, v ? "1" : "0"); } catch (_) {}
   }
+  function isChatgptConnected(status) {
+    const st = normalizeAuthStatus(status);
+    return st.state === "connected" && st.logged_in && st.via_chatgpt;
+  }
+  function authStatusMessage(status) {
+    const st = normalizeAuthStatus(status);
+    if (st.message) return st.message;
+    return ({
+      checking: "Checking the shared Codex account…",
+      connected: "ChatGPT account connected.",
+      api_key_only: "Codex is signed in with an API key. Sign in with ChatGPT to use subscription models.",
+      signed_out: "No ChatGPT account is signed in.",
+      error: "Could not read the shared Codex account status.",
+    }[st.state] || "Account status is unknown.");
+  }
+
+  async function refreshChatgptStatus(options = {}) {
+    const requestId = ++authStatusRequestId;
+    chatgptStatus = normalizeAuthStatus({ state: "checking", message: "Checking the shared Codex account…" });
+    if (options.render) renderModels();
+    try {
+      const value = await invoke("chatgpt_auth_status");
+      if (requestId !== authStatusRequestId) return chatgptStatus;
+      chatgptStatus = normalizeAuthStatus(value);
+    } catch (e) {
+      if (requestId !== authStatusRequestId) return chatgptStatus;
+      chatgptStatus = normalizeAuthStatus({ state: "error", message: String(e), logged_in: false, via_chatgpt: false });
+    }
+    if (options.render) renderModels();
+    return chatgptStatus;
+  }
+
+  function providerDraftValue(p, key, fallback) {
+    return p[key] === undefined || p[key] === null ? fallback : p[key];
+  }
+  function currentProviderDraft() {
+    const saved = config.provider || {};
+    const draft = providerDraft || saved;
+    const kind = $("#provider-kind");
+    const auth = $("#provider-auth");
+    const byokModel = $("#model");
+    const chatModel = $("#model-select");
+    const base = $("#base_url");
+    const key = $("#api_key");
+    const home = $("#codex_home");
+    const nextKind = kind ? kind.value : providerDraftValue(draft, "kind", "open_ai_compatible");
+    const nextAuth = auth ? auth.value : providerDraftValue(draft, "auth", "api_key");
+    const savedModel = providerDraftValue(draft, "model", "");
+    const byokValue = byokModel ? byokModel.value : providerDraftValue(draft, "byok_model", nextAuth === "api_key" ? savedModel : "");
+    const chatValue = chatModel ? chatModel.value : providerDraftValue(draft, "chatgpt_model", nextAuth === "chatgpt" ? savedModel : "");
+    return {
+      ...draft,
+      kind: nextKind,
+      auth: nextAuth,
+      model: nextAuth === "chatgpt" ? chatValue : byokValue,
+      byok_model: byokValue,
+      chatgpt_model: chatValue,
+      base_url: base ? base.value : providerDraftValue(draft, "base_url", ""),
+      api_key: key ? key.value : providerDraftValue(draft, "api_key", null),
+      codex_home: home ? home.value : providerDraftValue(draft, "codex_home", null),
+    };
+  }
+  function captureProviderDraft() {
+    if (!$("#provider-kind") || !$("#provider-auth")) return providerDraft;
+    providerDraft = currentProviderDraft();
+    return providerDraft;
+  }
+
+  function modelOptionMarkup(models, selected, savedLabel) {
+    const ids = (Array.isArray(models) ? models : []).map((m) => String(m)).filter(Boolean);
+    let options = ids.map((m) => "<option value=\"" + escapeAttr(m) + "\"" + (m === selected ? " selected" : "") + ">" + escapeHtml(m) + "</option>").join("");
+    if (selected && !ids.includes(selected)) {
+      options = "<option value=\"" + escapeAttr(selected) + "\" selected>" + escapeHtml(selected) + (savedLabel ? " (saved)" : "") + "</option>" + options;
+    }
+    return options || "<option value=\"\">Use Refresh models to load choices</option>";
+  }
+  function currentModelValue() {
+    const auth = $("#provider-auth");
+    const mode = auth ? auth.value : (providerDraft && providerDraft.auth) || "api_key";
+    const field = mode === "chatgpt" ? $("#model-select") : $("#model");
+    if (field && field.value.trim()) return field.value.trim();
+    const draft = providerDraft || (config && config.provider) || {};
+    return String(mode === "chatgpt" ? (draft.chatgpt_model ?? draft.model ?? "") : (draft.byok_model ?? draft.model ?? "")).trim();
+  }
 
   async function loadChatgptModelsIntoSelect(preferred) {
     const sel = $("#model-select");
     const hint = $("#chatgpt-models-hint");
-    if (!sel) return;
-    sel.innerHTML = "<option value=\"\">Loading models…</option>";
+    if (!sel || !isChatgptConnected(chatgptStatus)) return;
+    const requestId = ++chatgptModelsRequestId;
+    const viewGeneration = modelsViewGeneration;
+    const originalSelection = sel.value.trim() || String(preferred || "").trim();
+    const expectedHint = hint;
     sel.disabled = true;
+    if (hint) hint.textContent = "Contacting the shared Codex account…";
+    setStatus("Loading Codex models…");
     try {
-      chatgptModels = await invoke("list_chatgpt_models_cmd");
-      const models = Array.isArray(chatgptModels) ? chatgptModels : [];
-      if (!models.length) {
-        sel.innerHTML = "<option value=\"\">No models returned</option>";
-        if (hint) hint.textContent = "No Codex models for this account.";
-        return;
-      }
-      const pref = preferred || (config.provider && config.provider.model) || "";
-      let opts = models.map((m) => {
-        const selected = m === pref ? " selected" : "";
-        return "<option value=\"" + escapeAttr(m) + "\"" + selected + ">" + escapeHtml(m) + "</option>";
-      }).join("");
-      if (pref && !models.includes(pref)) {
-        opts = "<option value=\"" + escapeAttr(pref) + "\" selected>" + escapeHtml(pref) + " (saved)</option>" + opts;
-      }
-      sel.innerHTML = opts;
-      sel.disabled = false;
-      if (hint) hint.textContent = models.length + " models from your ChatGPT / Codex account.";
+      const value = await invoke("list_chatgpt_models_cmd");
+      if (requestId !== chatgptModelsRequestId || viewGeneration !== modelsViewGeneration || $("#model-select") !== sel || !sel.isConnected) return;
+      const models = Array.isArray(value) ? value.map((m) => String(m)).filter(Boolean) : [];
+      chatgptModels = models;
+      const selected = sel.value.trim() || originalSelection;
+      sel.innerHTML = modelOptionMarkup(models, selected, !!selected);
+      if (selected) sel.value = selected;
+      if (expectedHint === $("#chatgpt-models-hint")) expectedHint.textContent = models.length ? models.length + " models from your ChatGPT / Codex account." : "No Codex models for this account.";
+      captureProviderDraft();
+      setStatus("Models loaded");
+      return true;
     } catch (e) {
-      sel.innerHTML = "<option value=\"\">Failed to load models</option>";
-      if (hint) hint.textContent = String(e);
+      if (requestId !== chatgptModelsRequestId || viewGeneration !== modelsViewGeneration || $("#model-select") !== sel || !sel.isConnected) return;
+      // Keep the current option and selection so a transient account error
+      // cannot replace an unsaved model with a failure placeholder.
+      if (!sel.value.trim() && originalSelection) sel.innerHTML = modelOptionMarkup([], originalSelection, true);
+      if (expectedHint === $("#chatgpt-models-hint")) expectedHint.textContent = "Could not load models: " + String(e);
       setStatus(String(e));
+    } finally {
+      if (requestId === chatgptModelsRequestId && viewGeneration === modelsViewGeneration && $("#model-select") === sel && sel.isConnected) {
+        sel.disabled = !isChatgptConnected(chatgptStatus) || $("#provider-auth").value !== "chatgpt";
+      }
     }
-  }
-
-  function currentModelValue() {
-    const auth = $("#provider-auth").value;
-    if (auth === "chatgpt") {
-      const sel = $("#model-select");
-      return sel ? sel.value.trim() : "";
-    }
-    const input = $("#model");
-    return input ? input.value.trim() : "";
   }
 
   function renderModels() {
-    const p = config.provider || {};
+    const viewGeneration = ++modelsViewGeneration;
+    const saved = config.provider || {};
+    const p = providerDraft || saved;
     const auth = p.auth || "api_key";
+    const byokModel = providerDraftValue(p, "byok_model", auth === "api_key" ? p.model || "" : "");
+    const chatModel = providerDraftValue(p, "chatgpt_model", auth === "chatgpt" ? p.model || "" : "");
     const s = $("#section-models");
-    const st = chatgptStatus || {};
-    const signedIn = !!(st && st.logged_in);
+    if (!s) return;
+    const st = normalizeAuthStatus(chatgptStatus);
+    const connected = isChatgptConnected(st);
     const dot = statusDotClass(st);
-    const shortStatus = signedIn
-      ? "Signed in"
-      : (!st || !st.message ? "Status unknown" : "Not signed in");
-
-    function emailInline(st) {
-      if (!st || !st.logged_in || !st.email) return "";
-      const show = isEmailVisible();
-      const shown = show ? st.email : maskEmail(st.email);
-      const label = show ? "Hide email" : "Show email";
-      const icon = show ? EYE_OFF_SVG : EYE_SVG;
-      return (
-        "<span class=\"email-inline\" id=\"chatgpt-email-row\">" +
-        "<span class=\"email-value\" id=\"chatgpt-email-value\">" + escapeHtml(shown) + "</span>" +
-        "<button type=\"button\" class=\"icon-btn\" id=\"chatgpt-email-toggle\" title=\"" + label + "\" aria-label=\"" + label + "\" aria-pressed=\"" + (show ? "true" : "false") + "\">" + icon + "</button>" +
-        "</span>"
-      );
-    }
-
+    const show = isEmailVisible();
+    const email = st.email ? (show ? st.email : maskEmail(st.email)) : "";
+    const emailInline = st.email && connected
+      ? "<span class=\"email-inline\" id=\"chatgpt-email-row\"><span class=\"email-value\" id=\"chatgpt-email-value\">" + escapeHtml(email) + "</span><button type=\"button\" class=\"icon-btn\" id=\"chatgpt-email-toggle\" title=\"" + (show ? "Hide email" : "Show email") + "\" aria-label=\"" + (show ? "Hide email" : "Show email") + "\" aria-pressed=\"" + (show ? "true" : "false") + "\">" + (show ? EYE_OFF_SVG : EYE_SVG) + "</button></span>"
+      : "";
     const statusChip =
-      "<div class=\"status-wrap\" id=\"chatgpt-status-wrap\">" +
-      "<div class=\"status-chip\" id=\"chatgpt-status-line\">" +
-      "<span class=\"status-dot " + dot + "\" aria-hidden=\"true\"></span>" +
-      "<span>" + escapeHtml(shortStatus) + "</span>" +
-      (signedIn ? emailInline(st) : "") +
-      "</div></div>";
-
-    const modelHint = signedIn
-      ? "<p class=\"field-hint\" id=\"chatgpt-models-hint\">Models load from your ChatGPT / Codex account.</p>"
-      : "<p class=\"field-hint\" id=\"chatgpt-models-hint\" style=\"display:none\"></p>";
-    const modelSelectAttrs = signedIn ? "" : " disabled";
+      "<div class=\"status-wrap\" id=\"chatgpt-status-wrap\"><div class=\"status-chip\" id=\"chatgpt-status-line\"><span class=\"status-dot " + dot + "\" aria-hidden=\"true\"></span><span>" + escapeHtml(authStatusLabel(st)) + "</span>" + emailInline + "</div></div>" +
+      "<p class=\"field-hint" + (st.state === "error" ? " error" : "") + "\" id=\"chatgpt-status-message\">" + escapeHtml(authStatusMessage(st)) + "</p>";
+    const statusMeta =
+      "<dl class=\"status-meta\" id=\"chatgpt-status-details\"><dt>State</dt><dd>" + escapeHtml(st.state) + "</dd>" +
+      "<dt>Logged in</dt><dd>" + (st.logged_in ? "Yes" : "No") + "</dd>" +
+      "<dt>Via ChatGPT</dt><dd>" + (st.via_chatgpt ? "Yes" : "No") + "</dd>" +
+      (st.plan ? "<dt>Plan</dt><dd>" + escapeHtml(st.plan) + "</dd>" : "") + "</dl>";
+    const modelSelectDisabled = !(auth === "chatgpt" && connected) || chatgptLoginPending || chatgptLogoutPending;
+    const cachedModels = Array.isArray(chatgptModels) ? chatgptModels : [];
+    const accountModelOptions = cachedModels.length
+      ? modelOptionMarkup(cachedModels, chatModel, false)
+      : modelOptionMarkup([], chatModel, true);
+    const loginAction = chatgptLoginPending
+      ? "<button type=\"button\" class=\"btn secondary\" id=\"chatgpt-login-cancel\">Cancel sign-in</button>"
+      : (connected
+        ? "<button type=\"button\" class=\"btn danger\" id=\"chatgpt-logout\"" + (chatgptLogoutPending ? " disabled" : "") + ">" + (chatgptLogoutPending ? "Signing out…" : "Sign out") + "</button>"
+        : "<button type=\"button\" class=\"btn\" id=\"chatgpt-login\" title=\"Opens the browser sign-in flow using Selara's bundled Codex runtime\">Sign in with ChatGPT</button>");
     const accountInner =
-      "<div class=\"form-row\">" +
-      "<label for=\"model-select\">Model</label>" +
-      "<div class=\"control-stack\" id=\"model-chatgpt-wrap\">" +
-      "<select id=\"model-select\"" + modelSelectAttrs + "><option value=\"\">Sign in to load models</option></select>" +
-      modelHint +
-      "</div></div>" +
-      "<div class=\"auth-actions\">" +
-      (signedIn
-        ? "<button class=\"btn secondary\" id=\"chatgpt-logout\">Sign out</button>" +
-          "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
-          "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>"
-        : "<button class=\"btn\" id=\"chatgpt-login\" title=\"Opens the Codex browser sign-in flow\"" +
-          (chatgptLoginPending ? " disabled>Waiting for browser sign-in…" : ">Sign in with ChatGPT") +
-          "</button>" +
-          "<button class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button>" +
-          "<button class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button>") +
-      "</div>";
-
-    const presetOptions = PROVIDERS.open_ai_compatible.presets.map((pr) =>
-      "<option value=\"" + escapeAttr(pr.id) + "\">" + escapeHtml(pr.label) + "</option>"
-    ).join("");
+      statusChip + statusMeta +
+      "<div class=\"form-row\"><label for=\"model-select\">ChatGPT model</label><div class=\"control-stack\" id=\"model-chatgpt-wrap\"><select id=\"model-select\"" + (modelSelectDisabled ? " disabled" : "") + ">" + accountModelOptions + "</select><p class=\"field-hint\" id=\"chatgpt-models-hint\">" + (connected ? (cachedModels.length ? cachedModels.length + " models from your ChatGPT / Codex account." : "Use Refresh models to load choices.") : "Sign in with ChatGPT to load subscription models.") + "</p></div></div>" +
+      "<div class=\"form-row top\"><label for=\"codex_home\">Codex home</label><div class=\"control-stack\"><input id=\"codex_home\" value=\"" + escapeAttr(p.codex_home || "") + "\" placeholder=\"Optional absolute path\" autocomplete=\"off\" spellcheck=\"false\"/><p class=\"field-hint\">Optional absolute path to the shared Codex home directory. Selara's bundled native writing runtime uses this home after you save.</p></div></div>" +
+      "<div class=\"auth-actions\">" + loginAction + "<button type=\"button\" class=\"btn secondary\" id=\"chatgpt-refresh\">Refresh status</button><button type=\"button\" class=\"btn secondary\" id=\"chatgpt-models\">Refresh models</button></div>";
+    const presetOptions = PROVIDERS.open_ai_compatible.presets.map((pr) => "<option value=\"" + escapeAttr(pr.id) + "\">" + escapeHtml(pr.label) + "</option>").join("");
     const byokInner =
-      "<div class=\"form-row\" id=\"preset-field\">" +
-      "<label for=\"provider-preset\">Preset</label>" +
-      "<div class=\"control-stack\">" +
-      "<select id=\"provider-preset\">" + presetOptions + "</select>" +
-      "<p class=\"field-hint\">Fills the base URL and key hint for a known server. Pick Custom endpoint for anything else.</p>" +
-      "</div></div>" +
-      "<div class=\"form-row\" id=\"model-byok-wrap\">" +
-      "<label for=\"model\">Model</label>" +
-      "<div class=\"control-stack\">" +
-      "<div class=\"control-inline\">" +
-      "<input id=\"model\" list=\"model-options\" value=\"" + escapeAttr(p.model || "") + "\" autocomplete=\"off\" spellcheck=\"false\" />" +
-      "<datalist id=\"model-options\"></datalist>" +
-      "<button type=\"button\" class=\"btn secondary\" id=\"load-models\">Load models</button>" +
-      "</div>" +
-      "<p class=\"field-hint\" id=\"byok-models-hint\">Type a model id, or load the list from the provider to check the connection.</p>" +
-      "</div></div>" +
-      "<div class=\"form-row\" id=\"base-url-field\">" +
-      "<label for=\"base_url\">Base URL</label>" +
-      "<div class=\"control-stack\">" +
-      "<input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" autocomplete=\"off\" spellcheck=\"false\" />" +
-      "<p class=\"field-hint\" id=\"base-url-hint\"></p>" +
-      "</div></div>";
-
-    const byokKey =
-      "<div class=\"key-wrap\" id=\"byok-key-wrap\">" +
-      "<input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" placeholder=\"API key\" autocomplete=\"off\" aria-label=\"API key\" />" +
-      "<label class=\"check-row\" for=\"store-keychain\"><input type=\"checkbox\" id=\"store-keychain\" checked /> Store in the OS keychain instead of config.toml</label>" +
-      "<p class=\"field-hint\" id=\"key-source-hint\"></p>" +
-      "</div>";
-
+      "<div class=\"form-row\" id=\"preset-field\"><label for=\"provider-preset\">Preset</label><div class=\"control-stack\"><select id=\"provider-preset\">" + presetOptions + "</select><p class=\"field-hint\">Fills the base URL and key hint for a known server. Pick Custom endpoint for anything else.</p></div></div>" +
+      "<div class=\"form-row\" id=\"model-byok-wrap\"><label for=\"model\">Model</label><div class=\"control-stack\"><div class=\"control-inline\"><input id=\"model\" list=\"model-options\" value=\"" + escapeAttr(byokModel) + "\" autocomplete=\"off\" spellcheck=\"false\"/><datalist id=\"model-options\"></datalist><button type=\"button\" class=\"btn secondary\" id=\"load-models\">Load models</button></div><p class=\"field-hint\" id=\"byok-models-hint\">Type a model id, or load the list from the provider to check the connection.</p></div></div>" +
+      "<div class=\"form-row\" id=\"base-url-field\"><label for=\"base_url\">Base URL</label><div class=\"control-stack\"><input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" autocomplete=\"off\" spellcheck=\"false\"/><p class=\"field-hint\" id=\"base-url-hint\"></p></div></div>";
+    const byokKey = "<div class=\"key-wrap\" id=\"byok-key-wrap\"><input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" placeholder=\"API key\" autocomplete=\"off\" aria-label=\"API key\"/><label class=\"check-row\" for=\"store-keychain\"><input type=\"checkbox\" id=\"store-keychain\" checked/> Store in the OS keychain instead of the Selara config file</label><p class=\"field-hint\" id=\"key-source-hint\"></p></div>";
     s.innerHTML =
-      "<h1>Models</h1>" +
-      "<p class=\"lead\">Connect an API key, or sign in with ChatGPT via Codex.</p>" +
-      "<div class=\"panel\">" +
-      "<div class=\"section-label\">Provider</div>" +
-      "<div class=\"form-row\">" +
-      "<label for=\"provider-kind\">Provider</label>" +
-      "<select id=\"provider-kind\">" +
-      Object.keys(PROVIDERS).map((k) =>
-        "<option value=\"" + k + "\">" + escapeHtml(PROVIDERS[k].label) + "</option>"
-      ).join("") +
-      "</select></div>" +
-      "<div class=\"section-label-row\">" +
-      "<div class=\"section-label\">Authentication</div>" +
-      "<span class=\"pill\" id=\"auth-experimental-pill\" style=\"display:none\">Experimental</span>" +
-      "</div>" +
-      "<div class=\"form-row\">" +
-      "<label for=\"provider-auth\" id=\"auth-row-label\">Auth mode</label>" +
-      "<div class=\"control-stack\">" +
-      segmentedHtml("provider-auth", [
-        { value: "api_key", label: "API key" },
-        { value: "chatgpt", label: "ChatGPT via Codex" },
-      ], auth) +
-      statusChip + byokKey +
-      "<p class=\"field-hint\" id=\"auth-hint\">Tokens live in ~/.codex/auth.json.</p>" +
-      "</div></div>" +
-      "<div id=\"chatgpt-fields\">" +
-      "<div class=\"section-label\">Account</div>" + accountInner +
-      "</div>" +
-      "<div id=\"byok-fields\">" +
-      "<div class=\"section-label\">Connection</div>" + byokInner +
-      "</div>" +
-      "</div>" +
-      "<div class=\"models-save\"><button class=\"btn\" id=\"save-models\">Save changes</button></div>";
-
+      "<h1>Models</h1><p class=\"lead\">Connect an API key, or use your ChatGPT subscription through Selara's bundled Codex runtime.</p><div class=\"panel\"><div class=\"section-label\">Provider</div><div class=\"form-row\"><label for=\"provider-kind\">Provider</label><select id=\"provider-kind\">" + Object.keys(PROVIDERS).map((k) => "<option value=\"" + k + "\">" + escapeHtml(PROVIDERS[k].label) + "</option>").join("") + "</select></div><div class=\"section-label-row\"><div class=\"section-label\">Authentication</div><span class=\"pill\" id=\"auth-experimental-pill\" style=\"display:none\">Experimental</span></div><div class=\"form-row\"><label for=\"provider-auth\" id=\"auth-row-label\">Auth mode</label><div class=\"control-stack\">" + segmentedHtml("provider-auth", [{ value: "api_key", label: "API key" }, { value: "chatgpt", label: "ChatGPT via Codex" }], auth) + "<p class=\"field-hint\" id=\"auth-hint\"></p></div></div><div id=\"chatgpt-fields\"><div class=\"section-label\">Account</div><div class=\"card account-card\" id=\"chatgpt-account\">" + accountInner + "</div></div><div id=\"byok-fields\"><div class=\"section-label\">Connection</div><div class=\"card\">" + byokKey + byokInner + "</div></div></div><div class=\"models-save\"><button type=\"button\" class=\"btn\" id=\"save-models\">Save changes</button></div>";
     const initialKind = PROVIDERS[p.kind] ? p.kind : "open_ai_compatible";
     $("#provider-kind").value = initialKind;
     $("#provider-auth").value = initialKind === "open_ai_compatible" ? auth : "api_key";
     wireSegmented("provider-auth");
 
     function syncAuthUi() {
-      const a = $("#provider-auth").value;
-      const isCg = a === "chatgpt";
+      const mode = $("#provider-auth").value;
+      const isCg = mode === "chatgpt";
+      // The account card is intentionally always present. API-key mode still
+      // needs to explain whether the shared Codex account is signed out or
+      // signed in with an API key.
+      $("#chatgpt-fields").style.display = "block";
       $("#byok-fields").style.display = isCg ? "none" : "block";
-      $("#chatgpt-fields").style.display = isCg ? "block" : "none";
-      const statusWrap = $("#chatgpt-status-wrap");
-      if (statusWrap) statusWrap.style.display = isCg ? "flex" : "none";
       const keyWrap = $("#byok-key-wrap");
       if (keyWrap) keyWrap.style.display = isCg ? "none" : "block";
       const pill = $("#auth-experimental-pill");
       if (pill) pill.style.display = isCg ? "inline-flex" : "none";
       const hint = $("#auth-hint");
       if (hint) {
-        if (!isCg) {
-          hint.textContent = providerMeta($("#provider-kind").value).keyHint + " Stored in ~/.config/selara/config.toml, or set SELARA_API_KEY.";
-        } else if (chatgptStatus && chatgptStatus.logged_in) {
-          hint.textContent = "Tokens live in ~/.codex/auth.json. Base URL isn't used in this mode.";
-        } else {
-          hint.textContent = "Requires codex on PATH. Base URL isn't used in this mode.";
-        }
-      }
-      if (isCg && chatgptStatus && chatgptStatus.logged_in) {
-        loadChatgptModelsIntoSelect(p.model);
+        hint.textContent = isCg
+          ? "Uses Selara's bundled native writing runtime and the shared Codex home below. ChatGPT tokens remain in that home; they are never copied into Selara."
+          : providerMeta($("#provider-kind").value).keyHint + " The key is kept in Selara's config file or the OS keychain; SELARA_API_KEY can override it.";
       }
     }
-
-    // Per-provider placeholders, hints, and whether the ChatGPT auth mode applies.
     function syncProviderUi() {
       const kind = $("#provider-kind").value;
       const meta = providerMeta(kind);
@@ -1514,7 +1639,6 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       if (presetField) presetField.style.display = isOpenAi ? "" : "none";
       const presetSel = $("#provider-preset");
       const preset = isOpenAi && presetSel ? presetById(presetSel.value) : null;
-      // With a preset selected, its placeholders and hints win over the kind's defaults.
       const active = preset || meta;
       const key = $("#api_key");
       if (key) key.placeholder = active.keyPlaceholder;
@@ -1523,22 +1647,16 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       const base = $("#base_url");
       if (base) base.placeholder = active.baseUrl || meta.baseUrl;
       const baseHint = $("#base-url-hint");
-      if (baseHint) {
-        if (!preset || preset.id === "openai") {
-          baseHint.textContent = "Leave blank to use " + meta.baseUrl + ".";
-        } else if (preset.baseUrl) {
-          baseHint.textContent = "Filled from the " + preset.label + " preset. Edit it if your server runs elsewhere.";
-        } else {
-          baseHint.textContent = "Enter the /v1 base URL of your server.";
-        }
-      }
-      const hint = $("#auth-hint");
-      if (hint && $("#provider-auth").value !== "chatgpt") {
-        hint.textContent = active.keyHint + " Stored in ~/.config/selara/config.toml, or set SELARA_API_KEY.";
-      }
+      if (baseHint) baseHint.textContent = !preset || preset.id === "openai" ? "Leave blank to use " + meta.baseUrl + "." : (preset.baseUrl ? "Filled from the " + preset.label + " preset. Edit it if your server runs elsewhere." : "Enter the /v1 base URL of your server.");
+      syncAuthUi();
     }
-
-    // Preset select follows the base URL, and a chosen preset fills the base URL.
+    ["provider-kind", "provider-auth", "model", "model-select", "base_url", "codex_home", "api_key"].forEach((id) => {
+      const el = $("#" + id);
+      if (el) {
+        el.addEventListener("input", captureProviderDraft);
+        el.addEventListener("change", captureProviderDraft);
+      }
+    });
     function syncPresetFromBaseUrl() {
       const presetSel = $("#provider-preset");
       const base = $("#base_url");
@@ -1551,206 +1669,179 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         const base = $("#base_url");
         const previousOrigin = endpointOrigin(base ? base.value : "");
         if (base && preset.id !== "custom") base.value = preset.baseUrl;
-        // A key and a model id belong to the host that issued them. Carrying
-        // them to a different origin would send one vendor's credential to
-        // another server and save a model that host does not serve, so both
-        // fields start over whenever the endpoint moves.
         const switchedHosts = endpointOrigin(base ? base.value : "") !== previousOrigin;
         const key = $("#api_key");
         const model = $("#model");
-        if (switchedHosts) {
-          if (key) key.value = "";
-          if (model) model.value = "";
-        }
+        if (switchedHosts) { if (key) key.value = ""; if (model) model.value = ""; }
         const list = $("#model-options");
         if (list) list.innerHTML = "";
         const modelsHint = $("#byok-models-hint");
         if (modelsHint) modelsHint.textContent = "Type a model id, or load the list from the provider to check the connection.";
         syncProviderUi();
+        captureProviderDraft();
         if (switchedHosts) setStatus("Switched to " + preset.label + " — enter the API key and model for that endpoint.");
       };
       const baseInput = $("#base_url");
       if (baseInput) baseInput.addEventListener("input", () => { syncPresetFromBaseUrl(); syncProviderUi(); });
     }
-
-    let lastKind = initialKind;
     $("#provider-kind").onchange = () => {
-      const kind = $("#provider-kind").value;
-      const base = $("#base_url");
-      // A base URL that was just the previous provider's default should not carry over.
-      if (base && (base.value.trim() === "" || base.value.trim() === providerMeta(lastKind).baseUrl)) {
-        base.value = "";
-      }
-      const list = $("#model-options");
-      if (list) list.innerHTML = "";
-      // A model id belongs to one provider; keep the saved one only for the saved provider.
-      const model = $("#model");
-      if (model) model.value = kind === p.kind ? (p.model || "") : "";
-      const modelsHint = $("#byok-models-hint");
-      if (modelsHint) modelsHint.textContent = "Type a model id, or load the list from the provider to check the connection.";
-      lastKind = kind;
       syncPresetFromBaseUrl();
       syncProviderUi();
+      captureProviderDraft();
     };
-
-    syncAuthUi();
+    $("#provider-auth").onchange = () => { syncAuthUi(); syncProviderUi(); captureProviderDraft(); };
     syncPresetFromBaseUrl();
     syncProviderUi();
-    $("#provider-auth").onchange = () => { syncAuthUi(); syncProviderUi(); };
 
     const loadBtn = $("#load-models");
-    if (loadBtn) {
-      loadBtn.onclick = async () => {
-        const kind = $("#provider-kind").value;
-        const meta = providerMeta(kind);
-        const modelsHint = $("#byok-models-hint");
-        const list = $("#model-options");
-        loadBtn.disabled = true;
-        if (modelsHint) modelsHint.textContent = "Contacting " + meta.label + "…";
-        setStatus("Loading models…");
-        try {
-          const models = await invoke("list_provider_models_cmd", {
-            kind: kind,
-            baseUrl: $("#base_url").value.trim(),
-            apiKey: $("#api_key").value.trim() || null,
-          });
-          const ids = Array.isArray(models) ? models : [];
-          if (list) {
-            list.innerHTML = ids.map((m) => "<option value=\"" + escapeAttr(m) + "\"></option>").join("");
-          }
-          if (modelsHint) modelsHint.textContent = ids.length + " models available from " + meta.label + ". Pick one from the list or keep typing.";
-          setStatus("Models loaded");
-        } catch (e) {
-          if (modelsHint) modelsHint.textContent = String(e);
-          setStatus(String(e));
-        } finally {
-          loadBtn.disabled = false;
-        }
-      };
-    }
+    if (loadBtn) loadBtn.onclick = async () => {
+      const input = $("#model");
+      const list = $("#model-options");
+      const hint = $("#byok-models-hint");
+      const requestId = ++byokModelsRequestId;
+      const view = modelsViewGeneration;
+      const expectedInput = input;
+      const expectedList = list;
+      const kind = $("#provider-kind").value;
+      const meta = providerMeta(kind);
+      const original = input ? input.value : "";
+      loadBtn.disabled = true;
+      if (hint) hint.textContent = "Contacting " + meta.label + "…";
+      setStatus("Loading models…");
+      try {
+        const value = await invoke("list_provider_models_cmd", { kind, baseUrl: $("#base_url").value.trim(), apiKey: $("#api_key").value.trim() || null });
+        if (requestId !== byokModelsRequestId || view !== modelsViewGeneration || $("#model") !== expectedInput || $("#model-options") !== expectedList || !expectedInput.isConnected) return;
+        const ids = Array.isArray(value) ? value.map((m) => String(m)).filter(Boolean) : [];
+        expectedList.innerHTML = ids.map((m) => "<option value=\"" + escapeAttr(m) + "\"></option>").join("");
+        if (hint) hint.textContent = ids.length + " models available from " + meta.label + ". Pick one from the list or keep typing.";
+        setStatus("Models loaded");
+      } catch (e) {
+        if (requestId !== byokModelsRequestId || view !== modelsViewGeneration || $("#model") !== expectedInput || !expectedInput.isConnected) return;
+        if (hint) hint.textContent = "Could not load models: " + String(e);
+        setStatus(String(e));
+      } finally {
+        if (requestId === byokModelsRequestId && view === modelsViewGeneration && $("#model") === expectedInput && expectedInput.isConnected) loadBtn.disabled = false;
+      }
+    };
 
     const emailToggle = $("#chatgpt-email-toggle");
-    if (emailToggle) {
-      emailToggle.onclick = () => {
-        setEmailVisible(!isEmailVisible());
-        const show = isEmailVisible();
-        const val = $("#chatgpt-email-value");
-        if (val && st.email) val.textContent = show ? st.email : maskEmail(st.email);
-        emailToggle.title = show ? "Hide email" : "Show email";
-        emailToggle.setAttribute("aria-label", emailToggle.title);
-        emailToggle.setAttribute("aria-pressed", show ? "true" : "false");
-        emailToggle.innerHTML = show ? EYE_OFF_SVG : EYE_SVG;
-      };
-    }
-
+    if (emailToggle) emailToggle.onclick = () => {
+      setEmailVisible(!isEmailVisible());
+      const val = $("#chatgpt-email-value");
+      if (val && st.email) val.textContent = isEmailVisible() ? st.email : maskEmail(st.email);
+      const label = isEmailVisible() ? "Hide email" : "Show email";
+      emailToggle.title = label; emailToggle.setAttribute("aria-label", label); emailToggle.setAttribute("aria-pressed", isEmailVisible() ? "true" : "false"); emailToggle.innerHTML = isEmailVisible() ? EYE_OFF_SVG : EYE_SVG;
+    };
     async function refreshKeySource() {
       const hint = $("#key-source-hint");
       if (!hint) return;
+      const requestId = ++keySourceRequestId;
+      const expected = hint;
       try {
         const src = await invoke("api_key_source");
-        const text = {
-          env: "Key comes from SELARA_API_KEY in the environment (overrides everything below).",
-          keychain: "Key is stored in the OS keychain. Leave the field blank to keep it, or type a new one to replace it.",
-          config: "Key is stored in plaintext in config.toml. Save with the keychain box checked to move it.",
-          none: "No key stored yet.",
-        }[src] || "";
-        hint.textContent = text;
-        const clear = $("#clear-keychain");
-        if (clear) clear.style.display = src === "keychain" ? "" : "none";
-      } catch (e) {
-        hint.textContent = "";
+        if (requestId !== keySourceRequestId || $("#key-source-hint") !== expected || !expected.isConnected) return;
+        expected.textContent = ({ env: "Key comes from SELARA_API_KEY in the environment (overrides the fields below).", keychain: "Key is stored in the OS keychain. Leave the field blank to keep it, or type a new one to replace it.", config: "Key is stored in Selara's config file. Store it in the OS keychain when saving to move it.", none: "No key stored yet." }[src] || "");
+      } catch (_) {
+        if (requestId === keySourceRequestId && $("#key-source-hint") === expected) expected.textContent = "Could not determine the key source.";
       }
     }
     refreshKeySource();
 
     $("#save-models").onclick = async () => {
-      const model = currentModelValue();
-      if (!model) {
-        setStatus("Pick a model before saving");
-        return;
-      }
-      const a = $("#provider-auth").value || "api_key";
-      const kind = $("#provider-kind").value;
-      const typedKey = ($("#api_key") && $("#api_key").value.trim()) || "";
+      const draft = captureProviderDraft() || currentProviderDraft();
+      const model = String(draft.model || "").trim();
+      if (!model) { setStatus("Pick a model before saving"); return; }
+      const a = draft.auth || "api_key";
+      const kind = draft.kind || "open_ai_compatible";
+      const codexHome = String(draft.codex_home || "").trim();
+      if (codexHome && !codexHome.startsWith("/")) { setStatus("Codex home must be an absolute path"); return; }
+      const typedKey = String(draft.api_key || "").trim();
       const useKeychain = !!($("#store-keychain") && $("#store-keychain").checked);
       let fileKey = typedKey || null;
       if (a === "api_key" && typedKey) {
         try {
-          if (useKeychain) {
-            await invoke("store_api_key", { kind: kind, apiKey: typedKey });
-            fileKey = null;
-            $("#api_key").value = "";
-          } else {
-            // resolve_api_key prefers the keychain over config.toml, so an
-            // existing entry would keep shadowing the plaintext key just
-            // typed. Every OpenAI-compatible preset shares one keychain
-            // account, so the shadowing key can even be another vendor's.
-            await invoke("clear_api_key", { kind: kind });
-          }
-        } catch (e) {
-          setStatus(String(e));
-          return;
-        }
+          if (useKeychain) { await invoke("store_api_key", { kind, apiKey: typedKey }); fileKey = null; if ($("#api_key")) $("#api_key").value = ""; }
+          else await invoke("clear_api_key", { kind });
+        } catch (e) { setStatus(String(e)); return; }
       }
-      const saved = await saveSection("provider", {
-        kind: kind,
-        model: model,
-        base_url: $("#base_url") ? $("#base_url").value.trim() : "",
-        api_key: fileKey,
-        auth: a,
-      });
-      if (saved) refreshKeySource();
+      const saved = await saveSection("provider", { kind, model, base_url: String(draft.base_url || "").trim(), api_key: fileKey, auth: a, codex_home: codexHome || null });
+      if (saved) {
+        providerDraft = null;
+        chatgptModels = null;
+        await refreshChatgptStatus({ render: true });
+        refreshKeySource();
+      }
     };
 
     const loginBtn = $("#chatgpt-login");
-    if (loginBtn) {
-      loginBtn.onclick = async () => {
-        if (chatgptLoginPending) return;
-        chatgptLoginPending = true;
-        setStatus("Opening Codex login…");
-        loginBtn.disabled = true;
-        loginBtn.textContent = "Waiting for browser sign-in…";
-        try {
-          chatgptStatus = await invoke("chatgpt_login");
-          setStatus(chatgptStatus.logged_in ? "ChatGPT signed in" : chatgptStatus.message);
-        } catch (e) {
-          setStatus(String(e));
-        } finally {
-          chatgptLoginPending = false;
-          renderModels();
-        }
-      };
-    }
-    const logoutBtn = $("#chatgpt-logout");
-    if (logoutBtn) {
-      logoutBtn.onclick = async () => {
-        setStatus("Signing out…");
-        try {
-          chatgptStatus = await invoke("chatgpt_logout");
-          setStatus("Signed out");
-          chatgptModels = null;
-          renderModels();
-        } catch (e) {
-          setStatus(String(e));
-        }
-      };
-    }
-    const refreshBtn = $("#chatgpt-refresh");
-    if (refreshBtn) {
-      refreshBtn.onclick = async () => {
-        await refreshChatgptStatus();
+    if (loginBtn) loginBtn.onclick = async () => {
+      if (chatgptLoginPending) return;
+      const requestId = ++loginRequestId;
+      chatgptLoginPending = true;
+      chatgptStatus = normalizeAuthStatus({ state: "checking", message: "Waiting for browser sign-in…" });
+      setStatus("Opening ChatGPT sign-in…");
+      renderModels();
+      try {
+        const value = await invoke("chatgpt_login");
+        if (requestId !== loginRequestId) return;
+        chatgptStatus = normalizeAuthStatus(value);
+        setStatus(chatgptStatus.state === "connected" ? "ChatGPT signed in" : authStatusMessage(chatgptStatus));
+      } catch (e) {
+        if (requestId === loginRequestId) { chatgptStatus = normalizeAuthStatus({ state: "error", message: String(e) }); setStatus(String(e)); }
+      } finally {
+        if (requestId === loginRequestId) { chatgptLoginPending = false; renderModels(); }
+      }
+    };
+    const cancelBtn = $("#chatgpt-login-cancel");
+    if (cancelBtn) cancelBtn.onclick = async () => {
+      if (!chatgptLoginPending) return;
+      const requestId = loginRequestId;
+      cancelBtn.disabled = true;
+      setStatus("Cancelling ChatGPT sign-in…");
+      try {
+        await invoke("chatgpt_login_cancel");
+        if (requestId !== loginRequestId) return;
+        loginRequestId += 1;
+        chatgptLoginPending = false;
+        chatgptStatus = normalizeAuthStatus({ state: "signed_out", message: "ChatGPT sign-in was cancelled." });
         renderModels();
-        setStatus("Status refreshed");
-      };
-    }
+        setStatus("ChatGPT sign-in cancelled");
+      } catch (e) { if (requestId === loginRequestId) { cancelBtn.disabled = false; setStatus(String(e)); } }
+    };
+    const logoutBtn = $("#chatgpt-logout");
+    if (logoutBtn) logoutBtn.onclick = async () => {
+      if (chatgptLogoutPending) return;
+      if (!window.confirm("Sign out of the shared Codex account? This changes the account used by Selara's bundled runtime and other Codex clients that share this Codex home.")) return;
+      const requestId = ++logoutRequestId;
+      chatgptLogoutPending = true;
+      chatgptStatus = normalizeAuthStatus({ state: "checking", message: "Signing out of the shared Codex account…" });
+      setStatus("Signing out…");
+      renderModels();
+      try {
+        const value = await invoke("chatgpt_logout");
+        if (requestId !== logoutRequestId) return;
+        chatgptStatus = normalizeAuthStatus(value);
+        setStatus("Signed out");
+      } catch (e) { if (requestId === logoutRequestId) { chatgptStatus = normalizeAuthStatus({ state: "error", message: String(e) }); setStatus(String(e)); } }
+      finally { if (requestId === logoutRequestId) { chatgptLogoutPending = false; renderModels(); } }
+    };
+    const refreshBtn = $("#chatgpt-refresh");
+    if (refreshBtn) refreshBtn.onclick = async () => {
+      const value = await refreshChatgptStatus({ render: true });
+      if (value) setStatus(value.state === "error" ? authStatusMessage(value) : "Status refreshed");
+    };
     const modelsBtn = $("#chatgpt-models");
-    if (modelsBtn) {
-      modelsBtn.onclick = async () => {
-        setStatus("Refreshing Codex models…");
-        await loadChatgptModelsIntoSelect(currentModelValue() || (config.provider && config.provider.model));
-        setStatus("Models refreshed");
-      };
-    }
+    if (modelsBtn) modelsBtn.onclick = async () => {
+      if (!isChatgptConnected(chatgptStatus)) { setStatus("Sign in with ChatGPT before loading models"); return; }
+      if (await loadChatgptModelsIntoSelect(currentModelValue())) setStatus("Models refreshed");
+    };
+  }
+
+  function renderSettings() {
+    renderGeneral();
+    renderModels();
+    renderCommands();
+    renderLimits();
   }
 
   const SEARCH_SVG =
@@ -2215,26 +2306,38 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     // Before the first await: the startup check fires 10 s after launch and a
     // slow load must not miss it.
     listenForUpdates();
+    // Keep the whole Settings surface available while native calls are in
+    // flight. In particular, a user can start editing provider fields before
+    // a slow account-status response returns.
+    renderSettings();
+    renderStatus();
+    let configLoaded = false;
     try {
-      config = await invoke("get_config");
+      const loaded = await invoke("get_config");
+      if (loaded && typeof loaded === "object") {
+        config = loaded;
+        config.provider = config.provider || defaultConfig().provider;
+        if (providerDraft) config.provider = { ...config.provider, ...providerDraft };
+        if (generalDraft) config = { ...config, ...generalDraft };
+      }
+      configLoaded = true;
+      renderSettings();
       await refreshChatgptStatus();
       await refreshStatusData();
       renderStatus();
-      renderGeneral();
       renderModels();
-      renderCommands();
       await refreshHistoryData();
       renderHistory();
-      renderLimits();
       await listenForServeChanges();
       setStatus("Loaded");
     } catch (e) {
       const msg = String(e);
       setStatus(msg);
-      $("#section-general").innerHTML =
-        "<h1>Could not load settings</h1><p class=\"lead error\">" + escapeHtml(msg) + "</p>" +
-        "<p class=\"hint\">Quit the tray app fully and relaunch after updating. Ensure permissions allow get_config.</p>";
-      showSection("general");
+      if (!configLoaded) {
+        $("#section-status").innerHTML =
+          "<h1>Settings unavailable</h1><p class=\"lead error\">" + escapeHtml(msg) + "</p>" +
+          "<p class=\"hint\">The editable Settings surface remains available; restart Selara after checking the native bridge.</p>";
+      }
     }
   }
 

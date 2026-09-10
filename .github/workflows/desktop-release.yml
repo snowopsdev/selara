@@ -19,6 +19,10 @@ on:
         required: false
       APPLE_TEAM_ID:
         required: false
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
       HOMEBREW_TAP_TOKEN:
         required: false
   workflow_dispatch:
@@ -40,6 +44,7 @@ jobs:
     name: Attach macOS app (DMG) and Homebrew files
     runs-on: macos-latest
     env:
+      SELARA_BUILD_MODE: recovery
       TAG: ${{ inputs.tag }}
       HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     steps:
@@ -84,9 +89,14 @@ jobs:
           test "$(uname -m)" = arm64
           node tooling/scripts/release/desktop-release.mjs prepare "$TAG" source artifacts
 
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
       - name: Install Rust stable
         if: steps.prepare.outputs.build_required == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Cache cargo
         if: steps.prepare.outputs.build_required == 'true'
@@ -95,7 +105,6 @@ jobs:
           workspaces: source -> target
 
       - name: Install frontend dependencies
-        if: steps.prepare.outputs.build_required == 'true'
         working-directory: source/apps/selara-desktop
         run: npm ci --no-audit --no-fund
 
@@ -108,11 +117,16 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           node tooling/scripts/release/build-desktop.mjs source/apps/selara-desktop
           bash tooling/scripts/release/verify-desktop.sh source
 
-      - name: Verify DMG and render Homebrew files
+      - name: Verify DMG and prepare signed updater assets
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: node tooling/scripts/release/desktop-release.mjs stage "$TAG" source artifacts
 
       - name: Upload missing release assets and verify downloads
@@ -154,4 +168,4 @@ jobs:
       - name: Summarize release verification
         run: |
           echo "### Verified desktop release ${TAG}" >> "$GITHUB_STEP_SUMMARY"
-          echo "CLI, DMG, checksums, and Homebrew files downloaded and verified." >> "$GITHUB_STEP_SUMMARY"
+          echo "CLI, DMG, checksums, Homebrew files, and configured updater assets downloaded and verified." >> "$GITHUB_STEP_SUMMARY"

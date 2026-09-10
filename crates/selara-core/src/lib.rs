@@ -1,10 +1,11 @@
 //! Core writing pipeline: config, commands, and LLM providers.
 //! No OS UI or accessibility APIs live here.
 
-pub mod chatgpt_auth;
+pub mod app_server;
 pub mod codex_cli;
 pub mod commands;
 pub mod config;
+pub mod desktop_protocol;
 pub mod error;
 pub mod guard;
 pub mod history;
@@ -12,7 +13,6 @@ pub mod providers;
 pub mod secrets;
 pub mod usage;
 
-pub use chatgpt_auth::ChatGptAuth;
 pub use codex_cli::CodexLoginStatus;
 pub use commands::{
     build_system_prompt, builtin_commands, run_command, CommandKind, WritingCommand,

@@ -15,6 +15,10 @@ class Selara < Formula
 
   def install
     bin.install "selara"
+    if File.exist?("selara-codex")
+      libexec.install "selara-codex"
+      doc.install Dir["selara-codex.*"]
+    end
     doc.install "README.md"
   end
 

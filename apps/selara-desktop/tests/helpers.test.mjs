@@ -152,7 +152,7 @@ test("statusDotClass distinguishes unknown, ok, and bad", () => {
   assert.equal(H.statusDotClass({ logged_in: true, message: "error" }), "ok");
   assert.equal(H.statusDotClass({ logged_in: false, message: "ENOENT" }), "bad");
   assert.equal(H.statusDotClass({ logged_in: false, message: "Login failed" }), "bad");
-  assert.equal(H.statusDotClass({ logged_in: false, message: "auth.json not found" }), "bad");
+  assert.equal(H.statusDotClass({ logged_in: false, message: "credentials not found" }), "bad");
   assert.equal(H.statusDotClass({ logged_in: false, message: "Some Error" }), "bad");
   assert.equal(H.statusDotClass({ logged_in: false, message: "Not logged in" }), "unknown");
   assert.equal(H.statusDotClass({ logged_in: false }), "unknown");

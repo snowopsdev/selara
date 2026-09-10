@@ -1,0 +1,2 @@
+# Unified patches require a space on empty context lines; preserve pinned bytes.
+vendor/codex-runtime/patches/*.patch whitespace=-blank-at-eol

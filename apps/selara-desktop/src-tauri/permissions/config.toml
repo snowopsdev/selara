@@ -69,6 +69,11 @@ description = "Start ChatGPT / Codex CLI login (Experimental)"
 commands.allow = ["chatgpt_login"]
 
 [[permission]]
+identifier = "allow-chatgpt-login-cancel"
+description = "Cancel the pending browser sign-in"
+commands.allow = ["chatgpt_login_cancel"]
+
+[[permission]]
 identifier = "allow-chatgpt-logout"
 description = "Log out of ChatGPT / Codex CLI (Experimental)"
 commands.allow = ["chatgpt_logout"]
@@ -90,7 +95,7 @@ commands.allow = ["serve_status"]
 
 [[permission]]
 identifier = "allow-accessibility-status"
-description = "Report whether macOS Accessibility is granted to this app"
+description = "Report Accessibility trust from the managed selection process"
 commands.allow = ["accessibility_status"]
 
 [[permission]]
@@ -132,6 +137,11 @@ commands.allow = ["app_version"]
 identifier = "allow-check-for-updates"
 description = "Check the release feed for a newer Selara build (no download)"
 commands.allow = ["check_for_updates"]
+
+[[permission]]
+identifier = "allow-update-status"
+description = "Read the current update progress without starting another check"
+commands.allow = ["update_status"]
 
 [[permission]]
 identifier = "allow-install-update"

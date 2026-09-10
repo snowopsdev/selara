@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::chatgpt_auth::ChatGptAuth;
 use crate::commands::{builtin_commands, WritingCommand};
 use crate::error::CoreError;
 use crate::providers::{provider_from_config, ChatGptCodexProvider, LlmProvider, ProviderKind};
@@ -84,6 +83,9 @@ pub struct ProviderConfig {
     /// Never stores ChatGPT tokens — those live in `~/.codex/auth.json`.
     #[serde(default)]
     pub auth: ProviderAuth,
+    /// Optional Codex home directory used by the app-server runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_home: Option<PathBuf>,
 }
 
 /// Gentle defaults — accident protection, not rationing. Users with fat API budgets
@@ -198,6 +200,7 @@ impl Default for AppConfig {
                 model: "gpt-4o-mini".into(),
                 api_key: None,
                 auth: ProviderAuth::ApiKey,
+                codex_home: None,
             },
             hotkey: default_hotkey(),
             undo_hotkey: None,
@@ -391,8 +394,11 @@ impl AppConfig {
         let use_chatgpt = matches!(self.provider.auth, ProviderAuth::ChatGpt)
             && matches!(self.provider.kind, ProviderKind::OpenAiCompatible);
         if use_chatgpt {
-            let auth = ChatGptAuth::load()?;
-            return Ok(Box::new(ChatGptCodexProvider::new(model.to_string(), auth)));
+            let codex_home = crate::app_server::resolve_home(self.provider.codex_home.as_deref())?;
+            return Ok(Box::new(ChatGptCodexProvider::new(
+                model.to_string(),
+                codex_home,
+            )));
         }
         let api_key = self.resolve_api_key()?;
         Ok(provider_from_config(

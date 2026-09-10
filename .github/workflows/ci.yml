@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
 
@@ -48,7 +48,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy
 
@@ -71,15 +71,25 @@ jobs:
   desktop-package:
     name: package desktop (macOS)
     runs-on: macos-latest
+    strategy:
+      matrix:
+        mode: [local, ci]
+    env:
+      SELARA_BUILD_MODE: ${{ matrix.mode }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
 
       - name: Install Node
         uses: actions/setup-node@v7
@@ -95,9 +105,13 @@ jobs:
         working-directory: apps/selara-desktop
         run: npm ci --no-audit --no-fund
 
+      - name: Generate temporary updater test keys
+        if: matrix.mode == 'ci'
+        run: node scripts/release/ci-signing.mjs .
+
       # Reproduce GitHub's empty optional-secret environment. A cargo build
       # alone never reaches certificate import, DMG creation, or updater signing.
-      - name: Build app and DMG without credentials
+      - name: Build app and DMG without Apple credentials
         env:
           APPLE_CERTIFICATE: ''
           APPLE_CERTIFICATE_PASSWORD: ''
@@ -109,6 +123,17 @@ jobs:
 
       - name: Verify app signature, bundled CLI, and DMG
         run: bash scripts/release/verify-desktop.sh .
+
+      - name: Test the actual writing runtime and authentication lock
+        if: matrix.mode == 'ci'
+        run: |
+          cargo test -p selara-core native_runtime_handshake -- --ignored
+          scripts/codex-runtime/test-contract.sh
+          scripts/codex-runtime/test-runtime.sh
+          scripts/codex-runtime/test-auth-lock.sh
+
+      - name: Test desktop and picker coordination
+        run: cargo test -p selara-desktop -p selara
 
   desktop-dist:
     name: desktop dist is up to date
@@ -127,6 +152,10 @@ jobs:
       - name: Install frontend dependencies
         working-directory: apps/selara-desktop
         run: npm ci --no-audit --no-fund
+
+      - name: Frontend regression tests
+        working-directory: apps/selara-desktop
+        run: npm test
 
       # apps/selara-desktop/dist/index.html is a committed build artifact.
       # Rebuild it and fail if the committed copy is stale, so a change to

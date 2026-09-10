@@ -57,7 +57,7 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Refresh workspace crate versions in Cargo.lock
         run: cargo update --workspace
@@ -87,30 +87,38 @@ jobs:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build CLI
-        run: cargo build --release -p selara
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
 
-      - name: Package
-        env:
-          VERSION: ${{ needs.release-please.outputs.version }}
-        run: |
-          ARCH=$(uname -m)
-          NAME="selara-${VERSION}-macos-${ARCH}"
-          mkdir -p "dist/${NAME}"
-          cp target/release/selara README.md LICENSE "dist/${NAME}/"
-          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
-          shasum -a 256 "dist/${NAME}.tar.gz" > "dist/${NAME}.tar.gz.sha256"
-          echo "ASSET=dist/${NAME}.tar.gz" >> "$GITHUB_ENV"
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
 
-      - name: Upload to release
+      - name: Install packaging dependencies
+        working-directory: apps/selara-desktop
+        run: npm ci --no-audit --no-fund
+
+      - name: Build, sign, and publish the complete native CLI
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "$ASSET" "$ASSET.sha256" --clobber
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node scripts/release/package-cli.mjs "$TAG" .
 
   # Share the same packaging workflow with manual recovery of an existing tag.
   desktop:

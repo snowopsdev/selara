@@ -64,16 +64,34 @@ test("rejects partial signing and notarization groups before spawning", async (t
   assert.doesNotThrow(() => configuration(directory, { APPLE_SIGNING_IDENTITY: "-" }));
 });
 
-test("rejects missing updater key and passes enabled updater credentials verbatim", async (t) => {
+test("CI rejects missing updater key and passes enabled updater credentials verbatim", async (t) => {
   const missing = await desktopFixture({ artifacts: true, pubkey: "real-public-key" });
   t.after(() => rm(missing, { recursive: true, force: true }));
-  assert.throws(() => configuration(missing, {}), /TAURI_SIGNING_PRIVATE_KEY is missing/);
+  assert.throws(() => configuration(missing, { SELARA_BUILD_MODE: "ci", SELARA_UPDATER_PUBLIC_KEY: "test-public-key" }), /TAURI_SIGNING_PRIVATE_KEY is missing/);
   const result = configuration(missing, {
+    SELARA_BUILD_MODE: "ci",
+    SELARA_UPDATER_PUBLIC_KEY: "test-public-key",
     TAURI_SIGNING_PRIVATE_KEY: "private-key",
     TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "  key password  ",
   });
   assert.equal(result.environment.TAURI_SIGNING_PRIVATE_KEY, "private-key");
   assert.equal(result.environment.TAURI_SIGNING_PRIVATE_KEY_PASSWORD, "  key password  ");
+});
+
+test("local builds disable production updates even when the source has a real public key", async (t) => {
+  const directory = await desktopFixture({ artifacts: true, pubkey: "production-public-key" });
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const result = configuration(directory, {});
+  assert.equal(result.overlay.bundle.createUpdaterArtifacts, false);
+  assert.equal(result.overlay.plugins.updater.pubkey, "REPLACE_WITH_TAURI_UPDATER_PUBKEY");
+});
+
+test("production refuses missing Apple credentials and CI refuses the production key", async (t) => {
+  const directory = await desktopFixture({ artifacts: true, pubkey: "production-public-key" });
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  assert.throws(() => configuration(directory, { SELARA_BUILD_MODE: "release" }), /Production releases require/);
+  assert.throws(() => configuration(directory, { SELARA_BUILD_MODE: "ci", TAURI_SIGNING_PRIVATE_KEY: "test" }), /test public key/);
+  assert.throws(() => configuration(directory, { SELARA_BUILD_MODE: "typo" }), /Unknown build mode/);
 });
 
 test("supports legacy updater artifact mode and exact placeholder matching", async (t) => {

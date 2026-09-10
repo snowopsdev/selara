@@ -387,10 +387,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Report whether macOS Accessibility is granted to this app",
+          "description": "Report Accessibility trust from the managed selection process",
           "type": "string",
           "const": "allow-accessibility-status",
-          "markdownDescription": "Report whether macOS Accessibility is granted to this app"
+          "markdownDescription": "Report Accessibility trust from the managed selection process"
         },
         {
           "description": "Report where the provider API key comes from (never the key itself)",
@@ -415,6 +415,12 @@
           "type": "string",
           "const": "allow-chatgpt-login",
           "markdownDescription": "Start ChatGPT / Codex CLI login (Experimental)"
+        },
+        {
+          "description": "Cancel the pending browser sign-in",
+          "type": "string",
+          "const": "allow-chatgpt-login-cancel",
+          "markdownDescription": "Cancel the pending browser sign-in"
         },
         {
           "description": "Log out of ChatGPT / Codex CLI (Experimental)",
@@ -559,6 +565,12 @@
           "type": "string",
           "const": "allow-store-api-key",
           "markdownDescription": "Store the provider API key in the OS keychain"
+        },
+        {
+          "description": "Read the current update progress without starting another check",
+          "type": "string",
+          "const": "allow-update-status",
+          "markdownDescription": "Read the current update progress without starting another check"
         },
         {
           "description": "Read the local usage ledger (tokens and estimated cost)",

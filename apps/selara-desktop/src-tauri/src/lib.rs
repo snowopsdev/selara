@@ -1,13 +1,16 @@
+mod update_backup;
+
+use selara_core::app_server;
 use selara_core::codex_cli::{self, CodexLoginStatus};
 use selara_core::commands::{
     merge_commands, parse_command_pack, render_command_pack, MergeMode, MergeReport,
 };
 use selara_core::config::{serve_pidfile, ApiKeySource, AppConfig};
 use selara_core::history::{self, HistoryEntry};
-use selara_core::providers::{list_chatgpt_models, list_provider_models, ProviderKind};
+use selara_core::providers::{list_provider_models, ProviderKind};
 use selara_core::secrets;
 use selara_core::usage::{self, UsageSummary};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -36,6 +39,34 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 /// the re-read narrows that window to the write itself, and closing it fully
 /// would need file locking.
 static CONFIG_WRITE: Mutex<()> = Mutex::new(());
+static APP_OPERATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static MAINTENANCE: AtomicBool = AtomicBool::new(false);
+struct LoginState {
+    active: bool,
+    cancelled: bool,
+}
+static LOGIN: Mutex<LoginState> = Mutex::new(LoginState {
+    active: false,
+    cancelled: false,
+});
+struct LoginAttempt;
+impl Drop for LoginAttempt {
+    fn drop(&mut self) {
+        lock(&LOGIN).active = false;
+    }
+}
+struct Maintenance;
+impl Maintenance {
+    fn begin() -> Self {
+        MAINTENANCE.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+impl Drop for Maintenance {
+    fn drop(&mut self) {
+        MAINTENANCE.store(false, Ordering::SeqCst);
+    }
+}
 
 /// A poisoned lock only means a panic elsewhere; the file is still consistent
 /// because a panicking save leaves the previous contents in place.
@@ -188,39 +219,140 @@ fn history_path() -> String {
         .to_string()
 }
 
-/// Run a blocking `codex_cli` call off the main thread. Tauri 2 executes sync
-/// commands on the main thread, which would freeze the Settings window for the
-/// duration of a `Command::status()` wait (the browser login flow in particular).
-async fn run_codex_blocking<F>(f: F) -> Result<CodexLoginStatus, String>
-where
-    F: FnOnce() -> Result<CodexLoginStatus, selara_core::error::CoreError> + Send + 'static,
-{
-    tauri::async_runtime::spawn_blocking(f)
-        .await
-        .map_err(|e| format!("codex task failed: {e}"))?
-        .map_err(|e| e.to_string())
+fn configure_auth_home() -> Result<(), String> {
+    let config = AppConfig::load_or_init(&AppConfig::default_path()).map_err(|e| e.to_string())?;
+    app_server::configure_home(config.provider.codex_home.as_deref());
+    Ok(())
 }
 
 #[tauri::command]
 async fn chatgpt_auth_status() -> Result<CodexLoginStatus, String> {
-    run_codex_blocking(codex_cli::login_status).await
+    if MAINTENANCE.load(Ordering::SeqCst) {
+        return Err("An account change or update is in progress".into());
+    }
+    configure_auth_home()?;
+    codex_cli::login_status().await.map_err(|e| e.to_string())
+}
+
+async fn change_auth<F, Fut>(app: AppHandle, operation: F) -> Result<CodexLoginStatus, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let _operation = APP_OPERATION
+        .try_lock()
+        .map_err(|_| "An account change or update is already in progress")?;
+    let _maintenance = Maintenance::begin();
+    configure_auth_home()?;
+    let handle = app.clone();
+    let was_running = tauri::async_runtime::spawn_blocking(move || {
+        let sup = handle.state::<Supervisor>(); let _transition = lock(&sup.transition);
+        if sup.managed_pid().is_none() {
+            if serve_status().running { return Err("Stop the externally started background service before changing the shared Codex account".to_string()); }
+            return Ok(false);
+        }
+        if let Err(error) = quiesce_serve_locked(&handle, &sup) {
+            let _ = resume_serve_locked(&handle, &sup); return Err(error);
+        }
+        Ok(true)
+    }).await.map_err(|e| e.to_string())??;
+    let outcome = operation().await;
+    let _ = app_server::reset().await;
+    let handle = app.clone();
+    let resumed = tauri::async_runtime::spawn_blocking(move || {
+        let sup = handle.state::<Supervisor>();
+        let _transition = lock(&sup.transition);
+        if was_running && sup.managed_pid().is_some() {
+            let reload = protocol_request_locked(
+                &handle,
+                &sup,
+                selara_core::desktop_protocol::ProtocolCommand::ReloadAuth,
+            );
+            let resume = resume_serve_locked(&handle, &sup);
+            reload?;
+            resume?;
+        } else if was_running && sup.desired.load(Ordering::SeqCst) {
+            start_serve_locked(&handle, &sup)?;
+        }
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    outcome?;
+    resumed?;
+    codex_cli::login_status().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn chatgpt_login() -> Result<CodexLoginStatus, String> {
-    // Spawns the Codex CLI browser login flow; blocks until the user finishes
-    // signing in, so it must not run on the main thread.
-    run_codex_blocking(codex_cli::login).await
+#[allow(deprecated)]
+async fn chatgpt_login(app: AppHandle) -> Result<CodexLoginStatus, String> {
+    {
+        let mut login = lock(&LOGIN);
+        if login.active {
+            return Err("Sign-in is already in progress".into());
+        }
+        *login = LoginState {
+            active: true,
+            cancelled: false,
+        };
+    }
+    let _attempt = LoginAttempt;
+    let handle = app.clone();
+    change_auth(app, || async move {
+        if lock(&LOGIN).cancelled {
+            return Err("Sign-in cancelled".into());
+        }
+        let login = app_server::begin_login().await.map_err(|e| e.to_string())?;
+        if lock(&LOGIN).cancelled {
+            let _ = app_server::cancel_login().await;
+            return Err("Sign-in cancelled".into());
+        }
+        if let Err(error) = handle.shell().open(&login.auth_url, None) {
+            let _ = app_server::cancel_login().await;
+            return Err(error.to_string());
+        }
+        login.wait().await.map_err(|e| e.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-async fn chatgpt_logout() -> Result<CodexLoginStatus, String> {
-    run_codex_blocking(codex_cli::logout).await
+async fn chatgpt_login_cancel() -> Result<(), String> {
+    {
+        let mut login = lock(&LOGIN);
+        if !login.active {
+            return Err("No sign-in is in progress".into());
+        }
+        login.cancelled = true;
+    }
+    match app_server::cancel_login().await {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error
+                .to_string()
+                .contains("No browser sign-in is in progress") =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn chatgpt_logout(app: AppHandle) -> Result<CodexLoginStatus, String> {
+    change_auth(app, || async {
+        app_server::logout().await.map_err(|e| e.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
 async fn list_chatgpt_models_cmd() -> Result<Vec<String>, String> {
-    list_chatgpt_models().await.map_err(|e| e.to_string())
+    if MAINTENANCE.load(Ordering::SeqCst) {
+        return Err("An account change or update is in progress".into());
+    }
+    configure_auth_home()?;
+    app_server::models().await.map_err(|e| e.to_string())
 }
 
 /// List models for a BYOK provider. Falls back to the env API key when the
@@ -296,25 +428,39 @@ fn serve_status() -> ServeStatus {
     }
 }
 
-/// Whether this process is trusted for macOS Accessibility. `serve` needs the
-/// same grant, but for the binary that runs it (Terminal, iTerm, or the app).
+/// Only the managed selection process can report its Accessibility grant.
 #[tauri::command]
-fn accessibility_status() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        selara_platform::macos::accessibility_trusted()
+fn accessibility_status(app: AppHandle) -> selara_core::desktop_protocol::AxTrust {
+    use selara_core::desktop_protocol::AxTrust;
+    let sup = app.state::<Supervisor>();
+    if sup.managed_pid().is_none() {
+        return AxTrust::Unknown;
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+    let trust = lock(&sup.protocol_status)
+        .as_ref()
+        .map(|s| s.ax_trust)
+        .unwrap_or(AxTrust::Unknown);
+    trust
 }
 
-/// Open System Settings on the Privacy & Security -> Accessibility pane.
 #[tauri::command]
-#[allow(deprecated)] // shell.open still ships with the shell plugin we already bundle
-fn open_accessibility_settings(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_shell::ShellExt;
+#[allow(deprecated)]
+async fn open_accessibility_settings(app: AppHandle) -> Result<(), String> {
+    if app.state::<Supervisor>().managed_pid().is_some() {
+        let handle = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let sup = handle.state::<Supervisor>();
+            let _transition = lock(&sup.transition);
+            protocol_request_locked(
+                &handle,
+                &sup,
+                selara_core::desktop_protocol::ProtocolCommand::RequestPermission,
+            )
+            .map(|_| ())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+    }
     app.shell()
         .open(
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
@@ -342,6 +488,7 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 struct Supervisor {
+    request_sequence: AtomicU64,
     /// Serializes every start / stop / restart.
     ///
     /// The checks that decide whether to spawn read `child` and the pidfile,
@@ -353,6 +500,8 @@ struct Supervisor {
     /// held across the whole check → spawn → store sequence, and across a
     /// restart's stop-then-start, so only one transition is ever in flight.
     transition: Mutex<()>,
+    /// Short state publications only; readers never take transition while a request waits.
+    lifecycle: Mutex<()>,
     /// The sidecar we spawned, if any. `None` while stopped or external.
     child: Mutex<Option<CommandChild>>,
     /// When the last few automatic restarts happened (crash-loop guard).
@@ -367,6 +516,12 @@ struct Supervisor {
     generation: AtomicU64,
     /// Why the last start or restart did not happen, for the UI.
     last_error: Mutex<Option<String>>,
+    /// Latest status reported by a managed child. Parent Accessibility state
+    /// is intentionally never substituted for this value.
+    protocol_status: Mutex<Option<selara_core::desktop_protocol::ServeStatus>>,
+    protocol_waiters: Mutex<
+        HashMap<String, std::sync::mpsc::Sender<selara_core::desktop_protocol::ProtocolResponse>>,
+    >,
 }
 
 /// A poisoned lock only means a panic elsewhere; the data is still usable.
@@ -422,6 +577,9 @@ fn notify(app: &AppHandle) {
 fn start_serve(app: &AppHandle) -> Result<(), String> {
     let sup = app.state::<Supervisor>();
     let _transition = lock(&sup.transition);
+    if MAINTENANCE.load(Ordering::SeqCst) {
+        return Err("Finish the account change or update before starting the service".into());
+    }
     start_serve_locked(app, &sup)
 }
 
@@ -445,10 +603,11 @@ fn start_serve_locked(app: &AppHandle, sup: &Supervisor) -> Result<(), String> {
         return Ok(());
     }
 
-    let spawned = app
-        .shell()
-        .sidecar("selara")
-        .and_then(|cmd| cmd.args(["serve"]).spawn());
+    let spawned = app.shell().sidecar("selara").and_then(|cmd| {
+        cmd.args(["serve", "--desktop-protocol"])
+            .set_raw_out(true)
+            .spawn()
+    });
     let (mut rx, child) = match spawned {
         Ok(pair) => pair,
         Err(e) => {
@@ -461,24 +620,57 @@ fn start_serve_locked(app: &AppHandle, sup: &Supervisor) -> Result<(), String> {
         }
     };
     let pid = child.pid();
+    let generation_guard = lock(&sup.lifecycle);
     let generation = sup.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    *lock(&sup.protocol_status) = None;
+    lock(&sup.protocol_waiters).clear();
     sup.desired.store(true, Ordering::SeqCst);
     sup.set_error(None);
     *lock(&sup.child) = Some(child);
     sup.push_log(format!("started serve (pid {pid})"));
     notify(app);
+    drop(generation_guard);
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        let mut decoder = selara_core::desktop_protocol::ResponseDecoder::default();
         while let Some(event) = rx.recv().await {
             let sup = app.state::<Supervisor>();
+            if sup.generation.load(Ordering::SeqCst) != generation {
+                break;
+            }
             match event {
-                CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
-                    let line = String::from_utf8_lossy(&bytes);
-                    let line = line.trim_end();
-                    if !line.is_empty() {
-                        sup.push_log(line.to_string());
+                CommandEvent::Stdout(bytes) => {
+                    for frame in decoder.push(&bytes) {
+                        let _publication = lock(&sup.lifecycle);
+                        if sup.generation.load(Ordering::SeqCst) != generation {
+                            break;
+                        }
+                        match frame {
+                            Ok(response)
+                                if response.version
+                                    == selara_core::desktop_protocol::PROTOCOL_VERSION
+                                    && response.status.version
+                                        == selara_core::desktop_protocol::PROTOCOL_VERSION =>
+                            {
+                                *lock(&sup.protocol_status) = Some(response.status.clone());
+                                if let Some(id) = &response.id {
+                                    if let Some(waiter) = lock(&sup.protocol_waiters).remove(id) {
+                                        let _ = waiter.send(response.clone());
+                                    }
+                                }
+                                let _ = app.emit("serve-protocol", response);
+                                notify(&app);
+                            }
+                            Ok(_) => sup.push_log(
+                                "Unsupported background service protocol; reinstall Selara",
+                            ),
+                            Err(error) => sup.push_log(error),
+                        }
                     }
+                }
+                CommandEvent::Stderr(bytes) => {
+                    sup.push_log(String::from_utf8_lossy(&bytes).trim_end().to_string());
                 }
                 CommandEvent::Error(e) => sup.push_log(format!("[supervisor] {e}")),
                 CommandEvent::Terminated(payload) => {
@@ -492,15 +684,106 @@ fn start_serve_locked(app: &AppHandle, sup: &Supervisor) -> Result<(), String> {
     Ok(())
 }
 
+/// Caller holds transition across request and any following stop/install.
+fn protocol_request_locked(
+    _app: &AppHandle,
+    sup: &Supervisor,
+    command: selara_core::desktop_protocol::ProtocolCommand,
+) -> Result<selara_core::desktop_protocol::ProtocolResponse, String> {
+    let generation = sup.generation.load(Ordering::SeqCst);
+    let sequence = sup.request_sequence.fetch_add(1, Ordering::SeqCst);
+    let id = format!("desktop-{generation}-{sequence}");
+    let request = selara_core::desktop_protocol::ProtocolRequest {
+        version: 1,
+        id: id.clone(),
+        command,
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    lock(&sup.protocol_waiters).insert(id.clone(), tx);
+    let result = (|| {
+        {
+            let mut child = lock(&sup.child);
+            child
+                .as_mut()
+                .ok_or("The background service is not managed by this app")?
+                .write(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&request).map_err(|e| e.to_string())?
+                    )
+                    .as_bytes(),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        let response = rx.recv_timeout(Duration::from_secs(30)).map_err(|_| {
+            "The background service did not acknowledge the request; try restarting it".to_string()
+        })?;
+        if sup.generation.load(Ordering::SeqCst) != generation {
+            return Err("The background service changed during the request".into());
+        }
+        if !response.ok {
+            return Err(response
+                .error
+                .unwrap_or_else(|| "Background service request failed".into()));
+        }
+        Ok(response)
+    })();
+    lock(&sup.protocol_waiters).remove(&id);
+    result
+}
+
+fn quiesce_serve_locked(
+    app: &AppHandle,
+    sup: &Supervisor,
+) -> Result<selara_core::desktop_protocol::ProtocolResponse, String> {
+    let response = protocol_request_locked(
+        app,
+        sup,
+        selara_core::desktop_protocol::ProtocolCommand::Quiesce,
+    )?;
+    if response.status.readiness != selara_core::desktop_protocol::ServeReadiness::Quiesced {
+        return Err("The background service has not finished pausing".into());
+    }
+    Ok(response)
+}
+
+fn quiesce_serve(
+    app: &AppHandle,
+) -> Result<selara_core::desktop_protocol::ProtocolResponse, String> {
+    let sup = app.state::<Supervisor>();
+    let _transition = lock(&sup.transition);
+    quiesce_serve_locked(app, &sup)
+}
+
+fn resume_serve_locked(app: &AppHandle, sup: &Supervisor) -> Result<(), String> {
+    protocol_request_locked(
+        app,
+        sup,
+        selara_core::desktop_protocol::ProtocolCommand::Resume,
+    )
+    .map(|_| ())
+}
+fn resume_serve(app: &AppHandle) -> Result<(), String> {
+    let sup = app.state::<Supervisor>();
+    let _transition = lock(&sup.transition);
+    if MAINTENANCE.load(Ordering::SeqCst) {
+        return Err("Finish the account change or update before resuming the service".into());
+    }
+    resume_serve_locked(app, &sup)
+}
+
 /// Called from the reader task when our child exits. Restarts with backoff
 /// while `desired`, unless it keeps dying (`MAX_RESTARTS` in `RESTART_WINDOW`).
 fn on_terminated(app: &AppHandle, generation: u64, payload: TerminatedPayload) {
     let sup = app.state::<Supervisor>();
+    let _publication = lock(&sup.lifecycle);
     if sup.generation.load(Ordering::SeqCst) != generation {
         // stop_serve or a newer start already took over this slot.
         return;
     }
     *lock(&sup.child) = None;
+    *lock(&sup.protocol_status) = None;
+    lock(&sup.protocol_waiters).clear();
     let why = match (payload.code, payload.signal) {
         (Some(code), _) => format!("exit code {code}"),
         (None, Some(sig)) => format!("signal {sig}"),
@@ -573,7 +856,6 @@ fn stop_serve(app: &AppHandle) -> Result<(), String> {
 /// The body of `stop_serve`; the caller holds `Supervisor::transition`.
 fn stop_serve_locked(app: &AppHandle, sup: &Supervisor) -> Result<(), String> {
     sup.desired.store(false, Ordering::SeqCst);
-    sup.generation.fetch_add(1, Ordering::SeqCst);
     let Some(child) = lock(&sup.child).take() else {
         notify(app);
         return Ok(());
@@ -587,19 +869,29 @@ fn stop_serve_locked(app: &AppHandle, sup: &Supervisor) -> Result<(), String> {
     while pid_alive(pid) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let mut result = Ok(());
     if pid_alive(pid) {
-        result = child
-            .kill()
-            .map_err(|e| format!("could not kill serve (pid {pid}): {e}"));
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
         let deadline = Instant::now() + Duration::from_secs(1);
         while pid_alive(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
+    let _publication = lock(&sup.lifecycle);
+    if pid_alive(pid) {
+        *lock(&sup.child) = Some(child);
+        return Err(format!(
+            "Could not stop serve (pid {pid}); it remains managed"
+        ));
+    }
+    sup.generation.fetch_add(1, Ordering::SeqCst);
+    *lock(&sup.protocol_status) = None;
+    lock(&sup.protocol_waiters).clear();
     sup.push_log(format!("stopped serve (pid {pid})"));
     notify(app);
-    result
+    Ok(())
 }
 
 fn restart_serve(app: &AppHandle) -> Result<(), String> {
@@ -607,6 +899,9 @@ fn restart_serve(app: &AppHandle) -> Result<(), String> {
     // One transition, so nothing can start a second sidecar in the window
     // between the stop and the start.
     let _transition = lock(&sup.transition);
+    if MAINTENANCE.load(Ordering::SeqCst) {
+        return Err("Finish the account change or update before restarting the service".into());
+    }
     stop_serve_locked(app, &sup)?;
     lock(&sup.restarts).clear();
     start_serve_locked(app, &sup)
@@ -639,6 +934,20 @@ async fn serve_restart(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn serve_quiesce(
+    app: AppHandle,
+) -> Result<selara_core::desktop_protocol::ProtocolResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || quiesce_serve(&app))
+        .await
+        .map_err(|e| format!("supervisor task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn serve_resume(app: AppHandle) -> Result<(), String> {
+    supervise(app, resume_serve).await
+}
+
+#[tauri::command]
 fn serve_log(app: AppHandle) -> Vec<String> {
     lock(&app.state::<Supervisor>().log)
         .iter()
@@ -655,6 +964,7 @@ struct SupervisorStatus {
     /// A `serve` started outside the app is running (we will not spawn one).
     external: bool,
     last_error: Option<String>,
+    child_status: Option<selara_core::desktop_protocol::ServeStatus>,
 }
 
 #[tauri::command]
@@ -662,12 +972,14 @@ fn serve_supervisor_status(app: AppHandle) -> SupervisorStatus {
     let sup = app.state::<Supervisor>();
     let managed = sup.managed_pid();
     let last_error = lock(&sup.last_error).clone();
+    let child_status = managed.and_then(|_| lock(&sup.protocol_status).clone());
     let status = serve_status();
     SupervisorStatus {
         managed: managed.is_some(),
         pid: managed.or(status.running.then_some(status.pid).flatten()),
         external: managed.is_none() && status.running,
         last_error,
+        child_status,
     }
 }
 
@@ -722,6 +1034,17 @@ enum UpdateStatus {
         notes: Option<String>,
         date: Option<String>,
     },
+    Downloading {
+        version: String,
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    Waiting {
+        version: String,
+    },
+    Installing {
+        version: String,
+    },
     Error {
         message: String,
     },
@@ -748,18 +1071,23 @@ fn apply_update_status(app: &AppHandle, status: &UpdateStatus) {
                 (format!("Selara v{current} is up to date"), false)
             }
             UpdateStatus::Available { version, .. } => (format!("Update to v{version}…"), true),
-            UpdateStatus::Error { .. } => ("Update check failed".to_string(), false),
+            UpdateStatus::Downloading { .. } => ("Downloading update…".into(), false),
+            UpdateStatus::Waiting { .. } => ("Finishing active work…".into(), false),
+            UpdateStatus::Installing { .. } => ("Installing update…".into(), false),
+            UpdateStatus::Error { .. } => (
+                "Update failed; try again…".to_string(),
+                app.state::<UpdateState>()
+                    .pending
+                    .lock()
+                    .is_ok_and(|p| p.is_some()),
+            ),
         };
         // An install in flight owns this item: a check that finishes in the
         // middle of one must not re-enable it.
         let installing = app
             .try_state::<UpdateState>()
             .is_some_and(|s| s.installing.load(Ordering::SeqCst));
-        let _ = menu.update.set_text(if installing {
-            "Installing update…".to_string()
-        } else {
-            text
-        });
+        let _ = menu.update.set_text(text);
         let _ = menu.update.set_enabled(enabled && !installing);
     }
     let _ = app.emit("update-changed", status.clone());
@@ -768,18 +1096,39 @@ fn apply_update_status(app: &AppHandle, status: &UpdateStatus) {
 /// Ask the release feed for a newer build. Never contacts the network while
 /// the placeholder public key is configured.
 async fn perform_update_check(app: &AppHandle) -> UpdateStatus {
+    let Ok(_operation) = APP_OPERATION.try_lock() else {
+        return lock(&app.state::<UpdateState>().last)
+            .clone()
+            .unwrap_or(UpdateStatus::Error {
+                message: "An account change or update is in progress".into(),
+            });
+    };
+    perform_update_check_inner(app).await
+}
+
+fn publish_update_status(app: &AppHandle, status: UpdateStatus) {
+    *lock(&app.state::<UpdateState>().last) = Some(status.clone());
+    apply_update_status(app, &status);
+}
+
+async fn perform_update_check_inner(app: &AppHandle) -> UpdateStatus {
     let current = app.package_info().version.to_string();
     let state = app.state::<UpdateState>();
     let status = if !updater_configured(&configured_pubkey(app)) {
         UpdateStatus::Unconfigured
     } else {
         let result = async {
-            let updater = app.updater().map_err(|e| e.to_string())?;
+            let updater = app
+                .updater_builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .map_err(|e| e.to_string())?;
             updater.check().await.map_err(|e| e.to_string())
         }
         .await;
         match result {
-            Ok(Some(update)) => {
+            Ok(Some(mut update)) => {
+                update.timeout = Some(Duration::from_secs(300));
                 let status = UpdateStatus::Available {
                     current,
                     version: update.version.clone(),
@@ -806,6 +1155,10 @@ async fn perform_update_check(app: &AppHandle) -> UpdateStatus {
 /// without this guard two `download_and_install` runs could replace the app
 /// bundle concurrently and both ask for a restart.
 async fn perform_update_install(app: &AppHandle) -> Result<(), String> {
+    let _operation = APP_OPERATION
+        .try_lock()
+        .map_err(|_| "An account change or update check is already in progress")?;
+    let _maintenance = Maintenance::begin();
     if app
         .state::<UpdateState>()
         .installing
@@ -819,15 +1172,16 @@ async fn perform_update_install(app: &AppHandle) -> Result<(), String> {
         let _ = menu.update.set_enabled(false);
     }
     let result = install_pending_update(app).await;
-    if result.is_err() {
-        // Only a failure releases the guard; a success restarts the process.
+    if let Err(message) = &result {
         app.state::<UpdateState>()
             .installing
             .store(false, Ordering::SeqCst);
-        let last = lock(&app.state::<UpdateState>().last).clone();
-        if let Some(status) = last {
-            apply_update_status(app, &status);
-        }
+        publish_update_status(
+            app,
+            UpdateStatus::Error {
+                message: message.clone(),
+            },
+        );
     }
     result
 }
@@ -838,36 +1192,121 @@ async fn install_pending_update(app: &AppHandle) -> Result<(), String> {
     let pending = lock(&app.state::<UpdateState>().pending).clone();
     let update = match pending {
         Some(update) => update,
-        None => match perform_update_check(app).await {
+        None => match perform_update_check_inner(app).await {
             UpdateStatus::Available { .. } => lock(&app.state::<UpdateState>().pending)
                 .clone()
-                .ok_or_else(|| "update vanished between check and install".to_string())?,
+                .ok_or("Update is no longer available")?,
             UpdateStatus::UpToDate { current } => {
-                return Err(format!("Selara v{current} is already the latest version"))
+                return Err(format!("Selara v{current} is already up to date"))
             }
-            UpdateStatus::Unconfigured => {
-                return Err(
-                    "this build has no updater signing key; download releases from GitHub"
-                        .to_string(),
-                )
-            }
+            UpdateStatus::Unconfigured => return Err(
+                "This local build has updates disabled. Install the notarized release from GitHub."
+                    .into(),
+            ),
             UpdateStatus::Error { message } => return Err(message),
+            _ => return Err("An update is already in progress".into()),
         },
     };
-    app.state::<Supervisor>()
-        .push_log(format!("[updater] installing v{}", update.version));
-    update
-        .download_and_install(|_, _| {}, || {})
+    let version = update.version.clone();
+    publish_update_status(
+        app,
+        UpdateStatus::Downloading {
+            version: version.clone(),
+            downloaded: 0,
+            total: None,
+        },
+    );
+    let mut downloaded = 0u64;
+    let bytes = update
+        .download(
+            |count, total| {
+                downloaded = downloaded.saturating_add(count as u64);
+                publish_update_status(
+                    app,
+                    UpdateStatus::Downloading {
+                        version: version.clone(),
+                        downloaded,
+                        total,
+                    },
+                );
+            },
+            || {},
+        )
         .await
-        .map_err(|e| format!("could not install update: {e}"))?;
-    // Take the sidecar down first so the relaunched app can start its own.
+        .map_err(|e| format!("Could not verify the update download: {e}"))?;
+    // download() verifies the signature AFTER its finish callback. Only this
+    // successfully awaited result may pause workers or touch the installation.
+    app_server::reset().await.map_err(|e| e.to_string())?;
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _ = stop_serve(&handle);
-        handle.restart();
+        let app_path = update_backup::running_app()?;
+        let backup =
+            update_backup::Backup::prepare(&app_path, &handle.package_info().version.to_string())?;
+        let sup = handle.state::<Supervisor>();
+        let _transition = lock(&sup.transition);
+        let was_running = sup.managed_pid().is_some();
+        if !was_running && serve_status().running {
+            return Err(
+                "Stop the externally started background service before installing this update"
+                    .into(),
+            );
+        }
+        let desired = sup.desired.swap(false, Ordering::SeqCst);
+        publish_update_status(
+            &handle,
+            UpdateStatus::Waiting {
+                version: version.clone(),
+            },
+        );
+        if was_running {
+            if let Err(error) = quiesce_serve_locked(&handle, &sup) {
+                let resume = resume_serve_locked(&handle, &sup);
+                sup.desired.store(desired, Ordering::SeqCst);
+                return Err(format!(
+                    "Could not pause active work: {error}{}",
+                    resume
+                        .err()
+                        .map(|e| format!("; resume failed: {e}"))
+                        .unwrap_or_default()
+                ));
+            }
+            if let Err(error) = stop_serve_locked(&handle, &sup) {
+                let resume = resume_serve_locked(&handle, &sup);
+                sup.desired.store(desired, Ordering::SeqCst);
+                return Err(format!(
+                    "Could not stop the background process: {error}{}",
+                    resume
+                        .err()
+                        .map(|e| format!("; resume failed: {e}"))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        publish_update_status(
+            &handle,
+            UpdateStatus::Installing {
+                version: version.clone(),
+            },
+        );
+        match backup.install_archive(&version, &bytes) {
+            Ok(()) => {
+                handle.restart();
+            }
+            Err(failure) => {
+                if failure.restored && was_running && desired {
+                    if let Err(error) = start_serve_locked(&handle, &sup) {
+                        return Err(format!(
+                            "{}; background restart failed: {error}",
+                            failure.message
+                        ));
+                    }
+                }
+                Err(failure.message)
+            }
+        }
     })
     .await
-    .map_err(|e| format!("restart task failed: {e}"))
+    .map_err(|e| format!("Update installation task failed: {e}"))?
 }
 
 /// Startup + every 24 h: check in the background; `apply_update_status`
@@ -911,6 +1350,18 @@ fn show_settings<R: Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+/// Rewrites an existing login item with this build's executable and arguments.
+/// The plugin only checks file existence, so initializing it alone would leave
+/// legacy entries opening Settings at every login. Disabled stays disabled.
+fn refresh_enabled_autostart<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
+    let autolaunch = app.autolaunch();
+    let enabled = autolaunch.is_enabled().map_err(|e| e.to_string())?;
+    if enabled {
+        autolaunch.enable().map_err(|e| e.to_string())?;
+    }
+    Ok(enabled)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -918,7 +1369,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            None,
+            Some(vec!["--background"]),
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -939,6 +1390,7 @@ pub fn run() {
             history_path,
             chatgpt_auth_status,
             chatgpt_login,
+            chatgpt_login_cancel,
             chatgpt_logout,
             list_chatgpt_models_cmd,
             list_provider_models_cmd,
@@ -948,6 +1400,8 @@ pub fn run() {
             serve_start,
             serve_stop,
             serve_restart,
+            serve_quiesce,
+            serve_resume,
             serve_log,
             serve_supervisor_status,
             accessibility_status,
@@ -967,7 +1421,12 @@ pub fn run() {
             let stop_i = MenuItem::with_id(app, "serve-stop", "Stop serve", false, None::<&str>)?;
             let restart_i =
                 MenuItem::with_id(app, "serve-restart", "Restart serve", false, None::<&str>)?;
-            let login_checked = app.autolaunch().is_enabled().unwrap_or(false);
+            let login_checked = refresh_enabled_autostart(app.handle()).unwrap_or_else(|e| {
+                app.state::<Supervisor>().push_log(format!(
+                    "[supervisor] could not refresh start at login: {e}"
+                ));
+                app.autolaunch().is_enabled().unwrap_or(false)
+            });
             let login_i = CheckMenuItem::with_id(
                 app,
                 "login",
@@ -1109,8 +1568,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Selara desktop")
         .run(|app, event| match event {
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => show_settings(app),
             // The event loop is up: start `serve` unless one already runs.
             RunEvent::Ready => {
+                // Explicit app launches should expose Settings immediately;
+                // login-item launches keep both Settings and the picker hidden.
+                if !std::env::args_os().any(|arg| arg == "--background") {
+                    show_settings(app);
+                }
                 let app = app.clone();
                 spawn_update_checks(app.clone());
                 std::thread::spawn(move || {
@@ -1129,6 +1595,57 @@ pub fn run() {
 mod tests {
     use super::{updater_configured, UPDATER_PUBKEY_PLACEHOLDER};
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn legacy_login_item_migrates_without_enabling_disabled_login() {
+        use std::{fs, process::Command};
+        // The actual plugin writes a LaunchAgent. Isolate HOME in a child
+        // process so this regression never changes the user's login items.
+        if std::env::var_os("SELARA_AUTOSTART_TEST_CHILD").is_none() {
+            let temporary = std::env::temp_dir().join(format!(
+                "selara-autostart-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(temporary.join("Library/LaunchAgents")).unwrap();
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::legacy_login_item_migrates_without_enabling_disabled_login",
+                ])
+                .env("SELARA_AUTOSTART_TEST_CHILD", "1")
+                .env("HOME", &temporary)
+                .status()
+                .unwrap();
+            fs::remove_dir_all(temporary).unwrap();
+            assert!(status.success());
+            return;
+        }
+        let plist = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join("Library/LaunchAgents/SelaraAutostartFixture.plist");
+        fs::write(&plist, r#"<?xml version="1.0"?><plist version="1.0"><dict><key>ProgramArguments</key><array><string>/Applications/Selara.app/Contents/MacOS/selara-desktop</string></array></dict></plist>"#).unwrap();
+        let app = tauri::test::mock_builder()
+            .plugin(
+                tauri_plugin_autostart::Builder::new()
+                    .app_name("SelaraAutostartFixture")
+                    .macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent)
+                    .arg("--background")
+                    .build(),
+            )
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        assert!(super::refresh_enabled_autostart(app.handle()).unwrap());
+        let migrated = fs::read_to_string(&plist).unwrap();
+        assert!(migrated.contains("<string>--background</string>"));
+        assert!(!migrated.contains("/Applications/Selara.app"));
+        fs::remove_file(&plist).unwrap();
+        assert!(!super::refresh_enabled_autostart(app.handle()).unwrap());
+        assert!(!plist.exists());
+    }
+
     #[test]
     fn placeholder_and_empty_pubkeys_fail_closed() {
         assert!(!updater_configured(UPDATER_PUBKEY_PLACEHOLDER));
@@ -1145,5 +1662,100 @@ mod tests {
         assert!(updater_configured(
             "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCQ0RFRgpSV1FBQkNERUY="
         ));
+    }
+}
+
+#[cfg(test)]
+mod update_transport_tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+    use tauri_plugin_updater::UpdaterExt;
+
+    #[tokio::test]
+    async fn actual_updater_verifies_downloads_and_rejects_missing_tampered_or_interrupted_feeds() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/updater-signature.json")).unwrap();
+        for scenario in ["valid", "missing", "tampered", "interrupted"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let payload = fixture["payload"].as_str().unwrap().as_bytes().to_vec();
+            let manifest = serde_json::json!({"version":"0.2.0","platforms":{"darwin-aarch64":{"url":format!("{base}/app.tar.gz"),"signature":fixture["signature"]}}}).to_string();
+            let expected = payload.clone();
+            let server = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut remaining = if scenario == "missing" { 1 } else { 2 };
+                while remaining > 0 && Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !request.ends_with(b"\r\n\r\n") && request.len() < 16384 {
+                        if stream.read(&mut byte).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        request.push(byte[0]);
+                    }
+                    let archive = String::from_utf8_lossy(&request).starts_with("GET /app.tar.gz ");
+                    let (status, bytes) = if scenario == "missing" {
+                        ("404 Not Found", b"missing".to_vec())
+                    } else if archive && scenario == "tampered" {
+                        ("200 OK", b"tampered".to_vec())
+                    } else if archive {
+                        ("200 OK", payload.clone())
+                    } else {
+                        ("200 OK", manifest.as_bytes().to_vec())
+                    };
+                    let size = bytes.len()
+                        + if archive && scenario == "interrupted" {
+                            100
+                        } else {
+                            0
+                        };
+                    let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {size}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n");
+                    let _ = stream.write_all(&bytes);
+                    remaining -= 1;
+                }
+                assert_eq!(remaining, 0);
+            });
+            let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+            context.config_mut().plugins.0.insert("updater".into(), serde_json::json!({"dangerousInsecureTransportProtocol":true,"pubkey":fixture["publicKey"],"endpoints":[]}));
+            let app = tauri::test::mock_builder()
+                .plugin(
+                    tauri_plugin_updater::Builder::new()
+                        .pubkey(fixture["publicKey"].as_str().unwrap())
+                        .build(),
+                )
+                .build(context)
+                .unwrap();
+            let updater = app
+                .updater_builder()
+                .target("darwin-aarch64")
+                .endpoints(vec![format!("{base}/latest.json").parse().unwrap()])
+                .unwrap()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap();
+            let check = updater.check().await;
+            if scenario == "missing" {
+                assert!(check.is_err(), "missing feed must not be up to date");
+            } else {
+                let mut update = check.unwrap().unwrap();
+                update.timeout = Some(Duration::from_secs(2));
+                let result = update.download(|_, _| {}, || {}).await;
+                if scenario == "valid" {
+                    assert_eq!(result.unwrap(), expected);
+                } else {
+                    assert!(result.is_err(), "{scenario}");
+                }
+            }
+            server.join().unwrap();
+        }
     }
 }
