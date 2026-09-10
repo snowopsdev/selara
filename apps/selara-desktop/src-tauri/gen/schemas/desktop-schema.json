@@ -453,6 +453,24 @@
           "markdownDescription": "Load Selara config"
         },
         {
+          "description": "Delete the transformation history file",
+          "type": "string",
+          "const": "allow-history-clear",
+          "markdownDescription": "Delete the transformation history file"
+        },
+        {
+          "description": "Read the transformation history `selara serve` keeps next to the config",
+          "type": "string",
+          "const": "allow-history-list",
+          "markdownDescription": "Read the transformation history `selara serve` keeps next to the config"
+        },
+        {
+          "description": "Read the history file path",
+          "type": "string",
+          "const": "allow-history-path",
+          "markdownDescription": "Read the history file path"
+        },
+        {
           "description": "Merge commands from a file chosen in an open dialog",
           "type": "string",
           "const": "allow-import-commands",

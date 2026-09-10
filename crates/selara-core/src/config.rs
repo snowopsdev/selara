@@ -442,8 +442,9 @@ fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
-/// Best-effort chmod 0600 for files that may contain an API key.
-fn restrict_to_owner(path: &Path) {
+/// Best-effort chmod 0600 for files that may hold an API key or, in the case
+/// of `history.jsonl`, verbatim selected text.
+pub(crate) fn restrict_to_owner(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
