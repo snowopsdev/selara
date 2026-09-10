@@ -133,7 +133,7 @@ With **ChatGPT via Codex** (experimental, OpenAI-compatible provider only), Sela
 
 ### Commands
 
-The list of prompts the picker offers. Each row shows whether the command replaces the selection or opens a popup, plus its shortcut if it has one. Search filters the list. Hover a row to duplicate or delete it.
+The list of prompts the picker offers. Each row shows whether the command replaces the selection or opens a popup, plus its shortcut if it has one. Search filters the list. Hover a row to duplicate or delete it. **Export…** saves every command as a TOML pack (`[[commands]]` tables, the same shape as `config.toml`) and **Import…** merges a TOML or JSON pack back in; the menu next to it decides what happens when an imported id already exists (keep both under a new id, replace yours, or skip), and imported hotkeys that are already taken are dropped rather than duplicated.
 
 <img alt="Commands tab listing eight commands with Replace and Popup badges, a keyboard shortcut chip on Proofread, a search field, and a New command button" src="docs/screenshots/settings-commands.png" width="820">
 

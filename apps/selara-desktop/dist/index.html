@@ -581,7 +581,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
   // @selara-helpers-end
   const statusEl = () => $("#save-status");
-  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable)$/;
+  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*)$/;
   const BAD_STATUS = /error|failed|required|before saving|not available|could not|enoent/i;
   function setStatus(msg) {
     const text = msg || "";
@@ -1474,6 +1474,13 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<div class=\"search\">" + SEARCH_SVG +
       "<input id=\"cmd-search\" type=\"search\" placeholder=\"Search commands\" value=\"" + escapeAttr(commandFilter) + "\" autocomplete=\"off\" spellcheck=\"false\" aria-label=\"Search commands\" />" +
       "</div>" +
+      "<select id=\"cmd-import-mode\" title=\"What to do when an imported command has the same id as one you already have\" aria-label=\"Import conflict mode\" style=\"width:auto;flex-shrink:0\">" +
+      "<option value=\"keep_both\">On conflict: keep both</option>" +
+      "<option value=\"replace\">On conflict: replace mine</option>" +
+      "<option value=\"skip\">On conflict: skip import</option>" +
+      "</select>" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"cmd-import\" title=\"Merge commands from a TOML or JSON pack\">Import…</button>" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"cmd-export\" title=\"Save all commands as a TOML pack\">Export…</button>" +
       "<button type=\"button\" class=\"btn\" id=\"cmd-new\">" + PLUS_SVG + "New command</button>" +
       "</div>" +
       "<div class=\"cmd-list\">" + listInner + "</div>";
@@ -1488,6 +1495,34 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       try { again.setSelectionRange(pos, pos); } catch (_) {}
     };
     $("#cmd-new").onclick = () => openCommandSheet(null);
+    $("#cmd-export").onclick = async () => {
+      setStatus("Choose where to save…");
+      try {
+        const path = await invoke("export_commands");
+        setStatus(path ? "Exported commands" : "Export cancelled");
+      } catch (e) {
+        setStatus(String(e));
+      }
+    };
+    $("#cmd-import").onclick = async () => {
+      const mode = $("#cmd-import-mode").value;
+      setStatus("Choose a command pack…");
+      try {
+        const report = await invoke("import_commands", { mode });
+        if (!report) { setStatus("Import cancelled"); return; }
+        config = await invoke("get_config");
+        renderCommands();
+        const parts = [];
+        if (report.added) parts.push(report.added + " added");
+        if (report.replaced) parts.push(report.replaced + " replaced");
+        if (report.skipped) parts.push(report.skipped + " skipped");
+        if (report.renamed && report.renamed.length) parts.push(report.renamed.length + " renamed");
+        if (report.hotkeys_dropped) parts.push(report.hotkeys_dropped + " hotkey(s) dropped (already in use)");
+        setStatus("Imported: " + (parts.join(", ") || "nothing to do"));
+      } catch (e) {
+        setStatus(String(e));
+      }
+    };
     const emptyBtn = $("#cmd-new-empty");
     if (emptyBtn) emptyBtn.onclick = () => openCommandSheet(null);
 

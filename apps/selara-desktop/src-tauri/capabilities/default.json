@@ -13,6 +13,8 @@
     "allow-api-key-source",
     "allow-store-api-key",
     "allow-clear-api-key",
+    "allow-export-commands",
+    "allow-import-commands",
     "allow-config-path",
     "allow-chatgpt-auth-status",
     "allow-chatgpt-login",
