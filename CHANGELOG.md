@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/snowopsdev/selara/compare/v0.4.0...v0.4.1) (2026-09-10)
+
+
+### Bug fixes
+
+* **release:** Recover macOS desktop packaging ([#100](https://github.com/snowopsdev/selara/issues/100)) ([5f8900f](https://github.com/snowopsdev/selara/commit/5f8900f68b96ea109336c46bc9244fffb4a84c7f))
+
 ## [0.4.0](https://github.com/snowopsdev/selara/compare/v0.3.0...v0.4.0) (2026-09-10)
 
 
