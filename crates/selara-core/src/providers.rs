@@ -1805,6 +1805,21 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
             }
         }
 
+        /// The ledger entry for `model`.
+        ///
+        /// The store is process-global while only the usage tests take
+        /// `USAGE_STORE_GUARD`, so any other test running in parallel that
+        /// completes a request also appends to whichever ledger is currently
+        /// set. `summary` orders models by their own totals, so indexing
+        /// `models[0]` picks up whichever entry that race produced; looking the
+        /// model up by id is stable no matter who else wrote.
+        fn model<'a>(&self, s: &'a usage::UsageSummary, model: &str) -> &'a usage::ModelUsage {
+            s.models
+                .iter()
+                .find(|m| m.model == model)
+                .unwrap_or_else(|| panic!("`{model}` is in the ledger: {:?}", s.models))
+        }
+
         fn model_totals(&self, model: &str) -> Option<(u64, u64, u64)> {
             let s = usage::summary(&self.path).unwrap();
             s.models
@@ -1835,7 +1850,7 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
             Some((1, 12, 3))
         );
         let s = usage::summary(&store.path).unwrap();
-        let m = &s.models[0];
+        let m = store.model(&s, "usage-test-openai-buffered");
         assert_eq!(m.kind, usage::KIND_OPENAI_COMPATIBLE);
         assert_eq!(m.totals.cost_usd, None, "unknown model has no cost");
     }
@@ -1894,7 +1909,8 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
             Some((1, 30, 7))
         );
         let s = usage::summary(&store.path).unwrap();
-        assert_eq!(s.models[0].kind, usage::KIND_ANTHROPIC);
+        let m = store.model(&s, "usage-test-anthropic-buffered");
+        assert_eq!(m.kind, usage::KIND_ANTHROPIC);
     }
 
     #[tokio::test]
