@@ -32,20 +32,20 @@ cd apps/selara-desktop && npx tauri dev
 
 (`serve` / hotkeys still need a separate `cargo run -p selara -- serve`.)
 
-CI on GitHub Actions runs fmt/clippy/test on Linux (`ubuntu-latest`), excluding the Tauri `selara-desktop` package. Clippy runs with `-D warnings`, so any new warning fails CI; the `objc` macro `cfg` noise on macOS code paths is declared through `check-cfg` in `crates/selara-platform/Cargo.toml` rather than allowed.
+CI on GitHub Actions runs four jobs: fmt/clippy/test on Linux (`ubuntu-latest`, excluding the Tauri `selara-desktop` package), a `macos-latest` job that builds and lints the `selara` CLI/`serve` shell and `selara-platform` so the `cfg(target_os = "macos")` code is at least compiled, a check that `apps/selara-desktop/dist/index.html` matches `npm run build`, and the unit tests for the Python helpers under `.cursor/skills/e2e-qa-orchestrator`. Clippy runs with `-D warnings`, so any new warning fails CI; the `objc` macro `cfg` noise on macOS code paths is declared through `check-cfg` in `crates/selara-platform/Cargo.toml` rather than allowed.
 
 Dependency upkeep is automated: Dependabot opens weekly PRs for Cargo, npm (`apps/selara-desktop`), and GitHub Actions, grouping minor and patch bumps into one PR per ecosystem (`.github/dependabot.yml`). `cargo audit` runs in CI against the RustSec advisory database on every `Cargo.toml`/`Cargo.lock` change and on a weekly schedule (`.github/workflows/audit.yml`). `rust-toolchain.toml` pins the `stable` channel with `rustfmt` and `clippy`, so local builds and CI use the same toolchain.
 
 ### Platform notes
 
-| Area | CI (Linux) | Local macOS |
-| --- | --- | --- |
-| `selara-core` | Covered | Covered |
-| `selara-platform` traits | Covered | Covered |
-| macOS Accessibility / hotkey / clipboard backends | Compile stubs / cfg-gated; no real AX coverage | Needs local testing |
-| `selara` CLI | Covered | Covered |
-| `selara` `serve` (egui picker) | Not exercised on Linux | Needs local macOS testing |
-| `selara-desktop` (Tauri) | Excluded from Linux CI | Needs local macOS testing |
+| Area | CI (Linux) | CI (macOS) | Local macOS |
+| --- | --- | --- | --- |
+| `selara-core` | Tested | Not run | Covered |
+| `selara-platform` traits | Tested | Built + clippy | Covered |
+| macOS Accessibility / hotkey / clipboard backends | cfg-gated out | Compiled only; no AX at runtime | Needs local testing |
+| `selara` CLI | Tested | Built | Covered |
+| `selara` `serve` (egui picker) | cfg-gated out | Compiled only | Needs local macOS testing |
+| `selara-desktop` (Tauri) | `dist/index.html` freshness only | Not built | Needs local macOS testing |
 
 If you change hotkeys, selection replace, Accessibility behavior, or the Settings UI, please verify on macOS locally and attach screenshots when UI changes.
 

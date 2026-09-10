@@ -3,15 +3,16 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, whatever its base branch, so stacked PRs that target
+  # a parent branch still get checked.
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check:
-    name: fmt / clippy / test
+    name: fmt / clippy / test (Linux)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -25,9 +26,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # apps/selara-desktop (Tauri) and macOS-only shell paths (Accessibility,
-      # global hotkey, egui `serve`) need local macOS testing. Linux CI covers
-      # the portable workspace crates/CLI; desktop is excluded here.
+      # Linux covers the portable crates and the CLI. apps/selara-desktop
+      # (Tauri) needs system webkit libraries and is excluded here; the
+      # macOS-only shell paths are compiled by the `macos` job below.
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
@@ -38,3 +39,81 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --exclude selara-desktop
+
+  macos:
+    name: build / clippy (macOS shell)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Compiles apps/selara/src/serve.rs and crates/selara-platform/src/macos,
+      # which are cfg(target_os = "macos") and never built on Linux. This does
+      # not exercise Accessibility, hotkeys, or the picker at runtime; those
+      # still need a local macOS check when they change.
+      - name: cargo build (selara CLI + serve)
+        run: cargo build -p selara
+
+      - name: cargo clippy (macOS crates)
+        run: cargo clippy -p selara -p selara-platform --all-targets
+
+      - name: cargo test (platform crate)
+        run: cargo test -p selara-platform
+
+  desktop-dist:
+    name: desktop dist is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/selara-desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: apps/selara-desktop
+        run: npm ci --no-audit --no-fund
+
+      # apps/selara-desktop/dist/index.html is a committed build artifact.
+      # Rebuild it and fail if the committed copy is stale, so a change to
+      # index.html cannot ship without `npm run build`.
+      - name: Rebuild dist
+        working-directory: apps/selara-desktop
+        run: npm run build
+
+      - name: Verify committed dist matches the build
+        run: |
+          if ! git diff --exit-code -- apps/selara-desktop/dist/index.html; then
+            echo "::error::apps/selara-desktop/dist/index.html is stale. Run 'cd apps/selara-desktop && npm run build' and commit the result."
+            exit 1
+          fi
+
+  skill-tests:
+    name: e2e-qa-orchestrator skill tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The skill under .cursor/skills ships Python helpers with unit tests.
+      # They were committed without ever running in CI.
+      - name: Run unit tests
+        working-directory: .cursor/skills/e2e-qa-orchestrator
+        run: python3 -m unittest discover -s tests -v
