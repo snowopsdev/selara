@@ -15,6 +15,9 @@
     "allow-chatgpt-login",
     "allow-chatgpt-logout",
     "allow-list-chatgpt-models",
-    "allow-list-provider-models"
+    "allow-list-provider-models",
+    "allow-serve-status",
+    "allow-accessibility-status",
+    "allow-open-accessibility-settings"
   ]
 }

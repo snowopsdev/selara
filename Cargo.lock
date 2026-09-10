@@ -4958,6 +4958,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_commonmark",
+ "libc",
  "notify",
  "selara-core",
  "selara-platform",
@@ -4987,7 +4988,9 @@ name = "selara-desktop"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "libc",
  "selara-core",
+ "selara-platform",
  "serde",
  "serde_json",
  "tauri",

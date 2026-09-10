@@ -1,6 +1,7 @@
 //! macOS desktop shell: global hotkey → command picker → replace / popup.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::Watcher;
 use selara_core::commands::{run_command_with, CommandKind, PromptVars, WritingCommand};
-use selara_core::config::{AppConfig, LimitsConfig};
+use selara_core::config::{serve_pidfile, AppConfig, LimitsConfig};
 use selara_platform::macos::{
     accessibility_trusted, activate_pid, frontmost_pid, prompt_accessibility, HotkeyAction,
     MacosHotkey, MacosSelection,
@@ -109,6 +110,8 @@ enum UiPhase {
 struct ServeApp {
     config: AppConfig,
     config_path: PathBuf,
+    /// `serve.pid` next to the config file; removed in `on_exit`.
+    pidfile: PathBuf,
     selection: Arc<MacosSelection>,
     hotkey: MacosHotkey,
     config_mtime: Option<SystemTime>,
@@ -176,6 +179,7 @@ impl ServeApp {
         Ok(Self {
             status_line: Self::status_for(&config),
             config,
+            pidfile: serve_pidfile(&config_path),
             config_path,
             selection,
             hotkey,
@@ -766,6 +770,10 @@ impl ServeApp {
 }
 
 impl eframe::App for ServeApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        remove_pidfile(&self.pidfile);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.hotkey.poll();
         self.poll_config();
@@ -1125,8 +1133,87 @@ impl eframe::App for ServeApp {
     }
 }
 
+/// `kill(pid, 0)` succeeds only while a process with that id exists and is
+/// ours to signal; anything else means the pidfile is stale.
+fn pid_alive(pid: i32) -> bool {
+    pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Record our pid in `serve.pid` (owner-only) so the Settings app's Status tab
+/// can tell whether the shell is running.
+///
+/// A pidfile naming a live process means another shell already owns the global
+/// hotkeys, so the second start is refused instead of overwriting it. Taking the
+/// file over would put a pid in it that dies the moment hotkey registration
+/// fails — the Status tab would then report "Not running" while the original
+/// shell is perfectly healthy — and would let whichever process exits first
+/// delete the other's file. A leftover file from a crashed run names no live
+/// process and is replaced.
+fn write_pidfile(path: &Path) -> Result<()> {
+    if let Ok(raw) = std::fs::read_to_string(path) {
+        if let Ok(old) = raw.trim().parse::<i32>() {
+            if old != std::process::id() as i32 && pid_alive(old) {
+                anyhow::bail!(
+                    "selara serve is already running (pid {old}, recorded in {}). \
+                     Stop that process first; if it is gone, delete the file.",
+                    path.display()
+                );
+            }
+        }
+        tracing::info!("selara: removing stale pidfile {}", path.display());
+        let _ = std::fs::remove_file(path);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(path)
+        .with_context(|| format!("create pidfile {}", path.display()))?;
+    writeln!(file, "{}", std::process::id())?;
+    tracing::info!(
+        "selara: pid {} recorded in {}",
+        std::process::id(),
+        path.display()
+    );
+    Ok(())
+}
+
+/// Remove `serve.pid`, but only while it still names this process.
+///
+/// The counterpart to `write_pidfile` refusing a live owner: if the file has
+/// since been taken over (say the user deleted it by hand and started another
+/// shell), deleting it on our way out would make the running shell invisible to
+/// the Status tab.
+fn remove_pidfile(path: &Path) {
+    if let Ok(raw) = std::fs::read_to_string(path) {
+        let ours = std::process::id() as i32;
+        if let Ok(recorded) = raw.trim().parse::<i32>() {
+            if recorded != ours {
+                tracing::info!(
+                    "selara: {} names pid {recorded}, not ours ({ours}); leaving it in place",
+                    path.display()
+                );
+                return;
+            }
+        }
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => tracing::info!("selara: removed pidfile {}", path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!("selara: could not remove {}: {e}", path.display()),
+    }
+}
+
 pub fn run(config_path: PathBuf) -> Result<()> {
     let config = AppConfig::load_or_init(&config_path)?;
+    write_pidfile(&serve_pidfile(&config_path))?;
     println!("config: {}", config_path.display());
     println!("hotkey: {}", config.hotkey);
     let cmd_shortcuts: Vec<String> = config
@@ -1194,7 +1281,28 @@ pub fn run(config_path: PathBuf) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{insert_range, insert_text, popup_actions, should_apply_job, PopupActions};
+    use super::{
+        insert_range, insert_text, popup_actions, remove_pidfile, should_apply_job, write_pidfile,
+        PopupActions,
+    };
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A fresh directory per call, so the pidfile tests never share a path.
+    fn scratch_dir(name: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "selara-pidfile-{}-{name}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// A pid that is guaranteed not to name a live process: pid 0 is never a
+    /// valid target for `kill(pid, 0)` in `pid_alive`.
+    const DEAD_PID: i32 = 0;
 
     #[test]
     fn current_generation_while_waiting_is_applied() {
@@ -1264,5 +1372,74 @@ mod tests {
     #[test]
     fn insert_text_separates_the_result_with_a_blank_line() {
         assert_eq!(insert_text("- a\n- b"), "\n\n- a\n- b");
+    }
+
+    /// The regression: a second `serve` used to overwrite a live pidfile, so if
+    /// its own startup then failed the Status tab reported the healthy original
+    /// shell as "Not running".
+    #[test]
+    fn a_live_pidfile_refuses_the_second_start() {
+        let dir = scratch_dir("live");
+        let path = dir.join("serve.pid");
+
+        // A real live pid we are allowed to signal, so `pid_alive` says true.
+        let mut owner = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn placeholder owner");
+        std::fs::write(&path, format!("{}\n", owner.id())).expect("write pidfile");
+
+        let err = write_pidfile(&path).expect_err("a live owner must refuse the start");
+        assert!(
+            err.to_string().contains("already running"),
+            "error names the running shell: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .expect("pidfile still there")
+                .trim(),
+            owner.id().to_string(),
+            "the original owner's pid is left untouched"
+        );
+
+        let _ = owner.kill();
+        let _ = owner.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_pidfile_is_replaced() {
+        let dir = scratch_dir("stale");
+        let path = dir.join("serve.pid");
+        std::fs::write(&path, format!("{DEAD_PID}\n")).expect("write stale pidfile");
+
+        write_pidfile(&path).expect("a stale pidfile must not block the start");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("pidfile").trim(),
+            std::process::id().to_string()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_only_removes_our_own_pidfile() {
+        let dir = scratch_dir("cleanup");
+        let path = dir.join("serve.pid");
+
+        write_pidfile(&path).expect("write our pidfile");
+        remove_pidfile(&path);
+        assert!(!path.exists(), "our own pidfile is cleaned up");
+
+        // Someone else's file must survive our exit, or the shell that owns it
+        // disappears from the Status tab.
+        std::fs::write(&path, "424242\n").expect("write another shell's pidfile");
+        remove_pidfile(&path);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("pidfile").trim(),
+            "424242"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

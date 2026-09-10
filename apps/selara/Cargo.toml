@@ -22,4 +22,5 @@ selara-platform = { path = "../../crates/selara-platform" }
 eframe = "0.32"
 egui = "0.32"
 egui_commonmark = "0.21"
+libc = "0.2"
 notify = "7"

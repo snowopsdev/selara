@@ -387,6 +387,12 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Report whether macOS Accessibility is granted to this app",
+          "type": "string",
+          "const": "allow-accessibility-status",
+          "markdownDescription": "Report whether macOS Accessibility is granted to this app"
+        },
+        {
           "description": "Read ChatGPT / Codex CLI login status (Experimental)",
           "type": "string",
           "const": "allow-chatgpt-auth-status",
@@ -429,6 +435,12 @@
           "markdownDescription": "List models from the configured BYOK provider"
         },
         {
+          "description": "Open System Settings on the Accessibility privacy pane",
+          "type": "string",
+          "const": "allow-open-accessibility-settings",
+          "markdownDescription": "Open System Settings on the Accessibility privacy pane"
+        },
+        {
           "description": "Save Selara config",
           "type": "string",
           "const": "allow-save-config",
@@ -439,6 +451,12 @@
           "type": "string",
           "const": "allow-save-config-section",
           "markdownDescription": "Save one section of the Selara config, leaving the rest as on disk"
+        },
+        {
+          "description": "Report whether `selara serve` is running (reads its pidfile)",
+          "type": "string",
+          "const": "allow-serve-status",
+          "markdownDescription": "Report whether `selara serve` is running (reads its pidfile)"
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
