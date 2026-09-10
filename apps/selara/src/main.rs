@@ -106,6 +106,7 @@ fn main() -> Result<()> {
             }
             #[cfg(not(target_os = "macos"))]
             {
+                let _ = desktop_protocol;
                 anyhow::bail!("`serve` is currently only supported on macOS");
             }
         }

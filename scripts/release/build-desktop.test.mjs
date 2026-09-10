@@ -116,6 +116,7 @@ test("resolves CLI, target cwd, overlay args, and propagates child status", asyn
   assert.equal(JSON.parse(build.args.at(-1)).bundle.macOS.signingIdentity, "-");
   let invocation;
   const result = await runBuild(directory, {
+    environment: {},
     spawnProcess(...args) {
       invocation = args;
       const child = {
