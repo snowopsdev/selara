@@ -111,7 +111,7 @@ The global shortcut that opens the picker, an optional undo shortcut, plus a pre
 
 Pick a provider, choose how to authenticate, and select a model.
 
-With an **API key**, type a model id or press **Load models** to fetch the list from the provider. The screenshot shows a local Ollama server on the OpenAI-compatible endpoint. The hint under the model field reports how many models came back, or the HTTP error if the key or URL is wrong.
+With an **API key**, type a model id or press **Load models** to fetch the list from the provider. For the OpenAI-compatible provider, a **Preset** menu fills in the base URL and key hint for OpenAI, Ollama, LM Studio, vLLM, Groq, Mistral, Gemini, Together, and DeepSeek; pick **Custom endpoint** for anything else. The screenshot shows a local Ollama server on the OpenAI-compatible endpoint. The hint under the model field reports how many models came back, or the HTTP error if the key or URL is wrong.
 
 <img alt="Models tab with the OpenAI-compatible provider, an API key, a base URL pointing at a local Ollama server, and four models loaded from it" src="docs/screenshots/settings-models-api-key.png" width="820">
 
