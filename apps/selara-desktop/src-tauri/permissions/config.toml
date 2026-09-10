@@ -107,3 +107,18 @@ commands.allow = ["serve_log"]
 identifier = "allow-serve-supervisor-status"
 description = "Report whether the app manages `selara serve`, or an external one runs"
 commands.allow = ["serve_supervisor_status"]
+
+[[permission]]
+identifier = "allow-app-version"
+description = "Read the running app's version"
+commands.allow = ["app_version"]
+
+[[permission]]
+identifier = "allow-check-for-updates"
+description = "Check the release feed for a newer Selara build (no download)"
+commands.allow = ["check_for_updates"]
+
+[[permission]]
+identifier = "allow-install-update"
+description = "Download, install, and restart into the update found by the last check"
+commands.allow = ["install_update"]

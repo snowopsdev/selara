@@ -591,7 +591,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
   // @selara-helpers-end
   const statusEl = () => $("#save-status");
-  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*|Will start at login|Will not start at login)$/;
+  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*|Will start at login|Will not start at login|Update available|Installing update…)$/;
   const BAD_STATUS = /error|failed|required|before saving|not available|could not|enoent/i;
   function setStatus(msg) {
     const text = msg || "";
@@ -748,8 +748,27 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   let supervisor = null;
   let serveLogLines = [];
   let axGranted = null;
+  let appVersion = "";
+  // Last result of check_for_updates (also pushed by the background check
+  // through the `update-changed` event). Never triggers a network check by
+  // itself; the user presses the button for that.
+  let updateStatus = null;
 
   async function refreshStatusData() {
+    try {
+      appVersion = String(await invoke("app_version") || "");
+    } catch (_) {
+      appVersion = "";
+    }
+    try {
+      // Rust keeps the last check's result. A webview reload, or a background
+      // check that landed before the listener was bound, would otherwise leave
+      // the card saying "Not checked" until the next daily run.
+      const stored = await invoke("update_status");
+      if (stored) updateStatus = stored;
+    } catch (_) {
+      // An older build without the command: the event listener still works.
+    }
     try {
       serveStatus = await invoke("serve_status");
     } catch (e) {
@@ -906,16 +925,85 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       (cmdKeys.length ? "" : "No command has its own shortcut yet; add one from the Commands tab. ") +
       "Shortcuts work while serve is running and pick up saved changes within about a second.</p>";
 
+    // 5. Updates (signed releases via tauri-plugin-updater)
+    const up = updateStatus || {};
+    const upAvailable = up.state === "available";
+    const upDot = up.state === "available" ? "ok"
+      : (up.state === "up_to_date" ? "ok" : (up.state === "error" ? "bad" : "unknown"));
+    const upState = up.state === "available" ? "v" + up.version + " available"
+      : (up.state === "up_to_date" ? "Up to date"
+        : (up.state === "error" ? "Check failed"
+          : (up.state === "unconfigured" ? "Not configured" : "Not checked")));
+    const upResult = up.state === "available"
+      ? "Selara v" + up.version + " is ready to install" + (up.date ? " (released " + up.date + ")" : "") + "."
+      : (up.state === "up_to_date" ? "You are on the latest release."
+        : (up.state === "error" ? String(up.message || "Update check failed.")
+          : (up.state === "unconfigured"
+            ? "This build has no updater signing key, so checks are skipped. Download new releases from GitHub."
+            : "Checks the GitHub release feed for a newer signed build. Nothing is downloaded until you choose to install.")));
+    const updatesBody =
+      "<dl class=\"status-meta\">" +
+      "<dt>Installed</dt><dd>" + escapeHtml(appVersion ? "v" + appVersion : "unknown") + "</dd>" +
+      (upAvailable ? "<dt>Latest</dt><dd>v" + escapeHtml(up.version) + "</dd>" : "") +
+      "</dl>" +
+      (upAvailable && up.notes
+        ? "<details class=\"serve-log\"><summary>Release notes</summary><pre>" + escapeHtml(String(up.notes)) + "</pre></details>"
+        : "") +
+      "<div class=\"actions\">" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"status-check-update\">Check for updates</button>" +
+      (upAvailable ? "<button type=\"button\" class=\"btn\" id=\"status-install-update\">Install and restart</button>" : "") +
+      "<span class=\"field-hint" + (up.state === "error" ? " error" : "") + "\" id=\"status-update-result\">" + escapeHtml(upResult) + "</span>" +
+      "</div>";
+
     s.innerHTML =
       "<h1>Status</h1>" +
       "<div class=\"status-toolbar\">" +
-      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, and the shortcuts.</p>" +
+      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, the shortcuts, and updates.</p>" +
       "<button type=\"button\" class=\"btn secondary\" id=\"status-refresh\">Refresh</button>" +
       "</div>" +
       statusCard("serve", "selara serve", serveDot, serveState, serveBody) +
       statusCard("accessibility", "Accessibility", axDot, axState, axBody) +
       statusCard("provider", "Provider", "unknown", "Not checked", providerBody) +
-      statusCard("shortcuts", "Shortcuts", "", shortcutCount + (shortcutCount === 1 ? " shortcut" : " shortcuts"), shortcutsBody);
+      statusCard("shortcuts", "Shortcuts", "", shortcutCount + (shortcutCount === 1 ? " shortcut" : " shortcuts"), shortcutsBody) +
+      statusCard("updates", "Updates", upDot, upState, updatesBody);
+
+    $("#status-check-update").onclick = async () => {
+      const btn = $("#status-check-update");
+      const out = $("#status-update-result");
+      btn.disabled = true;
+      out.classList.remove("error");
+      out.textContent = "Checking for updates…";
+      setStatus("Checking for updates…");
+      try {
+        updateStatus = await invoke("check_for_updates");
+        renderStatus();
+        setStatus(updateStatus && updateStatus.state === "available"
+          ? "Update available"
+          : (updateStatus && updateStatus.state === "error" ? String(updateStatus.message) : "Status refreshed"));
+      } catch (e) {
+        updateStatus = { state: "error", message: String(e) };
+        renderStatus();
+        setStatus(String(e));
+      }
+    };
+    const installBtn = $("#status-install-update");
+    if (installBtn) {
+      installBtn.onclick = async () => {
+        const out = $("#status-update-result");
+        installBtn.disabled = true;
+        $("#status-check-update").disabled = true;
+        out.classList.remove("error");
+        out.textContent = "Downloading and installing… Selara restarts when it is done.";
+        setStatus("Installing update…");
+        try {
+          await invoke("install_update");
+        } catch (e) {
+          updateStatus = { state: "error", message: String(e) };
+          renderStatus();
+          setStatus(String(e));
+        }
+      };
+    }
 
     async function serveAction(cmd, busy) {
       setStatus(busy);
@@ -1862,8 +1950,26 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     }
   }
 
+  // The background check (10 s after launch, then daily) and the tray's
+  // "Check for updates…" item report through this event; keep the card in step.
+  let updateListenerBound = false;
+  function listenForUpdates() {
+    if (updateListenerBound) return;
+    const g = window.__TAURI__;
+    if (!g || !g.event || typeof g.event.listen !== "function") return;
+    updateListenerBound = true;
+    g.event.listen("update-changed", (ev) => {
+      updateStatus = ev && ev.payload ? ev.payload : null;
+      if ($("#section-status").classList.contains("active")) renderStatus();
+      else if ($("#status-updates")) renderStatus();
+    }).catch(() => { updateListenerBound = false; });
+  }
+
   async function load() {
     setStatus("Loading config…");
+    // Before the first await: the startup check fires 10 s after launch and a
+    // slow load must not miss it.
+    listenForUpdates();
     try {
       config = await invoke("get_config");
       await refreshChatgptStatus();
