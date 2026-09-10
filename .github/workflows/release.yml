@@ -74,8 +74,7 @@ jobs:
           git commit -m "chore(release): Sync Cargo.lock"
           git push
 
-  # Attach a macOS CLI build to the GitHub Release. The Tauri app is not built
-  # here: it needs Apple signing and notarization to be distributable.
+  # Attach a macOS CLI build to the GitHub Release.
   assets:
     name: Attach macOS CLI
     needs: release-please
@@ -112,3 +111,135 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "$ASSET" "$ASSET.sha256" --clobber
+
+  # Build the Tauri menu-bar app as a DMG and attach it, together with a
+  # Homebrew cask (app) and formula (CLI) rendered from homebrew/*.tmpl.
+  #
+  # Signing and notarization are optional: when the APPLE_* secrets below are
+  # set, tauri-bundler signs and notarizes the app; when they are empty the DMG
+  # is ad-hoc signed and the cask carries a caveat about Gatekeeper. Secrets:
+  #   APPLE_CERTIFICATE           base64 .p12 of a Developer ID Application cert
+  #   APPLE_CERTIFICATE_PASSWORD  its password
+  #   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+  #   APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID   notarization (app-specific password)
+  #   HOMEBREW_TAP_TOKEN          PAT with contents:write on snowopsdev/homebrew-selara
+  desktop:
+    name: Attach macOS app (DMG) and Homebrew files
+    needs: [release-please, assets]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/selara-desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: apps/selara-desktop
+        run: npm ci --no-audit --no-fund
+
+      - name: Build app and DMG
+        working-directory: apps/selara-desktop
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx tauri build --bundles app,dmg
+
+      - name: Package DMG
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -euo pipefail
+          ARCH=$(uname -m)
+          SRC=$(ls target/release/bundle/dmg/*.dmg | head -n 1)
+          NAME="Selara-${VERSION}-macos-${ARCH}.dmg"
+          mkdir -p dist
+          cp "$SRC" "dist/${NAME}"
+          shasum -a 256 "dist/${NAME}" > "dist/${NAME}.sha256"
+
+          # The Gatekeeper caveat in the cask must be dropped only when the
+          # download will actually open without one, and that is decided by
+          # notarization, not by signing. A Developer ID identity with any of
+          # APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID missing still produces a
+          # signed-but-unnotarized DMG that macOS blocks. So ask the artifact
+          # itself: `stapler validate` succeeds only when Apple issued a ticket
+          # and Tauri stapled it to the DMG.
+          if xcrun stapler validate "dist/${NAME}" >/dev/null 2>&1; then
+            SIGNED=signed
+          else
+            SIGNED=unsigned
+          fi
+
+          echo "DMG=dist/${NAME}" >> "$GITHUB_ENV"
+          echo "DMG_SHA=$(cut -d' ' -f1 "dist/${NAME}.sha256")" >> "$GITHUB_ENV"
+          echo "SIGNED=${SIGNED}" >> "$GITHUB_ENV"
+          echo "Built ${NAME} (notarization: ${SIGNED})"
+
+      - name: Fetch CLI tarball checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -euo pipefail
+          ARCH=$(uname -m)
+          gh release download "${{ needs.release-please.outputs.tag_name }}" \
+            --pattern "selara-${VERSION}-macos-${ARCH}.tar.gz.sha256" --dir dist --clobber
+          echo "CLI_SHA=$(cut -d' ' -f1 "dist/selara-${VERSION}-macos-${ARCH}.tar.gz.sha256")" >> "$GITHUB_ENV"
+
+      - name: Render Homebrew cask and formula
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: scripts/release/render-homebrew.sh "$VERSION" "$DMG_SHA" "$CLI_SHA" dist/homebrew "$SIGNED"
+
+      - name: Upload DMG and Homebrew files to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # A release asset is named after the file's basename, so uploading
+          # Casks/selara.rb and Formula/selara.rb together would ask for the
+          # same asset name twice — GitHub requires them to be unique, and
+          # --clobber replaces an asset of the same name rather than keeping
+          # the directory apart. Copy them to distinct names first. The tap
+          # push below still reads the originals under dist/homebrew.
+          cp dist/homebrew/Casks/selara.rb dist/selara-cask.rb
+          cp dist/homebrew/Formula/selara.rb dist/selara-formula.rb
+          gh release upload "${{ needs.release-please.outputs.tag_name }}" \
+            "$DMG" "$DMG.sha256" dist/selara-cask.rb dist/selara-formula.rb --clobber
+
+      # Publish to the tap when a token is configured; otherwise the rendered
+      # files on the release are enough for `brew install --cask <url>`.
+      - name: Push to Homebrew tap
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/snowopsdev/homebrew-selara.git" tap
+          mkdir -p tap/Casks tap/Formula
+          cp dist/homebrew/Casks/selara.rb tap/Casks/selara.rb
+          cp dist/homebrew/Formula/selara.rb tap/Formula/selara.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/selara.rb Formula/selara.rb
+          git diff --cached --quiet || git commit -m "selara ${VERSION}"
+          git push

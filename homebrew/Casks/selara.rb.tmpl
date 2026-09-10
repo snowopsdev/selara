@@ -1,0 +1,26 @@
+# Homebrew cask for the Selara menu-bar app. Rendered by
+# scripts/release/render-homebrew.sh at release time; @TOKENS@ are replaced.
+cask "selara" do
+  version "@VERSION@"
+  sha256 "@DMG_SHA256@"
+
+  url "https://github.com/snowopsdev/selara/releases/download/v#{version}/Selara-#{version}-macos-arm64.dmg"
+  name "Selara"
+  desc "Select text anywhere, press a hotkey, rewrite it with the LLM of your choice"
+  homepage "https://github.com/snowopsdev/selara"
+
+  depends_on macos: ">= :big_sur"
+  depends_on arch: :arm64
+
+  app "Selara.app"
+
+  zap trash: [
+    "~/.config/selara",
+  ]
+
+  caveats <<~EOS
+    Selara reads the current selection through Accessibility. After the first
+    launch, enable Selara under System Settings > Privacy & Security > Accessibility.
+    @UNSIGNED_CAVEAT@
+  EOS
+end

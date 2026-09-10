@@ -48,6 +48,18 @@ flowchart LR
 
 The `serve` shell registers the hotkey, reads the selection, shows a small command picker, sends `{prompt, selection}` to the configured provider, and writes the result back. The Settings app edits the same config file.
 
+## Install (macOS)
+
+Every GitHub Release ships a `Selara-<version>-macos-arm64.dmg` (the menu-bar app), a `selara-<version>-macos-arm64.tar.gz` (the CLI), and Homebrew files. With the tap configured:
+
+```bash
+brew tap snowopsdev/selara
+brew install --cask selara      # menu-bar app
+brew install selara             # CLI
+```
+
+Until the release is signed and notarized by Apple, macOS may report the app as damaged on first launch; clear the quarantine flag with `xattr -d com.apple.quarantine /Applications/Selara.app`. Building from source is described next.
+
 ## Quick start (macOS)
 
 1. **Create the config** (once):

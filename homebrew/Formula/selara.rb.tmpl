@@ -1,0 +1,24 @@
+# Homebrew formula for the Selara CLI (selara init / run / key / serve).
+# Rendered by scripts/release/render-homebrew.sh at release time.
+class Selara < Formula
+  desc "CLI for Selara, the hotkey-driven LLM writing assistant"
+  homepage "https://github.com/snowopsdev/selara"
+  version "@VERSION@"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/snowopsdev/selara/releases/download/v#{version}/selara-#{version}-macos-arm64.tar.gz"
+      sha256 "@CLI_SHA256@"
+    end
+  end
+
+  def install
+    bin.install "selara"
+    doc.install "README.md"
+  end
+
+  test do
+    assert_match "selara", shell_output("#{bin}/selara --help")
+  end
+end
