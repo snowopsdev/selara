@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::CoreError;
-use crate::providers::{CompletionRequest, LlmProvider};
+use crate::providers::{CompletionRequest, DeltaSink, LlmProvider};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -440,10 +440,49 @@ pub async fn run_command_with(
             user: input.to_string(),
         })
         .await?;
-    Ok(match command.kind {
+    Ok(finish_output(command.kind, out, input))
+}
+
+/// [`run_command_with`] that streams the reply: `on_delta` receives each text
+/// fragment as the model produces it, and the finished text is returned at
+/// the end exactly as `run_command_with` would have returned it.
+///
+/// Fragments are forwarded raw. Only the returned text has
+/// [`clean_replace_output`] applied for `Replace` commands, so a caller that
+/// writes over the user's selection must wait for the return value instead
+/// of assembling the fragments itself; fragments are for progress display.
+pub async fn run_command_stream(
+    provider: &dyn LlmProvider,
+    command: &WritingCommand,
+    input: &str,
+    custom_instruction: Option<&str>,
+    vars: PromptVars<'_>,
+    on_delta: &mut DeltaSink<'_>,
+) -> Result<String, CoreError> {
+    if input.trim().is_empty() {
+        return Err(CoreError::EmptyInput);
+    }
+    let system = build_system_prompt_with(command, custom_instruction, vars);
+
+    let out = provider
+        .complete_stream(
+            CompletionRequest {
+                system,
+                user: input.to_string(),
+            },
+            on_delta,
+        )
+        .await?;
+    Ok(finish_output(command.kind, out, input))
+}
+
+/// Post-process a finished reply for its command kind: `Replace` output is
+/// cleaned of chat framing, `Popup` markdown is returned as-is.
+fn finish_output(kind: CommandKind, out: String, input: &str) -> String {
+    match kind {
         CommandKind::Replace => clean_replace_output(&out, input),
         CommandKind::Popup => out,
-    })
+    }
 }
 
 /// Strip the chat framing models add around `Replace` output: an outer code
@@ -1105,5 +1144,131 @@ mod tests {
             clean_replace_output("```\n    indented line\n```", "    indented line\n"),
             "    indented line\n"
         );
+    }
+
+    /// Streams the input back one line at a time (newline included), so
+    /// tests can see exactly which fragments the sink received.
+    /// Streams a fixed reply line by line whatever the input, so the finished
+    /// text can differ from the selection the cleaner compares it against.
+    struct CannedStreamProvider(&'static str);
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CannedStreamProvider {
+        async fn complete(&self, _req: CompletionRequest) -> Result<String, CoreError> {
+            Ok(self.0.to_string())
+        }
+
+        async fn complete_stream(
+            &self,
+            _req: CompletionRequest,
+            on_delta: &mut DeltaSink<'_>,
+        ) -> Result<String, CoreError> {
+            for line in self.0.split_inclusive('\n') {
+                on_delta(line);
+            }
+            Ok(self.0.to_string())
+        }
+    }
+
+    struct LineStreamProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for LineStreamProvider {
+        async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+            Ok(req.user)
+        }
+
+        async fn complete_stream(
+            &self,
+            req: CompletionRequest,
+            on_delta: &mut DeltaSink<'_>,
+        ) -> Result<String, CoreError> {
+            for line in req.user.split_inclusive('\n') {
+                on_delta(line);
+            }
+            Ok(req.user)
+        }
+    }
+
+    #[tokio::test]
+    async fn run_command_stream_cleans_replace_final_text_but_forwards_raw_deltas() {
+        // The selection is plain, so the fence and preamble the model added
+        // are framing and are stripped from the returned text - but not from
+        // the deltas, which are for progress display only.
+        let fenced = "```\nHere is the corrected text:\nTwo cats.\n```";
+        let mut seen: Vec<String> = Vec::new();
+        let out = run_command_stream(
+            &CannedStreamProvider(fenced),
+            &cmd(),
+            "Two cats!",
+            None,
+            PromptVars::default(),
+            &mut |d: &str| seen.push(d.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "Two cats.", "final Replace text is cleaned");
+        assert_eq!(
+            seen,
+            vec![
+                "```\n",
+                "Here is the corrected text:\n",
+                "Two cats.\n",
+                "```"
+            ],
+            "deltas are forwarded exactly as the provider sent them"
+        );
+        assert_eq!(seen.concat(), fenced);
+    }
+
+    #[tokio::test]
+    async fn run_command_stream_leaves_popup_text_alone_and_rejects_empty_input() {
+        let fenced = "```\nA summary.\n```";
+        let mut seen: Vec<String> = Vec::new();
+        let out = run_command_stream(
+            &LineStreamProvider,
+            &popup_cmd(),
+            fenced,
+            None,
+            PromptVars::default(),
+            &mut |d: &str| seen.push(d.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, fenced);
+        assert_eq!(seen.len(), 3);
+
+        let mut calls = 0usize;
+        let err = run_command_stream(
+            &LineStreamProvider,
+            &cmd(),
+            "   ",
+            None,
+            PromptVars::default(),
+            &mut |_: &str| calls += 1,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CoreError::EmptyInput), "{err}");
+        assert_eq!(calls, 0, "no provider call for empty input");
+    }
+
+    /// A provider with only `complete` still works through the streaming
+    /// entry point: the whole reply arrives as one fragment.
+    #[tokio::test]
+    async fn run_command_stream_falls_back_to_one_fragment() {
+        let mut seen: Vec<String> = Vec::new();
+        let out = run_command_stream(
+            &EchoProvider,
+            &popup_cmd(),
+            "hello",
+            None,
+            PromptVars::default(),
+            &mut |d: &str| seen.push(d.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "hello");
+        assert_eq!(seen, vec!["hello"]);
     }
 }
