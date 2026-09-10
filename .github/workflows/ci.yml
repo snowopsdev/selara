@@ -102,6 +102,9 @@ jobs:
       - name: Test release helpers
         run: node --test scripts/release/*.test.mjs
 
+      - name: Test native source cache recovery
+        run: python3 scripts/codex-runtime/test-build.py -v
+
       - name: Install frontend dependencies
         working-directory: apps/selara-desktop
         run: npm ci --no-audit --no-fund

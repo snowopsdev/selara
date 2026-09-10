@@ -65,6 +65,7 @@ Commands run with Rust 1.95.0 where applicable:
 | `npm --prefix apps/selara-desktop test` | 28 passed, including 10 DOM tests |
 | `npm --prefix apps/selara-desktop run build` | Passed; committed dist regenerated |
 | `node --test scripts/release/*.test.mjs` | 30 passed |
+| `python3 scripts/codex-runtime/test-build.py -v` | Five source-cache recovery tests passed; pruned or changed inputs are reconstructed from the verified archive and patches |
 | `scripts/codex-runtime/test-contract.sh` | Production runtime contract passed |
 | `scripts/codex-runtime/test-runtime.sh` | 12 actual runtime isolation/protocol tests passed |
 | `scripts/codex-runtime/test-auth-lock.sh` | Eight cross-process authentication race tests passed |

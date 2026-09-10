@@ -20,6 +20,58 @@ def digest(path):
     with path.open('rb') as f:
         return hashlib.file_digest(f, 'sha256').hexdigest()
 
+SOURCE_INVENTORY = '.selara-source-inventory.json'
+
+def source_inventory(source):
+    files = {}
+    for path in sorted(source.rglob('*')):
+        relative = path.relative_to(source).as_posix()
+        if relative == SOURCE_INVENTORY:
+            continue
+        if path.is_symlink():
+            files[relative] = {'link': os.readlink(path)}
+        elif path.is_file():
+            files[relative] = {'sha256': digest(path)}
+    return files
+
+def source_complete(source):
+    # Cargo cache cleanup can preserve a source directory while pruning its
+    # files. Check every prepared input, not just directory/marker existence.
+    try:
+        if source.is_symlink() or not (source / 'codex-rs/Cargo.toml').is_file():
+            return False
+        expected = json.loads((source / SOURCE_INVENTORY).read_text())
+        return expected == source_inventory(source)
+    except (OSError, ValueError):
+        return False
+
+def prepare_source(source, archive, patches):
+    if source_complete(source):
+        return
+    # The caller holds the build lock and verifies the archive/patch digests.
+    # Prepare completely before discarding an incomplete cached source tree.
+    with tempfile.TemporaryDirectory(dir=source.parent) as temporary:
+        stage = Path(temporary)
+        with tarfile.open(archive) as tar:
+            for member in tar.getmembers():
+                path = Path(member.name)
+                if path.is_absolute() or '..' in path.parts:
+                    raise SystemExit('unsafe source archive path')
+                if member.issym() or member.islnk():
+                    destination = path.parent / member.linkname
+                    if Path(member.linkname).is_absolute() or '..' in destination.parts:
+                        raise SystemExit('unsafe source archive link')
+            tar.extractall(stage, filter='data')
+        unpacked, = stage.iterdir()
+        for patch in patches:
+            subprocess.run(['patch', '-p1', '--batch', '--forward', '-i', str(patch)], cwd=unpacked, check=True)
+        (unpacked / SOURCE_INVENTORY).write_text(json.dumps(source_inventory(unpacked), sort_keys=True))
+        if source.is_symlink() or source.is_file():
+            source.unlink()
+        elif source.exists():
+            shutil.rmtree(source)
+        unpacked.rename(source)
+
 def main():
     if os.uname().sysname != 'Darwin' or os.uname().machine != 'arm64':
         raise SystemExit('This runtime lock targets macOS ARM64 only')
@@ -50,24 +102,7 @@ def main():
         if digest(archive) != LOCK['source_archive_sha256']:
             raise SystemExit('cached official Codex source archive digest mismatch')
         source = cache / ('source-' + patch_digest)
-        if not source.exists():
-            with tempfile.TemporaryDirectory(dir=cache) as temporary:
-                stage = Path(temporary)
-                with tarfile.open(archive) as tar:
-                    # The hash authenticates the archive; still reject traversal.
-                    for member in tar.getmembers():
-                        path = Path(member.name)
-                        if path.is_absolute() or '..' in path.parts:
-                            raise SystemExit('unsafe source archive path')
-                        if member.issym() or member.islnk():
-                            destination = path.parent / member.linkname
-                            if Path(member.linkname).is_absolute() or '..' in destination.parts:
-                                raise SystemExit('unsafe source archive link')
-                    tar.extractall(stage, filter='data')
-                unpacked, = stage.iterdir()
-                for patch in patches:
-                    subprocess.run(['patch', '-p1', '--batch', '--forward', '-i', str(patch)], cwd=unpacked, check=True)
-                unpacked.rename(source)
+        prepare_source(source, archive, patches)
         env = dict(os.environ)
         for key in ['RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTUP_TOOLCHAIN']:
             env.pop(key, None)
