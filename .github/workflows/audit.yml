@@ -1,0 +1,69 @@
+name: Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+  schedule:
+    # Weekly, Monday 06:00 UTC, so newly published advisories are caught
+    # even when no dependency changed.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+# Default to read-only. The reporting job below opts into the extra scopes it
+# needs; the pull_request job must not, because GitHub hands `pull_request`
+# runs from forks and from Dependabot a read-only GITHUB_TOKEN no matter what
+# this file requests.
+permissions:
+  contents: read
+
+jobs:
+  # Pull requests, including forks and Dependabot. No Checks/Issues API use,
+  # so a read-only token is enough: a vulnerable lockfile fails the job.
+  audit-pr:
+    name: cargo audit
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit Cargo.lock against RustSec
+        run: cargo audit
+
+  # push / schedule / workflow_dispatch only. These run on a branch of this
+  # repository with a writable token, so rustsec/audit-check can report through
+  # the Checks API and file an issue for scheduled runs.
+  audit-report:
+    name: cargo audit (reported)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      checks: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Audit Cargo.lock against RustSec
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -34,6 +34,8 @@ cd apps/selara-desktop && npx tauri dev
 
 CI on GitHub Actions runs fmt/clippy/test on Linux (`ubuntu-latest`), excluding the Tauri `selara-desktop` package. Clippy runs with `-D warnings`, so any new warning fails CI; the `objc` macro `cfg` noise on macOS code paths is declared through `check-cfg` in `crates/selara-platform/Cargo.toml` rather than allowed.
 
+Dependency upkeep is automated: Dependabot opens weekly PRs for Cargo, npm (`apps/selara-desktop`), and GitHub Actions, grouping minor and patch bumps into one PR per ecosystem (`.github/dependabot.yml`). `cargo audit` runs in CI against the RustSec advisory database on every `Cargo.toml`/`Cargo.lock` change and on a weekly schedule (`.github/workflows/audit.yml`). `rust-toolchain.toml` pins the `stable` channel with `rustfmt` and `clippy`, so local builds and CI use the same toolchain.
+
 ### Platform notes
 
 | Area | CI (Linux) | Local macOS |
