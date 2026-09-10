@@ -1,11 +1,33 @@
 use selara_core::codex_cli::{self, CodexLoginStatus};
 use selara_core::config::AppConfig;
 use selara_core::providers::{list_chatgpt_models, list_provider_models, ProviderKind};
+use std::sync::{Mutex, MutexGuard};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, Runtime, WindowEvent,
 };
+
+/// Serializes every read-modify-write of config.toml in this process.
+///
+/// `save_config_section` re-reads the file, edits one section, and writes the
+/// whole config back. Without a lock two of those transactions interleave —
+/// both read the same starting file, and the second write lands on top of the
+/// first, silently dropping the section it saved. Holding this for the whole
+/// read → edit → write turns each save into one transaction. Every command that
+/// writes the file takes it, including whole-config saves, so a section save
+/// cannot interleave with one of those either.
+///
+/// Cross-process writers (`selara serve` editing Limits) are outside its reach;
+/// the re-read narrows that window to the write itself, and closing it fully
+/// would need file locking.
+static CONFIG_WRITE: Mutex<()> = Mutex::new(());
+
+/// A poisoned lock only means a panic elsewhere; the file is still consistent
+/// because a panicking save leaves the previous contents in place.
+fn config_write_lock() -> MutexGuard<'static, ()> {
+    CONFIG_WRITE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[tauri::command]
 fn get_config() -> Result<AppConfig, String> {
@@ -15,8 +37,25 @@ fn get_config() -> Result<AppConfig, String> {
 
 #[tauri::command]
 fn save_config(config: AppConfig) -> Result<(), String> {
+    let _tx = config_write_lock();
     let path = AppConfig::default_path();
     config.save(&path).map_err(|e| e.to_string())
+}
+
+/// Save one Settings tab without touching the others. The file is re-read
+/// first so a change made elsewhere (for example the Limits page inside
+/// `selara serve`) survives, and the merged config is returned so the UI can
+/// refresh its copy.
+#[tauri::command]
+fn save_config_section(section: String, value: serde_json::Value) -> Result<AppConfig, String> {
+    // Held across the read, the edit and the write: this is one transaction.
+    let _tx = config_write_lock();
+    let path = AppConfig::default_path();
+    let mut cfg = AppConfig::load_or_init(&path).map_err(|e| e.to_string())?;
+    cfg.apply_section(&section, value)
+        .map_err(|e| e.to_string())?;
+    cfg.save(&path).map_err(|e| e.to_string())?;
+    Ok(cfg)
 }
 
 #[tauri::command]
@@ -95,6 +134,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
+            save_config_section,
             config_path,
             chatgpt_auth_status,
             chatgpt_login,

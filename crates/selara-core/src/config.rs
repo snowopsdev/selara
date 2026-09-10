@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::chatgpt_auth::ChatGptAuth;
@@ -17,8 +18,19 @@ pub enum ProviderAuth {
     ChatGpt,
 }
 
+/// Bump when a field changes meaning or a migration is needed. Files without
+/// the key are treated as version 1 (everything written before it existed).
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+fn current_schema_version() -> u32 {
+    CURRENT_SCHEMA_VERSION
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// Config file format version; see [`CURRENT_SCHEMA_VERSION`].
+    #[serde(default = "current_schema_version")]
+    pub schema_version: u32,
     pub provider: ProviderConfig,
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
@@ -98,9 +110,20 @@ impl Default for LimitsConfig {
     }
 }
 
+/// One Settings tab's worth of config, for partial saves that leave the other
+/// sections exactly as they are on disk.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeneralSection {
+    pub hotkey: String,
+    #[serde(default)]
+    pub undo_hotkey: Option<String>,
+    pub language: String,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
             provider: ProviderConfig {
                 kind: ProviderKind::OpenAiCompatible,
                 base_url: "https://api.openai.com/v1".into(),
@@ -122,11 +145,32 @@ impl AppConfig {
         dirs_path().join("config.toml")
     }
 
+    /// Refuse a config written by a newer Selara. Deserializing drops fields
+    /// this build does not know, and the next save would write the truncated
+    /// struct back over the file while keeping the newer version number — so
+    /// the newer release's settings would be silently deleted. Failing to
+    /// start is recoverable; a clobbered config is not.
+    fn check_schema_version(&self, path: &Path) -> Result<(), CoreError> {
+        if self.schema_version > CURRENT_SCHEMA_VERSION {
+            return Err(CoreError::Config(format!(
+                "{}: schema_version {} was written by a newer Selara (this build understands up to {}). \
+                 Update Selara, or move that file aside to start from a fresh config.",
+                path.display(),
+                self.schema_version,
+                CURRENT_SCHEMA_VERSION
+            )));
+        }
+        Ok(())
+    }
+
     pub fn load_or_init(path: &Path) -> Result<Self, CoreError> {
         maybe_migrate_legacy_config(path)?;
         if path.exists() {
             let raw = std::fs::read_to_string(path)?;
             let cfg: AppConfig = toml::from_str(&raw)?;
+            // The file may hold an API key; older versions wrote it world-readable.
+            restrict_to_owner(path);
+            cfg.check_schema_version(path)?;
             Ok(cfg)
         } else {
             let cfg = Self::default();
@@ -138,12 +182,62 @@ impl AppConfig {
         }
     }
 
+    /// Write the config atomically: serialize to a sibling temp file created
+    /// owner-only (0600), flush it, then rename it over `path`. A reader that
+    /// polls the file (`selara serve`) sees either the old or the new content,
+    /// never a truncated file, and the key never sits in a world-readable file.
     pub fn save(&self, path: &Path) -> Result<(), CoreError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let raw = toml::to_string_pretty(self).map_err(|e| CoreError::Config(e.to_string()))?;
-        std::fs::write(path, raw)?;
+        let tmp = temp_sibling(path);
+        let _ = std::fs::remove_file(&tmp);
+        write_private(&tmp, raw.as_bytes())?;
+        if let Err(e) = replace_file(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
+    /// Replace one section of the config from JSON and leave the rest untouched.
+    /// `section` is `general`, `provider`, `commands`, or `limits`; `value` is the
+    /// JSON the Settings UI holds for that tab. Used for partial saves so two
+    /// writers (the Settings app and `serve`) do not clobber each other's fields.
+    pub fn apply_section(
+        &mut self,
+        section: &str,
+        value: serde_json::Value,
+    ) -> Result<(), CoreError> {
+        let bad = |e: serde_json::Error| CoreError::Config(format!("invalid `{section}`: {e}"));
+        match section {
+            "general" => {
+                let g: GeneralSection = serde_json::from_value(value).map_err(bad)?;
+                self.hotkey = if g.hotkey.trim().is_empty() {
+                    default_hotkey()
+                } else {
+                    g.hotkey.trim().to_string()
+                };
+                self.undo_hotkey = g
+                    .undo_hotkey
+                    .map(|h| h.trim().to_string())
+                    .filter(|h| !h.is_empty());
+                self.language = if g.language.trim().is_empty() {
+                    default_language()
+                } else {
+                    g.language.trim().to_string()
+                };
+            }
+            "provider" => self.provider = serde_json::from_value(value).map_err(bad)?,
+            "commands" => self.commands = serde_json::from_value(value).map_err(bad)?,
+            "limits" => self.limits = serde_json::from_value(value).map_err(bad)?,
+            other => {
+                return Err(CoreError::Config(format!(
+                    "unknown config section `{other}` (expected general, provider, commands, or limits)"
+                )))
+            }
+        }
         Ok(())
     }
 
@@ -187,6 +281,55 @@ impl AppConfig {
             &self.provider.model,
             &api_key,
         ))
+    }
+}
+
+fn temp_sibling(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".into());
+    path.with_file_name(format!(".{name}.tmp-{}", std::process::id()))
+}
+
+/// Create (or truncate) `path` with owner-only permissions and write `data`.
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        // Windows will not rename over an existing file.
+        let _ = std::fs::remove_file(to);
+    }
+    std::fs::rename(from, to)
+}
+
+/// Best-effort chmod 0600 for files that may contain an API key.
+fn restrict_to_owner(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.permissions().mode() & 0o077 != 0 {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 
@@ -283,6 +426,177 @@ model = "llama3.1:8b"
         let cfg: AppConfig = toml::from_str(raw).unwrap();
         assert_eq!(cfg.provider.kind, ProviderKind::OpenAiCompatible);
         assert_eq!(cfg.commands.len(), builtin_commands().len());
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("selara-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn schema_version_defaults_to_one_and_is_written() {
+        let raw = r#"
+[provider]
+kind = "open_ai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+"#;
+        let cfg: AppConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.schema_version, 1);
+        let out = toml::to_string_pretty(&cfg).unwrap();
+        assert!(out.contains("schema_version = 1"), "{out}");
+    }
+
+    #[test]
+    fn a_newer_schema_version_is_rejected_and_the_file_is_left_alone() {
+        let dir = scratch_dir("newer-schema");
+        let path = dir.join("config.toml");
+        let raw = format!(
+            r#"schema_version = {}
+future_setting = "kept"
+
+[provider]
+kind = "open_ai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+"#,
+            CURRENT_SCHEMA_VERSION + 1
+        );
+        std::fs::write(&path, &raw).unwrap();
+        let err = AppConfig::load_or_init(&path).unwrap_err().to_string();
+        assert!(
+            err.contains(&(CURRENT_SCHEMA_VERSION + 1).to_string()) && err.contains("newer Selara"),
+            "error must name the version it cannot read: {err}"
+        );
+        // Loading must not have rewritten the file, so the newer release's
+        // fields are still there when it starts again.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_current_and_older_schema_versions_still_load() {
+        let dir = scratch_dir("current-schema");
+        let path = dir.join("config.toml");
+        for version in [1, CURRENT_SCHEMA_VERSION] {
+            let raw = format!(
+                r#"schema_version = {version}
+
+[provider]
+kind = "open_ai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+"#
+            );
+            std::fs::write(&path, raw).unwrap();
+            let cfg = AppConfig::load_or_init(&path).unwrap();
+            assert_eq!(cfg.schema_version, version);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_is_atomic_and_owner_only() {
+        let dir = scratch_dir("save");
+        let path = dir.join("config.toml");
+        AppConfig::default().save(&path).unwrap();
+        // Overwrite once more so the rename-over-existing path runs too.
+        let mut cfg = AppConfig::load_or_init(&path).unwrap();
+        cfg.language = "fr".into();
+        cfg.save(&path).unwrap();
+
+        let entries: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries,
+            vec!["config.toml"],
+            "no temp file may be left behind"
+        );
+        assert_eq!(AppConfig::load_or_init(&path).unwrap().language, "fr");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "config must be owner-only, got {mode:o}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_tightens_permissions_of_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("perm");
+        let path = dir.join("config.toml");
+        let raw = toml::to_string_pretty(&AppConfig::default()).unwrap();
+        std::fs::write(&path, raw).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        AppConfig::load_or_init(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_section_replaces_only_that_section() {
+        let mut cfg = AppConfig::default();
+        cfg.limits.hard_max_chars = 42; // pretend `serve` changed this on disk
+
+        cfg.apply_section(
+            "general",
+            serde_json::json!({"hotkey": " option+space ", "undo_hotkey": null, "language": ""}),
+        )
+        .unwrap();
+        assert_eq!(cfg.hotkey, "option+space");
+        assert_eq!(cfg.undo_hotkey, None);
+        assert_eq!(cfg.language, "en", "blank language falls back to default");
+        assert_eq!(cfg.limits.hard_max_chars, 42, "other sections untouched");
+
+        cfg.apply_section(
+            "general",
+            serde_json::json!({"hotkey": "", "undo_hotkey": "ctrl+shift+z", "language": "es"}),
+        )
+        .unwrap();
+        assert_eq!(cfg.hotkey, "ctrl+shift+space", "blank hotkey falls back");
+        assert_eq!(cfg.undo_hotkey.as_deref(), Some("ctrl+shift+z"));
+
+        cfg.apply_section(
+            "provider",
+            serde_json::json!({"kind": "anthropic", "base_url": "", "model": "claude-opus-5", "api_key": null, "auth": "api_key"}),
+        )
+        .unwrap();
+        assert_eq!(cfg.provider.kind, ProviderKind::Anthropic);
+        assert_eq!(cfg.provider.model, "claude-opus-5");
+
+        cfg.apply_section(
+            "commands",
+            serde_json::json!([{"id": "x", "label": "X", "kind": "popup", "prompt": "Do X."}]),
+        )
+        .unwrap();
+        assert_eq!(cfg.commands.len(), 1);
+        assert_eq!(cfg.commands[0].id, "x");
+
+        cfg.apply_section(
+            "limits",
+            serde_json::json!({"soft_warn_chars": 1, "hard_max_chars": 2, "replace_warn_chars": 3}),
+        )
+        .unwrap();
+        assert_eq!(cfg.limits.hard_max_chars, 2);
+        assert_eq!(cfg.limits.replace_warn_chars, 3);
+
+        let err = cfg
+            .apply_section("nope", serde_json::json!({}))
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown config section"), "{err}");
+        let err = cfg
+            .apply_section("limits", serde_json::json!({"soft_warn_chars": "many"}))
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid `limits`"), "{err}");
     }
 
     #[test]
