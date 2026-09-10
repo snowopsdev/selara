@@ -42,7 +42,9 @@ reads and replaces selected text.
   Exclude concurrent installation and supervisor transitions, verify downloads
   before pausing work, and retain a verified persistent backup for handled
   restoration failures. Frontend permissions cannot directly spawn sidecars or
-  bypass the custom updater transaction.
+  bypass the custom updater transaction. Complete the transaction and release
+  supervisor locks before requesting a Tauri restart, whose shutdown handlers
+  need those same locks; maintenance continues to prevent new work until exit.
 - Require Apple signing/notarization and the persistent updater key in production;
   fail before compilation when credentials are missing or invalid. Keep local
   builds usable and CI updater keys separate. Verify release contents before
@@ -78,6 +80,19 @@ owner), replacement and restoration failures, and a successful
 transition between two distinct ad hoc signed miniature macOS app bundles.
 These are fixture transitions, not the required final production update.
 
+A separate native smoke test built two complete Selara apps with temporary
+version overrides (0.4.1 and 0.4.2), a test updater key, and ad hoc Apple
+signatures. It used a loopback feed and an isolated home and installation under
+`/private/tmp`. Selecting **Install and restart** exited the old desktop and
+managed worker; the replacement desktop launched within eight seconds and
+Settings showed v0.4.2, Up to date, and a new managed worker. No automation
+relaunched the app during that transition. This exercises the actual Tauri
+shutdown path and guards against restart deadlocks; it does not verify
+Developer ID signing, notarization, or Gatekeeper acceptance. Repository version
+files and the user's installed app were unchanged.
+
+![Successful update between isolated test builds](screenshots/macos-repair/update-transition.png)
+
 Authentication tests exercise synthetic homes containing instructions, hooks,
 notifications, MCP configuration, managed restrictions, and file/keyring storage.
 They cover stale refreshes, login/logout races, delayed callbacks, and cancelled
@@ -104,6 +119,11 @@ fixed and re-reviewed; the final review reported no remaining actionable issues.
   Accessibility status was Missing, and it reset to Unknown after stopping.
   The current public release's missing update feed displayed Check failed with
   Retry and a GitHub DMG fallback, rather than claiming the app was up to date.
+- The packaged worker passed protocol readiness, quiescence, status, resume,
+  and clean shutdown checks with a minimal environment. Launched by the trusted
+  test host it reported Accessibility as Granted, while the app-managed worker
+  reported Missing. This does not establish permission for the app-managed
+  selection process; that live verification remains required.
 - No persistent extra picker window was observed during these Settings launches
   and restarts. Frame-by-frame cold-launch behavior and a complete interactive
   picker cycle are not established by this observation; see the remaining gate.

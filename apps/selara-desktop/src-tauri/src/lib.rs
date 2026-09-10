@@ -1289,9 +1289,7 @@ async fn install_pending_update(app: &AppHandle) -> Result<(), String> {
             },
         );
         match backup.install_archive(&version, &bytes) {
-            Ok(()) => {
-                handle.restart();
-            }
+            Ok(()) => Ok(()),
             Err(failure) => {
                 if failure.restored && was_running && desired {
                     if let Err(error) = start_serve_locked(&handle, &sup) {
@@ -1306,7 +1304,12 @@ async fn install_pending_update(app: &AppHandle) -> Result<(), String> {
         }
     })
     .await
-    .map_err(|e| format!("Update installation task failed: {e}"))?
+    .map_err(|e| format!("Update installation task failed: {e}"))??;
+    // Tauri waits for ExitRequested/Exit when restarting off the main thread.
+    // Those handlers stop the supervisor, so the blocking transaction must
+    // return and release its transition and installation locks first. The
+    // outer maintenance guard still prevents new work until this process exits.
+    app.restart();
 }
 
 /// Startup + every 24 h: check in the background; `apply_update_status`
