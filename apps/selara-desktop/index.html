@@ -591,8 +591,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
   // @selara-helpers-end
   const statusEl = () => $("#save-status");
-  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*)$/;
-  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Will start at login|Will not start at login)$/;
+  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*|Will start at login|Will not start at login)$/;
   const BAD_STATUS = /error|failed|required|before saving|not available|could not|enoent/i;
   function setStatus(msg) {
     const text = msg || "";
