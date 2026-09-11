@@ -117,6 +117,7 @@ test("resolves CLI, target cwd, overlay args, and propagates child status", asyn
   let invocation;
   const result = await runBuild(directory, {
     environment: {},
+    notarize() { assert.fail("A failed Tauri build must not submit a DMG"); },
     spawnProcess(...args) {
       invocation = args;
       const child = {
@@ -131,6 +132,33 @@ test("resolves CLI, target cwd, overlay args, and propagates child status", asyn
   assert.equal(result.code, 17);
   assert.equal(invocation[2].cwd, directory);
   assert.equal(invocation[0], process.execPath);
+});
+
+test("a successful Tauri build awaits DMG finalization and propagates its failure", async (t) => {
+  const directory = await desktopFixture();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let childClosed = false;
+  let finalizationCalls = 0;
+  await assert.rejects(runBuild(directory, {
+    environment: { APPLE_ID: "", APPLE_PASSWORD: "", APPLE_TEAM_ID: "" },
+    spawnProcess() {
+      const child = {
+        once(event, callback) {
+          if (event === "close") queueMicrotask(() => { childClosed = true; callback(0, null); });
+          return child;
+        },
+      };
+      return child;
+    },
+    notarize(root, environment) {
+      finalizationCalls++;
+      assert(childClosed);
+      assert.equal(root, join(directory, "../.."));
+      assert.equal(environment.APPLE_ID, undefined);
+      throw new Error("Synthetic DMG ticket validation failure");
+    },
+  }), /Synthetic DMG ticket validation failure/);
+  assert.equal(finalizationCalls, 1);
 });
 
 test("omits empty Apple variables at a real child process boundary", async (t) => {
