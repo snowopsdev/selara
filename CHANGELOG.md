@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/snowopsdev/selara/compare/v0.4.1...v0.5.0) (2026-09-11)
+
+
+### Features
+
+* **desktop:** Apply quotation branding ([#104](https://github.com/snowopsdev/selara/issues/104)) ([1afd8a9](https://github.com/snowopsdev/selara/commit/1afd8a9ddd7a530e3e17d1ad3a2dad1066ec011c))
+
+
+### Bug fixes
+
+* **macos:** Repair shared login, picker startup, and updates ([#102](https://github.com/snowopsdev/selara/issues/102)) ([79a7638](https://github.com/snowopsdev/selara/commit/79a76381cc85e91c5dfae6c863936de278811bc4))
+* **signing:** Make temporary signing identities discoverable ([#105](https://github.com/snowopsdev/selara/issues/105)) ([e9aa643](https://github.com/snowopsdev/selara/commit/e9aa6436425f0803a06358c468f7f82ba15fb430))
+
 ## [0.4.1](https://github.com/snowopsdev/selara/compare/v0.4.0...v0.4.1) (2026-09-10)
 
 
