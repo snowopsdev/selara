@@ -10,6 +10,7 @@ import { configuration } from "./build-desktop.mjs";
 import { assetNames, checkSourceVersion, githubClient, readChecksum, sha256 } from "./desktop-release.mjs";
 import { preflightUpdaterKey } from "./updater-artifacts.mjs";
 import { validateAppleCredentials } from "./apple-signing.mjs";
+import { createSigningKeychain, deleteSigningKeychain, registerSigningKeychain } from "./keychain-search-list.mjs";
 
 const root = resolve(process.argv[3] || ".");
 const tag = process.argv[2];
@@ -45,17 +46,16 @@ if (present.has(cli)) {
   const keychain = join(temp, "signing.keychain-db");
   const certificate = join(temp, "certificate.p12");
   const password = randomBytes(32).toString("hex");
-  const searchList = [...run("security", ["list-keychains", "-d", "user"]).matchAll(/"([^"]+)"/g)].map(m => m[1]);
   try {
     writeFileSync(certificate, Buffer.from(settings.environment.APPLE_CERTIFICATE, "base64"), { mode: 0o600 });
     // Suppress command exception details because security arguments contain passwords.
     try {
-      run("security", ["create-keychain", "-p", password, keychain]);
+      createSigningKeychain(keychain, password);
       run("security", ["set-keychain-settings", "-lut", "21600", keychain]);
       run("security", ["unlock-keychain", "-p", password, keychain]);
       run("security", ["import", certificate, "-k", keychain, "-P", settings.environment.APPLE_CERTIFICATE_PASSWORD, "-T", "/usr/bin/codesign"]);
       run("security", ["set-key-partition-list", "-S", "apple-tool:,apple:,codesign:", "-s", "-k", password, keychain]);
-      run("security", ["list-keychains", "-d", "user", "-s", keychain, ...searchList]);
+      registerSigningKeychain(keychain);
       const identities = run("security", ["find-identity", "-v", "-p", "codesigning", keychain]);
       if (!identities.includes(`"${settings.environment.APPLE_SIGNING_IDENTITY}"`)) throw new Error("missing identity");
     } catch { throw new Error("Apple signing preflight failed; check the certificate, private key, and identity"); }
@@ -78,7 +78,7 @@ if (present.has(cli)) {
     const published = client.download(tag, cli, join(output, "verified"));
     if (sha256(published) !== sha256(archive)) throw new Error("Published CLI archive changed");
   } finally {
-    try { run("security", ["list-keychains", "-d", "user", "-s", ...searchList]); }
-    finally { try { run("security", ["delete-keychain", keychain]); } catch {} rmSync(temp, { recursive: true, force: true }); }
+    try { deleteSigningKeychain(keychain); } catch { /* May not have been created. */ }
+    rmSync(temp, { recursive: true, force: true });
   }
 }
