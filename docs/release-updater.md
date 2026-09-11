@@ -44,7 +44,11 @@ membership is required; pending membership cannot sign or notarize releases.
 Release-please owns versions and tags. The release workflow publishes the
 complete native CLI archive, then calls `.github/workflows/desktop-release.yml`.
 The CLI and app include the pinned writing runtime, license, notices, and build
-provenance. Tauri signs nested binaries before the enclosing app; release checks
+provenance. Tauri signs nested binaries and notarizes/staples the enclosing app.
+After Tauri builds the signed DMG, the build helper submits that disk image to
+Apple separately, requires an Accepted result, then staples and validates its
+ticket before checksums or publication. Notarization waits up to 30 minutes;
+a timeout or rejected submission stops publication. Release checks
 verify the signing team, bundle signatures, stapled app/DMG tickets, Gatekeeper,
 and DMG integrity. Only verified notarization removes the Homebrew caveat.
 

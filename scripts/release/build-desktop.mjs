@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { preflightUpdaterKey, UPDATER_PLACEHOLDER } from "./updater-artifacts.mjs";
 import { validateAppleCredentials } from "./apple-signing.mjs";
+import { notarizeDmg } from "./notarize-dmg.mjs";
 
 const helperRoot = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const supportedEnvironment = [
@@ -117,7 +118,7 @@ export function buildArguments(desktopDirectory, environment = process.env) {
   };
 }
 
-export function runBuild(desktopDirectory, { environment = process.env, spawnProcess = spawn } = {}) {
+export function runBuild(desktopDirectory, { environment = process.env, spawnProcess = spawn, notarize = notarizeDmg } = {}) {
   const build = buildArguments(desktopDirectory, environment);
   // Fail before compilation if the private key/password does not sign for the
   // public key that will be embedded in this exact build.
@@ -131,6 +132,9 @@ export function runBuild(desktopDirectory, { environment = process.env, spawnPro
     });
     child.once("error", reject);
     child.once("close", (code, signal) => resolvePromise({ code: code ?? 1, signal, build }));
+  }).then(result => {
+    if (result.code === 0 && !result.signal) notarize(resolve(build.cwd, "../.."), build.env);
+    return result;
   });
 }
 
