@@ -43,9 +43,11 @@ test("macOS preflight signs with an isolated keychain and preserves existing key
     "[dn]", `CN=${identity}`, "[ext]", "basicConstraints=critical,CA:FALSE",
     "keyUsage=critical,digitalSignature", "extendedKeyUsage=codeSigning", "",
   ].join("\n"), { mode: 0o600 });
-  run("openssl", ["req", "-new", "-x509", "-newkey", "rsa:2048", "-nodes",
+  // Use macOS's bundled tool: Homebrew OpenSSL 3 defaults produce a PKCS#12
+  // fixture that security import rejects with a misleading password error.
+  run("/usr/bin/openssl", ["req", "-new", "-x509", "-newkey", "rsa:2048", "-nodes",
     "-sha256", "-days", "1", "-config", config, "-keyout", key, "-out", certificate]);
-  run("openssl", ["pkcs12", "-export", "-inkey", key, "-in", certificate,
+  run("/usr/bin/openssl", ["pkcs12", "-export", "-inkey", key, "-in", certificate,
     "-out", exported, "-passout", "stdin"], { input: `${password}\n` });
 
   // Exercise real keychain import, key access, signing, and verification. Only
