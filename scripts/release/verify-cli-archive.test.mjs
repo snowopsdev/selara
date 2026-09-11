@@ -23,7 +23,11 @@ function fixture(t, missing) {
   const run=(program,args)=>{
     calls.push(program);
     if(program==='python3')return execFileSync(program,args,{encoding:'utf8',stdio:'pipe'});
-    if(program==='codesign')return '';
+    if(program==='codesign') {
+      const index=args.indexOf('-R');
+      if(index!==-1) assert.match(args[index+1], /^=anchor apple generic and certificate leaf\[subject\.OU\] = "0123456789"/);
+      return '';
+    }
     if(basename(program)==='selara')return 'selara 0.4.1';
     if(basename(program)==='selara-codex')return 'selara-codex 0.153.4';
     throw new Error('Unexpected verification command');
@@ -48,4 +52,9 @@ test('wrong version, provenance, or code signature rejects a recovered CLI',t=>{
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',(p,a)=>{if(p==='codesign')throw Error('invalid signature');return f.run(p,a);}),/invalid signature/);
  f.provenance.patches_sha256='wrong';writeFileSync(join(f.content,'selara-codex.provenance.json'),JSON.stringify(f.provenance));f.pack();
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run),/provenance mismatch/);
+});
+test('missing expected team rejects recovered CLI before extraction or execution',t=>{
+ const f=fixture(t);
+ for(const teamId of ['',undefined,'0123456789\n']) assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1',teamId,f.run),/APPLE_TEAM_ID/);
+ assert.deepEqual(f.calls,[]);
 });

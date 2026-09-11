@@ -125,6 +125,7 @@ jobs:
 
       - name: Verify DMG and prepare signed updater assets
         env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: node tooling/scripts/release/desktop-release.mjs stage "$TAG" source artifacts

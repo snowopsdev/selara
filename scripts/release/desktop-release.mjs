@@ -6,6 +6,7 @@ import { appendFileSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtemp
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { developerIdRequirement } from "./apple-signature.mjs";
 import { signUpdaterArtifact, updaterManifest, verifyUpdaterSignature, UPDATER_PLACEHOLDER } from "./updater-artifacts.mjs";
 
 export function versionFromTag(tag) {
@@ -134,7 +135,17 @@ function bundleDigest(directory) {
   return hash.digest("hex");
 }
 
-export function archivePublishedApp(dmg, archive, version, run = command) {
+function verifyReleaseApp(app, requirement, run) {
+  run("codesign", ["--verify", "--deep", "--strict", "-R", requirement, app]);
+  // The enclosing signature does not establish the identity of each sidecar.
+  for (const binary of ["selara-desktop", "selara", "selara-codex"]) {
+    run("codesign", ["--verify", "--strict", "-R", requirement, join(app, "Contents/MacOS", binary)]);
+  }
+  run("xcrun", ["stapler", "validate", app]);
+}
+
+export function archivePublishedApp(dmg, archive, version, run = command, teamId = process.env.APPLE_TEAM_ID) {
+  const requirement = developerIdRequirement(teamId);
   const root = mkdtempSync(join(tmpdir(), "selara-updater-app-"));
   const mount = join(root, "mount");
   mkdirSync(mount);
@@ -143,8 +154,7 @@ export function archivePublishedApp(dmg, archive, version, run = command) {
     run("hdiutil", ["attach", "-readonly", "-nobrowse", "-mountpoint", mount, dmg]);
     attached = true;
     const app = join(mount, "Selara.app");
-    run("codesign", ["--verify", "--deep", "--strict", app]);
-    run("xcrun", ["stapler", "validate", app]);
+    verifyReleaseApp(app, requirement, run);
     const actual = run("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleShortVersionString", join(app, "Contents/Info.plist")]).trim();
     if (actual !== version) throw new Error("Published DMG application version does not match release");
     const identifier = run("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleIdentifier", join(app, "Contents/Info.plist")]).trim();
@@ -158,8 +168,7 @@ export function archivePublishedApp(dmg, archive, version, run = command) {
     mkdirSync(extracted);
     run("python3", [fileURLToPath(new URL("./extract-archive.py", import.meta.url)), archive, extracted, "Selara.app"]);
     const recovered = join(extracted, "Selara.app");
-    run("codesign", ["--verify", "--deep", "--strict", recovered]);
-    run("xcrun", ["stapler", "validate", recovered]);
+    verifyReleaseApp(recovered, requirement, run);
     if (bundleDigest(app) !== bundleDigest(recovered)) throw new Error("Updater archive does not match the verified published DMG; refusing to sign or publish it");
   } finally {
     if (attached) run("hdiutil", ["detach", mount]);
@@ -169,8 +178,9 @@ export function archivePublishedApp(dmg, archive, version, run = command) {
 
 export function stageRelease(tag, source, output, run = command, notarized = (path) => {
   return spawnSync("xcrun", ["stapler", "validate", path], { stdio: "ignore" }).status === 0;
-}, { prepareArchive = archivePublishedApp, sign = signUpdaterArtifact } = {}) {
+}, { prepareArchive = archivePublishedApp, sign = signUpdaterArtifact, teamId = process.env.APPLE_TEAM_ID } = {}) {
   const plan = releasePlan(output);
+  if (plan.updater) developerIdRequirement(teamId);
   const names = assetNames(tag, plan.updater);
   const dmg = join(output, names.dmg);
   if (!existsSync(dmg)) {
@@ -192,7 +202,7 @@ export function stageRelease(tag, source, output, run = command, notarized = (pa
   copyFileSync(join(output, "homebrew/Formula/selara.rb"), join(output, "selara-formula.rb"));
   if (plan.updater) {
     const archive = join(output, names.archive);
-    prepareArchive(dmg, archive, versionFromTag(tag), run);
+    prepareArchive(dmg, archive, versionFromTag(tag), run, teamId);
     if (!existsSync(`${archive}.sig`)) sign(join(source, "apps/selara-desktop/node_modules/@tauri-apps/cli/tauri.js"), archive);
     const signature = readFileSync(`${archive}.sig`, "utf8").trim();
     verifyUpdaterSignature(readFileSync(archive), signature, plan.pubkey);

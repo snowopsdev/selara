@@ -62,7 +62,7 @@ function fixture(t) {
     stageRelease(tag, source, output, (binary, args) => {
       if (binary === "hdiutil") { assert.deepEqual(args, ["verify", join(output, names.dmg)]); return; }
       execFileSync(binary, args, { stdio: "pipe" });
-    }, () => notarized, { prepareArchive: () => {}, ...options });
+    }, () => notarized, { prepareArchive: () => {}, teamId: "", ...options });
   };
   const builtDmg = () => file(join(source, "target/release/bundle/dmg/Selara.dmg"), "newly built DMG bytes");
   return { root, source, output, client, remote, uploads, file, stage, builtDmg };
@@ -200,7 +200,7 @@ function updaterFixture(t) {
   f.remote.set(names.dmg, Buffer.from("verified published DMG"));
   f.remote.set(names.archive, bytes);
   f.remote.set(`${names.archive}.sig`, Buffer.from(keys.signature));
-  return {...f, names, bytes, keys};
+  return {...f, names, bytes, keys, stage: (notarized, options = {}) => f.stage(notarized, {teamId: "SELARATEAM", ...options})};
 }
 
 test("updater recovery reuses signed payload, verifies nine assets, and publishes manifest last", t => {

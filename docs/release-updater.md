@@ -66,10 +66,14 @@ reuse validates versions, required files, Developer ID signatures, and runtime
 provenance before reusing or generating a checksum. Desktop recovery validates
 release/tag history, matching application versions, and the published CLI pair.
 It checks out app source from the selected tag and release tools from the workflow
-commit. Every recovered updater archive is extracted safely and compared with
-the verified published DMG before signing, including archive-present/signature-
-missing cases. Missing archives are derived from that exact app. macOS metadata
-sidecars are excluded from archives. Conflicting assets fail without overwrites.
+commit. Updater-enabled recovery requires `APPLE_TEAM_ID` even when it skips the
+build. Before updater signing, both the DMG app and the safely extracted updater
+app must satisfy an Apple-anchored Developer ID requirement for that expected
+team, including all three bundled executables. A valid signature or notarization
+from another team is insufficient. Every recovered archive is also compared with
+the verified published DMG, including archive-present/signature-missing cases.
+Missing archives are derived from that exact app. macOS metadata sidecars are
+excluded from archives. Conflicting assets fail without overwrites.
 
 Run recovery from `main`, for example:
 
