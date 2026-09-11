@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/snowopsdev/selara/compare/v0.5.0...v0.5.1) (2026-09-11)
+
+
+### Bug fixes
+
+* **release:** Notarize the DMG before publishing ([#106](https://github.com/snowopsdev/selara/issues/106)) ([d5e6349](https://github.com/snowopsdev/selara/commit/d5e63490d837415f25ce6f6d02ae9499ad6b534a))
+
 ## [0.5.0](https://github.com/snowopsdev/selara/compare/v0.4.1...v0.5.0) (2026-09-11)
 
 
