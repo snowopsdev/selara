@@ -71,11 +71,22 @@ input, textarea, select { user-select: text; -webkit-user-select: text; }
   border-right: 1px solid var(--hairline);
 }
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-weight: 600;
   font-size: 12px;
   color: var(--muted);
   padding: 0 10px 10px;
   letter-spacing: 0.01em;
+}
+.brand-mark {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  background-color: var(--text);
+  -webkit-mask: url("./assets/quotation-mark.png") center / contain no-repeat;
+  mask: url("./assets/quotation-mark.png") center / contain no-repeat;
 }
 .nav-item {
   display: flex; align-items: center; gap: 9px;
@@ -531,7 +542,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
 <body>
   <div id="app">
     <aside class="nav" data-tauri-drag-region>
-      <div class="brand" data-tauri-drag-region>Selara</div>
+      <div class="brand" data-tauri-drag-region>
+        <span class="brand-mark" aria-hidden="true" data-tauri-drag-region></span>
+        Selara
+      </div>
       <button class="nav-item active" data-section="status">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 8.5h2.6l1.6-4.2 2.6 8 1.8-5.6 1 1.8h3.4"/></svg>
         Status
