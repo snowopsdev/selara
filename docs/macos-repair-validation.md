@@ -59,10 +59,10 @@ Commands run with Rust 1.95.0 where applicable:
 | --- | --- |
 | `cargo fmt --all -- --check` | Passed |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
-| `cargo test --workspace` | Passed: 262 tests; two intentionally ignored core tests (native handshake separately exercised) |
+| `cargo test --workspace` | Passed: 266 tests; two intentionally ignored core tests (native handshake separately exercised) |
 | `cargo test -p selara-desktop legacy_login_item -- --nocapture` | Passed with the actual autostart plugin in a subprocess with an isolated home; independently rerun by reviewer |
 | `cargo test -p selara-core native_runtime_handshake -- --ignored` | Passed against the actual packaged runtime build |
-| `npm --prefix apps/selara-desktop test` | 28 passed, including 10 DOM tests |
+| `npm --prefix apps/selara-desktop test` | 36 passed, including 18 DOM tests |
 | `npm --prefix apps/selara-desktop run build` | Passed; committed dist regenerated |
 | `node --test scripts/release/*.test.mjs` | 30 passed |
 | `python3 scripts/codex-runtime/test-build.py -v` | Five source-cache recovery tests passed; pruned or changed inputs are reconstructed from the verified archive and patches |
@@ -103,6 +103,50 @@ text generation were separately checked using the existing account.
 Independent review covered runtime isolation, shared authentication, process
 coordination, update restoration, and partial release recovery. Findings were
 fixed and re-reviewed; the final review reported no remaining actionable issues.
+
+PR review also identified an updater preflight ordering issue: an externally
+started worker blocked installation only after a full backup had been copied.
+An isolated native reproduction confirmed that one blocked attempt created a
+backup. After moving the external-worker check ahead of backup preparation,
+two actual **Install and restart** attempts created no backup directories or
+installation locks, kept the external worker running, and left the installed
+version unchanged. Backup preparation still occurs before managed work is
+quiesced or stopped, under the same supervisor transition lock.
+
+The review's Settings fixes gate edits until persisted configuration loads and
+keep endpoint, model, and key drafts separate for each provider kind. A native
+packaged-app check with an isolated home confirmed that switching from OpenAI
+to Anthropic clears the key/model fields and selects `https://api.anthropic.com`;
+switching back restores the unsaved OpenAI model. No provider configuration was
+saved during this check. Deferred-save tests also verify that a completed
+keychain/config write cannot erase a newer provider draft, overlapping saves
+are serialized, and a slow account refresh does not block the next save.
+
+![Anthropic defaults after switching from OpenAI](screenshots/macos-repair/provider-switch.jpg)
+
+The same isolated-home check found a first-use authentication failure: Selara
+passed an explicit `CODEX_HOME` before creating it, and Codex rejected the
+missing directory before initialization. The client now creates missing account
+directories privately, preserves existing contents and permissions, and reports
+unusable paths before launching Codex. The actual packaged runtime passed a
+client handshake and signed-out account lookup starting with an absent home.
+The rebuilt Settings app also showed **Signed out** with its sign-in action
+available. The user then completed browser sign-in and saved a selected model
+in that isolated test app; Settings showed the connected account. That session
+was left open and its credentials were preserved.
+
+![Browser sign-in from a fresh Codex home](screenshots/macos-repair/fresh-home-signin.jpg)
+
+Closing the native fixture also exposed a shutdown lock cycle. A macOS thread
+sample showed the main thread waiting for the supervisor lifecycle lock while
+the worker held that lock and waited for a tray menu update on the main thread.
+Supervisor notifications now queue UI updates without waiting and read current
+state when dispatched. Independent review checked this against Tauri's actual
+event dispatch behavior and also verified the account-directory initialization.
+Two native **Quit** attempts with managed workers then exited with status zero;
+both app processes and their workers were gone afterward. This used a separately
+named, ad hoc signed fixture containing the final desktop binary, so the user's
+active sign-in session stayed open.
 
 ## Native packaged-app observations
 
@@ -154,9 +198,10 @@ must not be distributed as the production release.
    picker invocation, filtering, focus return, selection replacement, undo,
    dismissal, hotkeys, and cold launch. This machine reported Missing for the
    validation worker; a complete live replacement cycle was not verified.
-4. Validate browser OAuth completion, cancellation, and shared-account logout in
-   a dedicated live test account. The existing user's account was read and used
-   for the sample rewrite, not logged out or replaced for testing.
+4. Browser OAuth completion passed in the user-operated isolated-home test.
+   Validate cancellation and shared-account logout in a dedicated live test
+   account. The existing user's shared account was not logged out or replaced
+   for testing.
 5. Run two distinct full production-signed/notarized builds through an isolated
    feed. Verify actual installation/relaunch, busy work, prevention of late
    replacement, interruption, and recovery behavior. Fixture coverage alone
