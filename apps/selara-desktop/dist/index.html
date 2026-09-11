@@ -592,11 +592,18 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       limits: { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000, secret_guard: true },
     };
   }
-  // Renderable defaults keep the Settings form usable while the native bridge
+  // Renderable defaults keep the Settings form usable while native calls
   // is still loading. These drafts are intentionally separate from config:
   // an async status/model response must never overwrite an in-progress edit.
   let config = defaultConfig();
+  let configLoadState = "loading";
+  let configLoadError = "";
   let providerDraft = null;
+  // A provider switch is a local form operation. Keep each kind's unsaved
+  // endpoint/model/key together so switching to another provider cannot carry
+  // OpenAI values into (for example) Anthropic, while an account refresh still
+  // uses the current draft unchanged.
+  let providerDraftsByKind = Object.create(null);
   let generalDraft = null;
   let editingId = null;
   const $ = (sel) => document.querySelector(sel);
@@ -681,6 +688,22 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   const statusEl = () => $("#save-status");
   const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*|Will start at login|Will not start at login|Update available|Installing update…)$/;
   const BAD_STATUS = /error|failed|required|before saving|not available|could not|enoent/i;
+
+  function configIsReady() { return configLoadState === "ready"; }
+  function configEditAttr() { return configIsReady() ? "" : " disabled"; }
+  function configGateMarkup(id) {
+    if (configIsReady()) return "";
+    const failed = configLoadState === "failed";
+    const message = failed
+      ? "Saved settings could not be loaded. Editing is disabled until the Settings app is restarted." + (configLoadError ? " (" + configLoadError + ")" : "")
+      : "Loading your saved settings… Editing is disabled until loading finishes.";
+    return "<p class=\"field-hint config-gate" + (failed ? " error" : "") + "\" id=\"" + id + "\" role=\"status\">" + escapeHtml(message) + "</p>";
+  }
+  function ensureConfigReady() {
+    if (configIsReady()) return true;
+    setStatus(configLoadState === "failed" ? "Settings unavailable; cannot save" : "Still loading saved settings…");
+    return false;
+  }
 
   const AUTH_STATUS_LABELS = {
     checking: "Checking…",
@@ -820,6 +843,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     };
     wrap.querySelectorAll(".seg").forEach((b) => {
       b.onclick = () => {
+        if (sel.disabled) return;
         if (sel.value === b.dataset.value) return;
         sel.value = b.dataset.value;
         sync();
@@ -1327,49 +1351,52 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   function renderGeneral() {
     const s = $("#section-general");
     const g = generalDraft ? { ...config, ...generalDraft } : config;
+    const editAttr = configEditAttr();
     s.innerHTML =
       "<h1>General</h1>" +
       "<p class=\"lead\">Language and the global shortcut for the writing picker.</p>" +
+      configGateMarkup("general-config-gate") +
       "<div class=\"panel\">" +
       "<div class=\"section-label\">Language</div>" +
       "<div class=\"form-row\">" +
       "<label for=\"language\">Default language</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"language\" value=\"" + escapeAttr(g.language || "en") + "\" placeholder=\"en\" />" +
+      "<input id=\"language\"" + editAttr + " value=\"" + escapeAttr(g.language || "en") + "\" placeholder=\"en\" />" +
       "<p class=\"field-hint\">Preferred language for the model, for example en, es, or fr.</p>" +
       "</div></div>" +
       "<div class=\"section-label\">Shortcut</div>" +
       "<div class=\"form-row\">" +
       "<label for=\"hotkey\">Picker hotkey</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"hotkey\" value=\"" + escapeAttr(g.hotkey || "ctrl+shift+space") + "\" />" +
+      "<input id=\"hotkey\"" + editAttr + " value=\"" + escapeAttr(g.hotkey || "ctrl+shift+space") + "\" />" +
       "<p class=\"field-hint\">With selara serve running, changes apply within about a second.</p>" +
       "</div></div>" +
       "<div class=\"form-row\">" +
       "<label for=\"undo-hotkey\">Undo hotkey</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"undo-hotkey\" value=\"" + escapeAttr(g.undo_hotkey || "") + "\" placeholder=\"Optional, e.g. ctrl+shift+z\" autocomplete=\"off\" spellcheck=\"false\" />" +
+      "<input id=\"undo-hotkey\"" + editAttr + " value=\"" + escapeAttr(g.undo_hotkey || "") + "\" placeholder=\"Optional, e.g. ctrl+shift+z\" autocomplete=\"off\" spellcheck=\"false\" />" +
       "<p class=\"field-hint\">Puts back the text the last Replace overwrote. The picker also has an Undo button.</p>" +
       "</div></div>" +
       "<div class=\"section-label\">Excluded apps</div>" +
       "<div class=\"form-row\">" +
       "<label for=\"excluded-apps\">Ignore hotkeys in</label>" +
       "<div class=\"control-stack\">" +
-      "<textarea id=\"excluded-apps\" rows=\"4\" placeholder=\"1Password&#10;com.apple.Terminal&#10;com.googlecode.iterm2\" autocomplete=\"off\" spellcheck=\"false\">" + escapeHtml((g.excluded_apps || []).join("\n")) + "</textarea>" +
+      "<textarea id=\"excluded-apps\"" + editAttr + " rows=\"4\" placeholder=\"1Password&#10;com.apple.Terminal&#10;com.googlecode.iterm2\" autocomplete=\"off\" spellcheck=\"false\">" + escapeHtml((g.excluded_apps || []).join("\n")) + "</textarea>" +
       "<p class=\"field-hint\">One app per line, by name (1Password) or bundle id (com.apple.Terminal). End an entry with * to match a prefix, for example com.apple.* or iTerm*. In these apps the hotkeys do nothing: no picker, no selection or clipboard read.</p>" +
       "</div></div>" +
       "<div class=\"section-label\">Startup</div>" +
       "<div class=\"form-row\">" +
       "<label for=\"autostart\">Start at login</label>" +
       "<div class=\"control-stack\">" +
-      "<label class=\"check-row\" for=\"autostart\"><input type=\"checkbox\" id=\"autostart\" /> Start Selara in the background when you log in</label>" +
+      "<label class=\"check-row\" for=\"autostart\"><input type=\"checkbox\" id=\"autostart\"" + editAttr + " /> Start Selara in the background when you log in</label>" +
       "<p class=\"field-hint\" id=\"autostart-hint\">Applies immediately; no save needed.</p>" +
       "</div></div>" +
       "</div>" +
-      "<div class=\"general-save\"><button class=\"btn\" id=\"save-general\">Save changes</button></div>";
+      "<div class=\"general-save\"><button class=\"btn\" id=\"save-general\"" + editAttr + ">Save changes</button></div>";
     const autostart = $("#autostart");
     const generalView = { language: $("#language"), hotkey: $("#hotkey"), undo: $("#undo-hotkey"), excluded: $("#excluded-apps") };
     const captureGeneralDraft = () => {
+      if (!configIsReady()) return generalDraft;
       generalDraft = {
         language: generalView.language.value,
         hotkey: generalView.hotkey.value,
@@ -1389,6 +1416,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       if (hint) hint.textContent = "Start at login is unavailable: " + String(e);
     });
     autostart.onchange = async () => {
+      if (!ensureConfigReady()) return;
       try {
         await invoke(autostart.checked ? "plugin:autostart|enable" : "plugin:autostart|disable");
         setStatus(autostart.checked ? "Will start at login" : "Will not start at login");
@@ -1398,6 +1426,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       }
     };
     $("#save-general").onclick = async () => {
+      if (!ensureConfigReady()) return;
       const saved = await saveSection("general", {
         language: $("#language").value.trim() || "en",
         hotkey: $("#hotkey").value.trim() || "ctrl+shift+space",
@@ -1421,6 +1450,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   let byokModelsRequestId = 0;
   let modelsViewGeneration = 0;
   let keySourceRequestId = 0;
+  let providerSavePending = false;
+  let chatgptModelsLoading = null;
 
   const EMAIL_VISIBLE_KEY = "wt.chatgpt.emailVisible";
   function isEmailVisible() {
@@ -1464,6 +1495,31 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   function providerDraftValue(p, key, fallback) {
     return p[key] === undefined || p[key] === null ? fallback : p[key];
   }
+  function providerKindSeed(kind, codexHome) {
+    const meta = providerMeta(kind);
+    return {
+      kind,
+      auth: "api_key",
+      model: "",
+      byok_model: "",
+      chatgpt_model: "",
+      base_url: kind === "open_ai_compatible" ? "" : meta.baseUrl,
+      api_key: null,
+      codex_home: codexHome || null,
+    };
+  }
+  function rememberProviderDraft(draft) {
+    if (!draft || !draft.kind) return;
+    providerDraftsByKind[draft.kind] = { ...draft };
+  }
+  function providerDraftForKind(kind, codexHome) {
+    if (Object.prototype.hasOwnProperty.call(providerDraftsByKind, kind)) {
+      return { ...providerDraftsByKind[kind], kind };
+    }
+    const saved = config.provider || {};
+    if ((saved.kind || "open_ai_compatible") === kind) return { ...saved, kind };
+    return providerKindSeed(kind, codexHome || saved.codex_home);
+  }
   function currentProviderDraft() {
     const saved = config.provider || {};
     const draft = providerDraft || saved;
@@ -1491,9 +1547,35 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       codex_home: home ? home.value : providerDraftValue(draft, "codex_home", null),
     };
   }
+  function providerDraftSnapshot(draft) {
+    const p = draft || {};
+    return {
+      kind: p.kind || "open_ai_compatible",
+      auth: p.auth || "api_key",
+      model: String(p.model || "").trim(),
+      byok_model: String(p.byok_model || "").trim(),
+      chatgpt_model: String(p.chatgpt_model || "").trim(),
+      base_url: String(p.base_url || "").trim(),
+      codex_home: String(p.codex_home || "").trim(),
+      api_key: String(p.api_key || "").trim(),
+    };
+  }
+  function providerDraftMatches(left, right, keychainStored) {
+    // A save may finish after the user switches providers or edits a field.
+    // Only clear the submitted provider draft when its current values still
+    // describe that save; other provider drafts stay untouched.
+    const a = providerDraftSnapshot(left);
+    const b = providerDraftSnapshot(right);
+    return a.kind === b.kind && a.auth === b.auth && a.model === b.model &&
+      a.byok_model === b.byok_model && a.chatgpt_model === b.chatgpt_model &&
+      a.base_url === b.base_url && a.codex_home === b.codex_home &&
+      (keychainStored ? a.api_key === "" : a.api_key === b.api_key);
+  }
   function captureProviderDraft() {
+    if (!configIsReady()) return providerDraft;
     if (!$("#provider-kind") || !$("#provider-auth")) return providerDraft;
     providerDraft = currentProviderDraft();
+    rememberProviderDraft(providerDraft);
     return providerDraft;
   }
 
@@ -1522,6 +1604,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const viewGeneration = modelsViewGeneration;
     const originalSelection = sel.value.trim() || String(preferred || "").trim();
     const expectedHint = hint;
+    chatgptModelsLoading = { requestId, viewGeneration, element: sel };
     sel.disabled = true;
     if (hint) hint.textContent = "Contacting the shared Codex account…";
     setStatus("Loading Codex models…");
@@ -1545,8 +1628,11 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       if (expectedHint === $("#chatgpt-models-hint")) expectedHint.textContent = "Could not load models: " + String(e);
       setStatus(String(e));
     } finally {
-      if (requestId === chatgptModelsRequestId && viewGeneration === modelsViewGeneration && $("#model-select") === sel && sel.isConnected) {
-        sel.disabled = !isChatgptConnected(chatgptStatus) || $("#provider-auth").value !== "chatgpt";
+      if (requestId === chatgptModelsRequestId) {
+        chatgptModelsLoading = null;
+        if (viewGeneration === modelsViewGeneration && $("#model-select") === sel && sel.isConnected) {
+          sel.disabled = !configIsReady() || !isChatgptConnected(chatgptStatus) || $("#provider-auth").value !== "chatgpt";
+        }
       }
     }
   }
@@ -1555,6 +1641,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const viewGeneration = ++modelsViewGeneration;
     const saved = config.provider || {};
     const p = providerDraft || saved;
+    const editAttr = configEditAttr();
+    const saveAttr = !configIsReady() || providerSavePending ? " disabled" : "";
     const auth = p.auth || "api_key";
     const byokModel = providerDraftValue(p, "byok_model", auth === "api_key" ? p.model || "" : "");
     const chatModel = providerDraftValue(p, "chatgpt_model", auth === "chatgpt" ? p.model || "" : "");
@@ -1576,7 +1664,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<dt>Logged in</dt><dd>" + (st.logged_in ? "Yes" : "No") + "</dd>" +
       "<dt>Via ChatGPT</dt><dd>" + (st.via_chatgpt ? "Yes" : "No") + "</dd>" +
       (st.plan ? "<dt>Plan</dt><dd>" + escapeHtml(st.plan) + "</dd>" : "") + "</dl>";
-    const modelSelectDisabled = !(auth === "chatgpt" && connected) || chatgptLoginPending || chatgptLogoutPending;
+    const modelSelectDisabled = !configIsReady() || !(auth === "chatgpt" && connected) || chatgptLoginPending || chatgptLogoutPending;
     const cachedModels = Array.isArray(chatgptModels) ? chatgptModels : [];
     const accountModelOptions = cachedModels.length
       ? modelOptionMarkup(cachedModels, chatModel, false)
@@ -1598,11 +1686,16 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<div class=\"form-row\" id=\"base-url-field\"><label for=\"base_url\">Base URL</label><div class=\"control-stack\"><input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" autocomplete=\"off\" spellcheck=\"false\"/><p class=\"field-hint\" id=\"base-url-hint\"></p></div></div>";
     const byokKey = "<div class=\"key-wrap\" id=\"byok-key-wrap\"><input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" placeholder=\"API key\" autocomplete=\"off\" aria-label=\"API key\"/><label class=\"check-row\" for=\"store-keychain\"><input type=\"checkbox\" id=\"store-keychain\" checked/> Store in the OS keychain instead of the Selara config file</label><p class=\"field-hint\" id=\"key-source-hint\"></p></div>";
     s.innerHTML =
-      "<h1>Models</h1><p class=\"lead\">Connect an API key, or use your ChatGPT subscription through Selara's bundled Codex runtime.</p><div class=\"panel\"><div class=\"section-label\">Provider</div><div class=\"form-row\"><label for=\"provider-kind\">Provider</label><select id=\"provider-kind\">" + Object.keys(PROVIDERS).map((k) => "<option value=\"" + k + "\">" + escapeHtml(PROVIDERS[k].label) + "</option>").join("") + "</select></div><div class=\"section-label-row\"><div class=\"section-label\">Authentication</div><span class=\"pill\" id=\"auth-experimental-pill\" style=\"display:none\">Experimental</span></div><div class=\"form-row\"><label for=\"provider-auth\" id=\"auth-row-label\">Auth mode</label><div class=\"control-stack\">" + segmentedHtml("provider-auth", [{ value: "api_key", label: "API key" }, { value: "chatgpt", label: "ChatGPT via Codex" }], auth) + "<p class=\"field-hint\" id=\"auth-hint\"></p></div></div><div id=\"chatgpt-fields\"><div class=\"section-label\">Account</div><div class=\"card account-card\" id=\"chatgpt-account\">" + accountInner + "</div></div><div id=\"byok-fields\"><div class=\"section-label\">Connection</div><div class=\"card\">" + byokKey + byokInner + "</div></div></div><div class=\"models-save\"><button type=\"button\" class=\"btn\" id=\"save-models\">Save changes</button></div>";
+      "<h1>Models</h1><p class=\"lead\">Connect an API key, or use your ChatGPT subscription through Selara's bundled Codex runtime.</p>" + configGateMarkup("models-config-gate") + "<div class=\"panel\"><div class=\"section-label\">Provider</div><div class=\"form-row\"><label for=\"provider-kind\">Provider</label><select id=\"provider-kind\"" + editAttr + ">" + Object.keys(PROVIDERS).map((k) => "<option value=\"" + k + "\">" + escapeHtml(PROVIDERS[k].label) + "</option>").join("") + "</select></div><div class=\"section-label-row\"><div class=\"section-label\">Authentication</div><span class=\"pill\" id=\"auth-experimental-pill\" style=\"display:none\">Experimental</span></div><div class=\"form-row\"><label for=\"provider-auth\" id=\"auth-row-label\">Auth mode</label><div class=\"control-stack\">" + segmentedHtml("provider-auth", [{ value: "api_key", label: "API key" }, { value: "chatgpt", label: "ChatGPT via Codex" }], auth) + "<p class=\"field-hint\" id=\"auth-hint\"></p></div></div><div id=\"chatgpt-fields\"><div class=\"section-label\">Account</div><div class=\"card account-card\" id=\"chatgpt-account\">" + accountInner + "</div></div><div id=\"byok-fields\"><div class=\"section-label\">Connection</div><div class=\"card\">" + byokKey + byokInner + "</div></div></div><div class=\"models-save\"><button type=\"button\" class=\"btn\" id=\"save-models\"" + saveAttr + ">Save changes</button></div>";
     const initialKind = PROVIDERS[p.kind] ? p.kind : "open_ai_compatible";
     $("#provider-kind").value = initialKind;
     $("#provider-auth").value = initialKind === "open_ai_compatible" ? auth : "api_key";
     wireSegmented("provider-auth");
+    ["#provider-kind", "#provider-auth", "#model", "#model-select", "#base_url", "#codex_home", "#api_key", "#provider-preset", "#store-keychain", "#load-models", "#save-models"].forEach((selector) => {
+      const el = $(selector);
+      if (el) el.disabled = el.disabled || !configIsReady();
+    });
+    document.querySelectorAll(".segmented[data-for=\"provider-auth\"] .seg").forEach((el) => { el.disabled = !configIsReady(); });
 
     function syncAuthUi() {
       const mode = $("#provider-auth").value;
@@ -1622,6 +1715,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
           ? "Uses Selara's bundled native writing runtime and the shared Codex home below. ChatGPT tokens remain in that home; they are never copied into Selara."
           : providerMeta($("#provider-kind").value).keyHint + " The key is kept in Selara's config file or the OS keychain; SELARA_API_KEY can override it.";
       }
+      const modelSelect = $("#model-select");
+      const modelLoadPending = chatgptModelsLoading && chatgptModelsLoading.viewGeneration === viewGeneration && chatgptModelsLoading.element === modelSelect;
+      if (modelSelect) modelSelect.disabled = !configIsReady() || !(isCg && isChatgptConnected(chatgptStatus)) || chatgptLoginPending || chatgptLogoutPending || modelLoadPending;
     }
     function syncProviderUi() {
       const kind = $("#provider-kind").value;
@@ -1650,7 +1746,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       if (baseHint) baseHint.textContent = !preset || preset.id === "openai" ? "Leave blank to use " + meta.baseUrl + "." : (preset.baseUrl ? "Filled from the " + preset.label + " preset. Edit it if your server runs elsewhere." : "Enter the /v1 base URL of your server.");
       syncAuthUi();
     }
-    ["provider-kind", "provider-auth", "model", "model-select", "base_url", "codex_home", "api_key"].forEach((id) => {
+    ["model", "model-select", "base_url", "codex_home", "api_key"].forEach((id) => {
       const el = $("#" + id);
       if (el) {
         el.addEventListener("input", captureProviderDraft);
@@ -1665,6 +1761,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const presetSelect = $("#provider-preset");
     if (presetSelect) {
       presetSelect.onchange = () => {
+        if (!configIsReady()) return;
         const preset = presetById(presetSelect.value);
         const base = $("#base_url");
         const previousOrigin = endpointOrigin(base ? base.value : "");
@@ -1684,17 +1781,33 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       const baseInput = $("#base_url");
       if (baseInput) baseInput.addEventListener("input", () => { syncPresetFromBaseUrl(); syncProviderUi(); });
     }
+    let activeKind = initialKind;
     $("#provider-kind").onchange = () => {
+      if (!configIsReady()) return;
+      const nextKind = $("#provider-kind").value;
+      if (nextKind !== activeKind) {
+        const previous = currentProviderDraft();
+        rememberProviderDraft({ ...previous, kind: activeKind });
+        providerDraft = providerDraftForKind(nextKind, previous.codex_home);
+        if (nextKind !== "open_ai_compatible") providerDraft.auth = "api_key";
+        activeKind = nextKind;
+        renderModels();
+        return;
+      }
       syncPresetFromBaseUrl();
       syncProviderUi();
       captureProviderDraft();
     };
-    $("#provider-auth").onchange = () => { syncAuthUi(); syncProviderUi(); captureProviderDraft(); };
+    $("#provider-auth").onchange = () => {
+      if (!configIsReady()) return;
+      syncAuthUi(); syncProviderUi(); captureProviderDraft();
+    };
     syncPresetFromBaseUrl();
     syncProviderUi();
 
     const loadBtn = $("#load-models");
     if (loadBtn) loadBtn.onclick = async () => {
+      if (!ensureConfigReady()) return;
       const input = $("#model");
       const list = $("#model-options");
       const hint = $("#byok-models-hint");
@@ -1740,7 +1853,13 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       try {
         const src = await invoke("api_key_source");
         if (requestId !== keySourceRequestId || $("#key-source-hint") !== expected || !expected.isConnected) return;
-        expected.textContent = ({ env: "Key comes from SELARA_API_KEY in the environment (overrides the fields below).", keychain: "Key is stored in the OS keychain. Leave the field blank to keep it, or type a new one to replace it.", config: "Key is stored in Selara's config file. Store it in the OS keychain when saving to move it.", none: "No key stored yet." }[src] || "");
+        const savedKind = (config.provider && config.provider.kind) || "open_ai_compatible";
+        const selectedKind = $("#provider-kind") && $("#provider-kind").value;
+        if (selectedKind && selectedKind !== savedKind) {
+          expected.textContent = "Key status describes the saved " + providerMeta(savedKind).label + " provider. Save this provider before checking its credential.";
+        } else {
+          expected.textContent = ({ env: "Key comes from SELARA_API_KEY in the environment (overrides the fields below).", keychain: "Key is stored in the OS keychain. Leave the field blank to keep it, or type a new one to replace it.", config: "Key is stored in Selara's config file. Store it in the OS keychain when saving to move it.", none: "No key stored yet." }[src] || "");
+        }
       } catch (_) {
         if (requestId === keySourceRequestId && $("#key-source-hint") === expected) expected.textContent = "Could not determine the key source.";
       }
@@ -1748,6 +1867,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     refreshKeySource();
 
     $("#save-models").onclick = async () => {
+      if (!ensureConfigReady()) return;
+      if (providerSavePending) return;
       const draft = captureProviderDraft() || currentProviderDraft();
       const model = String(draft.model || "").trim();
       if (!model) { setStatus("Pick a model before saving"); return; }
@@ -1757,16 +1878,46 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       if (codexHome && !codexHome.startsWith("/")) { setStatus("Codex home must be an absolute path"); return; }
       const typedKey = String(draft.api_key || "").trim();
       const useKeychain = !!($("#store-keychain") && $("#store-keychain").checked);
-      let fileKey = typedKey || null;
-      if (a === "api_key" && typedKey) {
-        try {
-          if (useKeychain) { await invoke("store_api_key", { kind, apiKey: typedKey }); fileKey = null; if ($("#api_key")) $("#api_key").value = ""; }
-          else await invoke("clear_api_key", { kind });
-        } catch (e) { setStatus(String(e)); return; }
+      const submitted = providerDraftSnapshot({ ...draft, kind, model, auth: a, codex_home: codexHome });
+      providerSavePending = true;
+      const saveButton = $("#save-models");
+      if (saveButton) saveButton.disabled = true;
+      let keychainStored = false;
+      const clearSubmittedKeyIfCurrent = () => {
+        const stored = providerDraftsByKind[kind];
+        if (stored && String(stored.api_key || "").trim() === typedKey) stored.api_key = null;
+        if (providerDraft && providerDraft.kind === kind && String(providerDraft.api_key || "").trim() === typedKey) providerDraft.api_key = null;
+        const selected = $("#provider-kind");
+        const currentKey = $("#api_key");
+        if (selected && selected.value === kind && currentKey && String(currentKey.value || "").trim() === typedKey) currentKey.value = "";
+      };
+      let saved = false;
+      try {
+        let fileKey = typedKey || null;
+        if (a === "api_key" && typedKey) {
+          if (useKeychain) {
+            await invoke("store_api_key", { kind, apiKey: typedKey });
+            fileKey = null;
+            keychainStored = true;
+            clearSubmittedKeyIfCurrent();
+          } else await invoke("clear_api_key", { kind });
+        }
+        saved = await saveSection("provider", { kind, model, base_url: String(draft.base_url || "").trim(), api_key: fileKey, auth: a, codex_home: codexHome || null });
+        if (saved) {
+          const originDraft = providerDraft && providerDraft.kind === kind ? providerDraft : providerDraftsByKind[kind];
+          if (providerDraftMatches(originDraft, submitted, keychainStored)) {
+            delete providerDraftsByKind[kind];
+            if (providerDraft && providerDraft.kind === kind) providerDraft = null;
+          }
+        }
+      } catch (e) {
+        setStatus(String(e));
+      } finally {
+        providerSavePending = false;
+        const currentSaveButton = $("#save-models");
+        if (currentSaveButton && configIsReady()) currentSaveButton.disabled = false;
       }
-      const saved = await saveSection("provider", { kind, model, base_url: String(draft.base_url || "").trim(), api_key: fileKey, auth: a, codex_home: codexHome || null });
       if (saved) {
-        providerDraft = null;
         chatgptModels = null;
         await refreshChatgptStatus({ render: true });
         refreshKeySource();
@@ -1869,12 +2020,12 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         (c.hotkey ? "<span class=\"badge key\" title=\"" + escapeAttr(c.hotkey) + "\">" + escapeHtml(prettyHotkey(c.hotkey)) + "</span>" : "") +
         ((c.apps && c.apps.length) ? "<span class=\"badge\" title=\"Only in " + escapeAttr(c.apps.join(", ")) + "\">" + c.apps.length + (c.apps.length === 1 ? " app" : " apps") + "</span>" : "");
       return (
-        "<div class=\"cmd-item\" data-id=\"" + escapeAttr(c.id) + "\" role=\"button\" tabindex=\"0\" aria-label=\"Edit " + escapeAttr(c.label) + "\">" +
+        "<div class=\"cmd-item\" data-id=\"" + escapeAttr(c.id) + "\" role=\"button\" tabindex=\"0\" aria-disabled=\"" + (configIsReady() ? "false" : "true") + "\" aria-label=\"Edit " + escapeAttr(c.label) + "\">" +
         "<div class=\"cmd-main\"><h3><span class=\"cmd-name\">" + escapeHtml(c.label) + "</span>" + badges + "</h3>" +
         "<p>" + escapeHtml(c.prompt) + "</p></div>" +
         "<div class=\"row-actions\">" +
-        "<button type=\"button\" class=\"icon-btn\" data-act=\"dup\" title=\"Duplicate\" aria-label=\"Duplicate " + escapeAttr(c.label) + "\">" + COPY_SVG + "</button>" +
-        "<button type=\"button\" class=\"icon-btn danger\" data-act=\"del\" title=\"Delete\" aria-label=\"Delete " + escapeAttr(c.label) + "\">" + TRASH_SVG + "</button>" +
+        "<button type=\"button\" class=\"icon-btn\" data-act=\"dup\" title=\"Duplicate\" aria-label=\"Duplicate " + escapeAttr(c.label) + "\"" + (configIsReady() ? "" : " disabled") + ">" + COPY_SVG + "</button>" +
+        "<button type=\"button\" class=\"icon-btn danger\" data-act=\"del\" title=\"Delete\" aria-label=\"Delete " + escapeAttr(c.label) + "\"" + (configIsReady() ? "" : " disabled") + ">" + TRASH_SVG + "</button>" +
         "</div>" +
         CHEVRON_SVG +
         "</div>"
@@ -1894,18 +2045,19 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     s.innerHTML =
       "<h1>Commands</h1>" +
       "<p class=\"lead\">Each command is a prompt. Click one to edit it, or duplicate it to make a variation.</p>" +
+      configGateMarkup("commands-config-gate") +
       "<div class=\"toolbar\">" +
       "<div class=\"search\">" + SEARCH_SVG +
       "<input id=\"cmd-search\" type=\"search\" placeholder=\"Search commands\" value=\"" + escapeAttr(commandFilter) + "\" autocomplete=\"off\" spellcheck=\"false\" aria-label=\"Search commands\" />" +
       "</div>" +
-      "<select id=\"cmd-import-mode\" title=\"What to do when an imported command has the same id as one you already have\" aria-label=\"Import conflict mode\" style=\"width:auto;flex-shrink:0\">" +
+      "<select id=\"cmd-import-mode\"" + configEditAttr() + " title=\"What to do when an imported command has the same id as one you already have\" aria-label=\"Import conflict mode\" style=\"width:auto;flex-shrink:0\">" +
       "<option value=\"keep_both\">On conflict: keep both</option>" +
       "<option value=\"replace\">On conflict: replace mine</option>" +
       "<option value=\"skip\">On conflict: skip import</option>" +
       "</select>" +
-      "<button type=\"button\" class=\"btn secondary\" id=\"cmd-import\" title=\"Merge commands from a TOML or JSON pack\">Import…</button>" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"cmd-import\"" + configEditAttr() + " title=\"Merge commands from a TOML or JSON pack\">Import…</button>" +
       "<button type=\"button\" class=\"btn secondary\" id=\"cmd-export\" title=\"Save all commands as a TOML pack\">Export…</button>" +
-      "<button type=\"button\" class=\"btn\" id=\"cmd-new\">" + PLUS_SVG + "New command</button>" +
+      "<button type=\"button\" class=\"btn\" id=\"cmd-new\"" + configEditAttr() + ">" + PLUS_SVG + "New command</button>" +
       "</div>" +
       "<div class=\"cmd-list\">" + listInner + "</div>";
 
@@ -1918,7 +2070,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       again.focus();
       try { again.setSelectionRange(pos, pos); } catch (_) {}
     };
-    $("#cmd-new").onclick = () => openCommandSheet(null);
+    $("#cmd-new").onclick = () => { if (ensureConfigReady()) openCommandSheet(null); };
     $("#cmd-export").onclick = async () => {
       setStatus("Choose where to save…");
       try {
@@ -1929,6 +2081,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       }
     };
     $("#cmd-import").onclick = async () => {
+      if (!ensureConfigReady()) return;
       const mode = $("#cmd-import-mode").value;
       setStatus("Choose a command pack…");
       try {
@@ -1948,12 +2101,16 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       }
     };
     const emptyBtn = $("#cmd-new-empty");
-    if (emptyBtn) emptyBtn.onclick = () => openCommandSheet(null);
+    if (emptyBtn) {
+      emptyBtn.disabled = !configIsReady();
+      emptyBtn.onclick = () => { if (ensureConfigReady()) openCommandSheet(null); };
+    }
 
     s.querySelectorAll(".cmd-item").forEach((el) => {
       const id = el.dataset.id;
-      el.onclick = () => openCommandSheet(id);
+      el.onclick = () => { if (ensureConfigReady()) openCommandSheet(id); };
       el.onkeydown = (ev) => {
+        if (!configIsReady()) return;
         if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openCommandSheet(id); }
       };
       el.querySelector('[data-act="dup"]').onclick = async (ev) => {
@@ -1968,6 +2125,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   async function duplicateCommand(id) {
+    if (!ensureConfigReady()) return;
     const src = config.commands.find((c) => c.id === id);
     if (!src) return;
     config.commands.push(Object.assign({}, src, {
@@ -1980,6 +2138,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   async function deleteCommand(id) {
+    if (!ensureConfigReady()) return false;
     const c = config.commands.find((x) => x.id === id);
     if (!confirm("Delete “" + (c ? c.label : id) + "”?")) return false;
     config.commands = config.commands.filter((x) => x.id !== id);
@@ -2007,6 +2166,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   function openCommandSheet(id) {
+    if (!ensureConfigReady()) return;
     closeCommandSheet();
     editingId = id;
     const editing = id ? (config.commands || []).find((c) => c.id === id) : null;
@@ -2081,6 +2241,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     if (del) del.onclick = async () => { if (await deleteCommand(id)) closeCommandSheet(); };
 
     $("#cmd-save").onclick = async () => {
+      if (!ensureConfigReady()) return;
       const label = $("#cmd-label").value.trim();
       const prompt = $("#cmd-prompt").value.trim();
       const kind = $("#cmd-kind").value;
@@ -2112,40 +2273,43 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   function renderLimits() {
     const L = config.limits || {};
     const s = $("#section-limits");
+    const editAttr = configEditAttr();
     s.innerHTML =
       "<h1>Limits</h1>" +
       "<p class=\"lead\">Gentle rails for large selections. Set any value to 0 for unlimited.</p>" +
+      configGateMarkup("limits-config-gate") +
       "<div class=\"panel\">" +
       "<div class=\"section-label\">Thresholds</div>" +
       "<div class=\"form-row\">" +
       "<label for=\"soft_warn\">Soft warn (chars)</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"soft_warn\" type=\"number\" min=\"0\" value=\"" + (L.soft_warn_chars ?? 8000) + "\" />" +
+      "<input id=\"soft_warn\"" + editAttr + " type=\"number\" min=\"0\" value=\"" + (L.soft_warn_chars ?? 8000) + "\" />" +
       "<p class=\"field-hint\">Warn before sending large selections.</p>" +
       "</div></div>" +
       "<div class=\"form-row\">" +
       "<label for=\"hard_max\">Hard max (chars)</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"hard_max\" type=\"number\" min=\"0\" value=\"" + (L.hard_max_chars ?? 100000) + "\" />" +
+      "<input id=\"hard_max\"" + editAttr + " type=\"number\" min=\"0\" value=\"" + (L.hard_max_chars ?? 100000) + "\" />" +
       "<p class=\"field-hint\">Block anything past this size.</p>" +
       "</div></div>" +
       "<div class=\"form-row\">" +
       "<label for=\"replace_warn\">Replace caution (chars)</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"replace_warn\" type=\"number\" min=\"0\" value=\"" + (L.replace_warn_chars ?? 4000) + "\" />" +
+      "<input id=\"replace_warn\"" + editAttr + " type=\"number\" min=\"0\" value=\"" + (L.replace_warn_chars ?? 4000) + "\" />" +
       "<p class=\"field-hint\">Ask again before replacing a selection larger than this.</p>" +
       "</div></div>" +
       "<div class=\"section-label\">Secrets</div>" +
       "<div class=\"form-row\">" +
-      "<label class=\"check-row\" for=\"secret_guard\"><input type=\"checkbox\" id=\"secret_guard\"" + (L.secret_guard === false ? "" : " checked") + " /> Warn before sending secret-shaped text to a hosted provider</label>" +
+      "<label class=\"check-row\" for=\"secret_guard\"><input type=\"checkbox\" id=\"secret_guard\"" + editAttr + (L.secret_guard === false ? "" : " checked") + " /> Warn before sending secret-shaped text to a hosted provider</label>" +
       "<p class=\"field-hint\">Looks for API keys, private key blocks, JWTs, and card numbers. Local servers (localhost, .local, private IPs) are exempt.</p>" +
       "</div>" +
       "</div>" +
       "<div class=\"limits-actions\">" +
-      "<button class=\"btn linkish\" id=\"reset-limits\">Reset to defaults</button>" +
-      "<button class=\"btn\" id=\"save-limits\">Save changes</button>" +
+      "<button class=\"btn linkish\" id=\"reset-limits\"" + editAttr + ">Reset to defaults</button>" +
+      "<button class=\"btn\" id=\"save-limits\"" + editAttr + ">Save changes</button>" +
       "</div>";
     $("#save-limits").onclick = async () => {
+      if (!ensureConfigReady()) return;
       await saveSection("limits", {
         soft_warn_chars: num($("#soft_warn").value),
         hard_max_chars: num($("#hard_max").value),
@@ -2154,6 +2318,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       });
     };
     $("#reset-limits").onclick = async () => {
+      if (!ensureConfigReady()) return;
       await saveSection("limits", { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000, secret_guard: true });
       renderLimits();
     };
@@ -2164,6 +2329,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   // made elsewhere (for example Limits inside `selara serve`) is kept and
   // shows up here after the save.
   async function saveSection(section, value) {
+    if (!ensureConfigReady()) return false;
     try {
       const merged = await invoke("save_config_section", { section, value });
       if (merged && typeof merged === "object") config = merged;
@@ -2314,12 +2480,13 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     let configLoaded = false;
     try {
       const loaded = await invoke("get_config");
-      if (loaded && typeof loaded === "object") {
-        config = loaded;
-        config.provider = config.provider || defaultConfig().provider;
-        if (providerDraft) config.provider = { ...config.provider, ...providerDraft };
-        if (generalDraft) config = { ...config, ...generalDraft };
-      }
+      if (!loaded || typeof loaded !== "object") throw new Error("Saved settings were unavailable");
+      config = loaded;
+      config.provider = config.provider || defaultConfig().provider;
+      if (providerDraft) config.provider = { ...config.provider, ...providerDraft };
+      if (generalDraft) config = { ...config, ...generalDraft };
+      configLoadState = "ready";
+      configLoadError = "";
       configLoaded = true;
       renderSettings();
       await refreshChatgptStatus();
@@ -2332,11 +2499,16 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       setStatus("Loaded");
     } catch (e) {
       const msg = String(e);
+      if (!configLoaded) {
+        configLoadState = "failed";
+        configLoadError = msg;
+        renderSettings();
+      }
       setStatus(msg);
       if (!configLoaded) {
         $("#section-status").innerHTML =
           "<h1>Settings unavailable</h1><p class=\"lead error\">" + escapeHtml(msg) + "</p>" +
-          "<p class=\"hint\">The editable Settings surface remains available; restart Selara after checking the native bridge.</p>";
+          "<p class=\"hint\">Editing is disabled because saved settings could not be loaded. Restart Selara to try again.</p>";
       }
     }
   }

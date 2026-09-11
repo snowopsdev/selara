@@ -40,6 +40,8 @@ function makeHarness(options = {}) {
   const authQueue = [...(options.authQueue || [])];
   const modelQueue = [...(options.modelQueue || [])];
   const axQueue = [...(options.axQueue || [])];
+  const saveQueue = [...(options.saveQueue || [])];
+  const storeQueue = [...(options.storeQueue || [])];
   const login = options.login || null;
   const cancelLogin = options.cancelLogin || Promise.resolve();
   const logout = options.logout || { state: "signed_out", logged_in: false, via_chatgpt: false, message: "No ChatGPT account is signed in" };
@@ -72,9 +74,9 @@ function makeHarness(options = {}) {
       case "usage_summary": return Promise.resolve({ today: {}, last_30_days: {}, all_time: {} });
       case "history_list": return Promise.resolve([]);
       case "plugin:autostart|is_enabled": return Promise.resolve(false);
-      case "save_config_section": return Promise.resolve(configResult);
+      case "save_config_section": return next(saveQueue, configResult);
       case "clear_api_key": return Promise.resolve("none");
-      case "store_api_key": return Promise.resolve("keychain");
+      case "store_api_key": return next(storeQueue, "keychain");
       default: return Promise.resolve(null);
     }
   }
@@ -128,21 +130,114 @@ test("renders the account card before status and keeps it visible in API-key mod
   } finally { harness.close(); }
 });
 
-test("preserves every provider draft field across an auth refresh", async () => {
+test("blocks config writes while saved settings are loading, then allows normal saves", async () => {
+  const persisted = config({
+    provider: { auth: "api_key", model: "persisted-model", base_url: "https://persisted.example/v1", api_key: null },
+    commands: [{ id: "existing", label: "Existing", prompt: "Keep this", kind: "replace", apps: [] }],
+  });
+  const harness = makeHarness({ deferConfig: true, config: persisted });
+  try {
+    await harness.idle(3);
+    const document = harness.dom.window.document;
+    document.querySelector('[data-section="general"]').click();
+    assert.equal(document.querySelector("#language").disabled, true);
+    assert.equal(document.querySelector("#save-general").disabled, true);
+    await document.querySelector("#save-general").onclick();
+    document.querySelector('[data-section="models"]').click();
+    assert.equal(document.querySelector("#provider-kind").disabled, true);
+    assert.equal(document.querySelector("#save-models").disabled, true);
+    await document.querySelector("#save-models").onclick();
+    document.querySelector('[data-section="commands"]').click();
+    assert.equal(document.querySelector("#cmd-new").disabled, true);
+    assert.equal(document.querySelector("#cmd-import").disabled, true);
+    assert.equal(callsFor(harness, "save_config_section").length, 0);
+
+    harness.configRequest.resolve(persisted);
+    await harness.idle(12);
+    assert.equal(document.querySelector("#save-general").disabled, false);
+    assert.equal(document.querySelector("#save-models").disabled, false);
+    document.querySelector('[data-section="models"]').click();
+    document.querySelector("#save-models").click();
+    await harness.idle(5);
+    document.querySelector('[data-section="general"]').click();
+    document.querySelector("#save-general").click();
+    await harness.idle(5);
+    assert.ok(callsFor(harness, "save_config_section").length >= 2, "normal saves should reach the native command");
+  } finally { harness.close(); }
+});
+
+test("keeps settings writes disabled after a failed config load", async () => {
+  const harness = makeHarness({ deferConfig: true });
+  try {
+    await harness.idle(3);
+    harness.configRequest.reject(new Error("config disk unavailable"));
+    await harness.idle(10);
+    const document = harness.dom.window.document;
+    assert.match(document.querySelector("#general-config-gate").textContent, /Editing is disabled/);
+    assert.equal(document.querySelector("#save-general").disabled, true);
+    assert.match(document.querySelector("#models-config-gate").textContent, /could not be loaded/);
+    const before = callsFor(harness, "save_config_section").length;
+    await document.querySelector("#save-general").onclick();
+    assert.equal(callsFor(harness, "save_config_section").length, before);
+    assert.match(document.querySelector("#section-status").textContent, /Editing is disabled because saved settings could not be loaded/);
+  } finally { harness.close(); }
+});
+
+test("does not let account/model refreshes seed a draft before config arrives", async () => {
+  const lateModels = deferred();
+  const persisted = config({
+    provider: { auth: "api_key", model: "persisted-model", base_url: "https://persisted.example/v1", api_key: "saved-key", codex_home: "/Users/test/shared-codex" },
+    commands: [{ id: "persisted", label: "Persisted", prompt: "Keep this", kind: "replace", apps: [] }],
+  });
+  const connected = { state: "connected", logged_in: true, via_chatgpt: true, email: "user@example.test", plan: "pro", message: "ChatGPT account connected" };
+  const harness = makeHarness({ deferConfig: true, config: persisted, auth: connected, modelQueue: [lateModels] });
+  try {
+    await harness.idle(3);
+    const document = harness.dom.window.document;
+    document.querySelector("#chatgpt-refresh").click();
+    await harness.idle(4);
+    document.querySelector("#chatgpt-models").click();
+    await harness.idle(3);
+    assert.equal(callsFor(harness, "list_chatgpt_models_cmd").length, 1);
+    harness.configRequest.resolve(persisted);
+    await harness.idle(12);
+    assert.equal(document.querySelector("#provider-kind").value, "open_ai_compatible");
+    assert.equal(document.querySelector("#provider-auth").value, "api_key");
+    assert.equal(document.querySelector("#model").value, "persisted-model");
+    assert.equal(document.querySelector("#base_url").value, "https://persisted.example/v1");
+    assert.equal(document.querySelector("#api_key").value, "saved-key");
+    document.querySelector('[data-section="commands"]').click();
+    assert.ok(document.querySelector('[data-id="persisted"]'));
+    lateModels.resolve(["late-model"]);
+    await harness.idle(8);
+    assert.equal(document.querySelector("#model").value, "persisted-model");
+    assert.equal(document.querySelector("#model-options").children.length, 0);
+  } finally { harness.close(); }
+});
+
+test("preserves every provider draft field across an auth refresh and provider switch", async () => {
   const refresh = deferred();
+  const initial = { state: "connected", logged_in: true, via_chatgpt: true, email: "user@example.test", plan: "pro", message: "ChatGPT account connected" };
   const harness = makeHarness({
     config: config({ provider: { auth: "api_key", model: "saved", base_url: "https://old.example/v1", api_key: "old-key", codex_home: "/Users/test/.codex" } }),
-    auth: { state: "signed_out", logged_in: false, via_chatgpt: false, message: "No ChatGPT account is signed in" },
-    authQueue: [refresh],
+    auth: initial,
+    authQueue: [initial, refresh],
   });
   try {
     await harness.ready();
     const { document } = harness.dom.window;
-    const provider = document.querySelector("#provider-kind");
-    provider.value = "open_router";
-    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
-    const authButton = document.querySelector('[data-for="provider-auth"] .seg[data-value="chatgpt"]');
+    let authButton = document.querySelector('[data-for="provider-auth"] .seg[data-value="chatgpt"]');
     authButton.click();
+    assert.equal(document.querySelector("#model-select").disabled, false, "connected ChatGPT mode enables the subscription model selector");
+    document.querySelector('[data-for="provider-auth"] .seg[data-value="api_key"]').click();
+    assert.equal(document.querySelector("#model-select").disabled, true, "switching back to API-key mode disables the subscription model selector");
+    authButton = document.querySelector('[data-for="provider-auth"] .seg[data-value="chatgpt"]');
+    authButton.click();
+    assert.equal(document.querySelector("#model-select").disabled, false);
+    const chatOption = document.createElement("option");
+    chatOption.value = "draft-chat-model";
+    chatOption.textContent = "draft-chat-model";
+    document.querySelector("#model-select").append(chatOption);
     value(harness.dom, "model-select", "draft-chat-model");
     value(harness.dom, "model", "draft-byok-model");
     value(harness.dom, "base_url", "https://custom.example/v1");
@@ -150,22 +245,184 @@ test("preserves every provider draft field across an auth refresh", async () => 
     value(harness.dom, "codex_home", "/Users/test/shared-codex");
     document.querySelector("#chatgpt-refresh").click();
     await harness.idle();
-    assert.equal(document.querySelector("#provider-kind").value, "open_router");
-    assert.equal(document.querySelector("#provider-auth").value, "api_key", "unsupported provider keeps API-key auth");
-    // Return to the OpenAI-compatible mode to verify the draft was retained by
-    // the refresh even though the provider control itself normalizes auth.
-    provider.value = "open_ai_compatible";
-    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
-    await harness.idle();
-    assert.equal(document.querySelector("#provider-auth").value, "api_key");
+    assert.equal(document.querySelector("#provider-kind").value, "open_ai_compatible");
+    assert.equal(document.querySelector("#provider-auth").value, "chatgpt");
+    assert.equal(document.querySelector("#model-select").value, "draft-chat-model");
     assert.equal(document.querySelector("#model").value, "draft-byok-model");
     assert.equal(document.querySelector("#base_url").value, "https://custom.example/v1");
     assert.equal(document.querySelector("#api_key").value, "draft-key");
     assert.equal(document.querySelector("#codex_home").value, "/Users/test/shared-codex");
     refresh.resolve({ state: "signed_out", logged_in: false, via_chatgpt: false, message: "No ChatGPT account is signed in" });
     await harness.idle(5);
+    assert.equal(document.querySelector("#provider-auth").value, "chatgpt");
+    assert.equal(document.querySelector("#model-select").value, "draft-chat-model");
     assert.equal(document.querySelector("#model").value, "draft-byok-model");
     assert.equal(document.querySelector("#base_url").value, "https://custom.example/v1");
+    assert.equal(document.querySelector("#api_key").value, "draft-key");
+    assert.equal(document.querySelector("#codex_home").value, "/Users/test/shared-codex");
+
+    let provider = document.querySelector("#provider-kind");
+    provider.value = "anthropic";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(2);
+    assert.equal(document.querySelector("#provider-kind").value, "anthropic");
+    assert.equal(document.querySelector("#provider-auth").value, "api_key");
+    assert.equal(document.querySelector("#model").value, "");
+    assert.equal(document.querySelector("#base_url").value, "https://api.anthropic.com");
+    assert.equal(document.querySelector("#api_key").value, "");
+    assert.match(document.querySelector("#key-source-hint").textContent, /Key status describes the saved OpenAI-compatible provider/);
+    assert.equal(document.querySelector("#codex_home").value, "/Users/test/shared-codex");
+
+    provider = document.querySelector("#provider-kind");
+    provider.value = "open_ai_compatible";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(2);
+    assert.equal(document.querySelector("#provider-kind").value, "open_ai_compatible");
+    assert.equal(document.querySelector("#provider-auth").value, "chatgpt");
+    assert.equal(document.querySelector("#model-select").value, "draft-chat-model");
+    assert.equal(document.querySelector("#model").value, "draft-byok-model");
+    assert.equal(document.querySelector("#base_url").value, "https://custom.example/v1");
+    assert.equal(document.querySelector("#api_key").value, "draft-key");
+    assert.equal(document.querySelector("#codex_home").value, "/Users/test/shared-codex");
+  } finally { harness.close(); }
+});
+
+test("does not restore plaintext key after a successful keychain save", async () => {
+  const harness = makeHarness({
+    config: config({ provider: { auth: "api_key", model: "saved-model", api_key: null } }),
+    auth: { state: "signed_out", logged_in: false, via_chatgpt: false, message: "No ChatGPT account is signed in" },
+  });
+  try {
+    await harness.ready();
+    value(harness.dom, "api_key", "plaintext-secret");
+    harness.dom.window.document.querySelector("#save-models").click();
+    await harness.idle(10);
+    assert.equal(callsFor(harness, "store_api_key").length, 1);
+    let provider = harness.dom.window.document.querySelector("#provider-kind");
+    provider.value = "anthropic";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(3);
+    provider = harness.dom.window.document.querySelector("#provider-kind");
+    provider.value = "open_ai_compatible";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(3);
+    assert.equal(harness.dom.window.document.querySelector("#api_key").value, "");
+  } finally { harness.close(); }
+});
+
+test("keeps a switched provider draft while the original key save and config save complete", async () => {
+  const store = deferred();
+  const save = deferred();
+  const postSaveAuth = deferred();
+  const signedOut = { state: "signed_out", logged_in: false, via_chatgpt: false, message: "No ChatGPT account is signed in" };
+  const persisted = config({ provider: { auth: "api_key", model: "openai-saved", base_url: "https://openai.example/v1", api_key: null } });
+  const harness = makeHarness({ config: persisted, authQueue: [signedOut, postSaveAuth], storeQueue: [store], saveQueue: [save] });
+  try {
+    await harness.ready();
+    const document = harness.dom.window.document;
+    value(harness.dom, "model", "openai-draft");
+    value(harness.dom, "api_key", "openai-secret");
+    document.querySelector("#save-models").click();
+    await harness.idle(2);
+    assert.equal(callsFor(harness, "store_api_key").length, 1);
+    assert.equal(callsFor(harness, "save_config_section").length, 0);
+    assert.equal(document.querySelector("#save-models").disabled, true, "a provider save is serialized while its native writes are pending");
+
+    let provider = document.querySelector("#provider-kind");
+    provider.value = "anthropic";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(2);
+    value(harness.dom, "model", "anthropic-draft");
+    value(harness.dom, "api_key", "anthropic-secret");
+    store.resolve("keychain");
+    await harness.idle(3);
+    assert.equal(callsFor(harness, "save_config_section").length, 1);
+    assert.equal(document.querySelector("#provider-kind").value, "anthropic");
+    assert.equal(document.querySelector("#model").value, "anthropic-draft");
+    assert.equal(document.querySelector("#api_key").value, "anthropic-secret");
+
+    save.resolve(config({ provider: { auth: "api_key", model: "openai-draft", base_url: "https://openai.example/v1", api_key: null } }));
+    await harness.idle(8);
+    assert.equal(document.querySelector("#provider-kind").value, "anthropic");
+    assert.equal(document.querySelector("#model").value, "anthropic-draft");
+    assert.equal(document.querySelector("#api_key").value, "anthropic-secret");
+    assert.equal(document.querySelector("#save-models").disabled, false, "a later provider save is available while account refresh is pending");
+    postSaveAuth.resolve(signedOut);
+    await harness.idle(5);
+
+    provider = document.querySelector("#provider-kind");
+    provider.value = "open_ai_compatible";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(2);
+    assert.equal(document.querySelector("#model").value, "openai-draft");
+    assert.equal(document.querySelector("#api_key").value, "", "the saved OpenAI key is not restored from a draft");
+  } finally { harness.close(); }
+});
+
+test("clears a submitted key while preserving same-provider edits during keychain save", async () => {
+  const store = deferred();
+  const save = deferred();
+  const persisted = config({ provider: { auth: "api_key", model: "openai-saved", base_url: "https://openai.example/v1", api_key: null } });
+  const harness = makeHarness({ config: persisted, storeQueue: [store], saveQueue: [save] });
+  try {
+    await harness.ready();
+    const document = harness.dom.window.document;
+    value(harness.dom, "model", "submitted-model");
+    value(harness.dom, "api_key", "submitted-key");
+    document.querySelector("#save-models").click();
+    await harness.idle(2);
+    value(harness.dom, "model", "new-unsaved-model");
+    store.resolve("keychain");
+    await harness.idle(3);
+    assert.equal(document.querySelector("#api_key").value, "", "the submitted key is cleared after keychain storage");
+    assert.equal(document.querySelector("#model").value, "new-unsaved-model");
+    save.resolve(config({ provider: { auth: "api_key", model: "submitted-model", base_url: "https://openai.example/v1", api_key: null } }));
+    await harness.idle(8);
+    assert.equal(document.querySelector("#model").value, "new-unsaved-model");
+    let provider = document.querySelector("#provider-kind");
+    provider.value = "anthropic";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(2);
+    provider = document.querySelector("#provider-kind");
+    provider.value = "open_ai_compatible";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(2);
+    assert.equal(document.querySelector("#model").value, "new-unsaved-model");
+    assert.equal(document.querySelector("#api_key").value, "", "the submitted key stays cleared when returning to the provider");
+  } finally { harness.close(); }
+});
+
+test("preserves a newer provider draft when the delayed config save fails", async () => {
+  const store = deferred();
+  const save = deferred();
+  const persisted = config({ provider: { auth: "api_key", model: "openai-saved", base_url: "https://openai.example/v1", api_key: null } });
+  const harness = makeHarness({ config: persisted, storeQueue: [store], saveQueue: [save] });
+  try {
+    await harness.ready();
+    const document = harness.dom.window.document;
+    value(harness.dom, "model", "openai-draft");
+    value(harness.dom, "api_key", "openai-secret");
+    document.querySelector("#save-models").click();
+    await harness.idle(2);
+    let provider = document.querySelector("#provider-kind");
+    provider.value = "anthropic";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(2);
+    value(harness.dom, "model", "anthropic-draft");
+    value(harness.dom, "api_key", "anthropic-secret");
+    store.resolve("keychain");
+    await harness.idle(3);
+    save.reject(new Error("config write failed"));
+    await harness.idle(5);
+    assert.equal(document.querySelector("#provider-kind").value, "anthropic");
+    assert.equal(document.querySelector("#model").value, "anthropic-draft");
+    assert.equal(document.querySelector("#api_key").value, "anthropic-secret");
+    assert.match(document.querySelector("#save-status").textContent, /config write failed/);
+    provider = document.querySelector("#provider-kind");
+    provider.value = "open_ai_compatible";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(2);
+    assert.equal(document.querySelector("#api_key").value, "", "a key already moved to the keychain is not restored after save failure");
   } finally { harness.close(); }
 });
 
@@ -212,13 +469,14 @@ test("shows Cancel during login and ignores completion after cancellation", asyn
 });
 
 test("renders API-key-only account state without a ChatGPT email", async () => {
-  const harness = makeHarness({ auth: { state: "api_key_only", logged_in: true, via_chatgpt: false, plan: null, message: "Codex is signed in with an API key." } });
+  const harness = makeHarness({ config: config({ provider: { auth: "chatgpt", model: "saved-chat-model" } }), auth: { state: "api_key_only", logged_in: true, via_chatgpt: false, plan: null, message: "Codex is signed in with an API key." } });
   try {
     await harness.ready();
     const document = harness.dom.window.document;
     assert.match(document.querySelector("#chatgpt-status-line").textContent, /API key only/);
     assert.equal(document.querySelector("#chatgpt-email-row"), null);
     assert.match(document.querySelector("#chatgpt-status-details").textContent, /Via ChatGPTNo/);
+    assert.equal(document.querySelector("#model-select").disabled, true, "subscription model selector stays disabled without a connected ChatGPT account");
   } finally { harness.close(); }
 });
 
@@ -295,6 +553,35 @@ test("model failures preserve the selection and stale model responses cannot rep
     await harness.idle(5);
     assert.equal(document.querySelector("#model-select").value, "chosen-by-user");
     assert.match(document.querySelector("#chatgpt-models-hint").textContent, /Could not load models/);
+  } finally { harness.close(); }
+});
+
+test("does not leave a replacement ChatGPT selector disabled after an old model load view is replaced", async () => {
+  const lateModels = deferred();
+  const harness = makeHarness({
+    config: config({ provider: { auth: "chatgpt", model: "saved-chat-model" } }),
+    auth: { state: "connected", logged_in: true, via_chatgpt: true, email: "user@example.test", plan: "pro", message: "ChatGPT account connected" },
+    modelQueue: [lateModels],
+  });
+  try {
+    await harness.ready();
+    const document = harness.dom.window.document;
+    document.querySelector("#chatgpt-models").click();
+    await harness.idle(2);
+    assert.equal(document.querySelector("#model-select").disabled, true, "the selector is disabled during its model request");
+    let provider = document.querySelector("#provider-kind");
+    provider.value = "anthropic";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(2);
+    provider = document.querySelector("#provider-kind");
+    provider.value = "open_ai_compatible";
+    provider.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    await harness.idle(2);
+    assert.equal(document.querySelector("#model-select").disabled, false, "the replacement connected selector is enabled");
+    lateModels.resolve(["late-model"]);
+    await harness.idle(5);
+    assert.equal(document.querySelector("#model-select").disabled, false);
+    assert.equal(document.querySelector('option[value="late-model"]'), null, "the old response cannot replace the new view");
   } finally { harness.close(); }
 });
 
