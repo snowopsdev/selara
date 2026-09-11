@@ -68,6 +68,68 @@ pub fn resolve_home(configured: Option<&Path>) -> Result<PathBuf, CoreError> {
     Ok(path)
 }
 
+fn prepare_home(home: &Path) -> Result<PathBuf, CoreError> {
+    let prepare = || -> std::io::Result<PathBuf> {
+        if !home.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the path must be absolute",
+            ));
+        }
+        // An explicit CODEX_HOME must already exist when Codex resolves it.
+        // Set permissions at creation, including missing parent directories,
+        // without changing permissions or contents in an existing account store.
+        let mut directories = std::fs::DirBuilder::new();
+        directories.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            directories.mode(0o700);
+        }
+        directories.create(home)?;
+        let home = home.canonicalize()?;
+        std::fs::read_dir(&home)?;
+
+        // A directory can exist but still be unusable for auth persistence.
+        // Probe with an exclusive file so existing files and symlinks are never
+        // opened or overwritten; remove it before starting the runtime.
+        static NEXT_PROBE: AtomicU64 = AtomicU64::new(0);
+        for _ in 0..16 {
+            let probe = home.join(format!(
+                ".selara-write-check-{}-{}",
+                std::process::id(),
+                NEXT_PROBE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&probe) {
+                Ok(file) => {
+                    drop(file);
+                    std::fs::remove_file(probe)?;
+                    return Ok(home);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not create a temporary write check",
+        ))
+    };
+    prepare().map_err(|err| {
+        CoreError::Config(format!(
+            "Could not prepare Codex home {}: {err}. Choose an absolute directory you can read and write with provider.codex_home or CODEX_HOME, or fix that directory's permissions.",
+            home.display()
+        ))
+    })
+}
+
 type Reply = Result<Value, String>;
 struct Client {
     child: Mutex<Child>,
@@ -90,6 +152,7 @@ impl Drop for PendingRequest {
 }
 impl Client {
     async fn spawn(program: &Path, args: &[&str], home: &Path) -> Result<Arc<Self>, CoreError> {
+        let home = prepare_home(home)?;
         let mut child = Command::new(program)
             .args(args)
             .env("CODEX_HOME", home)
@@ -604,6 +667,26 @@ pub async fn complete_at(
 mod tests {
     use super::*;
     const FIXTURE: &str = include_str!("../tests/fixtures/app_server.py");
+    struct TestDirectory(PathBuf);
+    impl TestDirectory {
+        fn new() -> Self {
+            static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+            Self(std::env::temp_dir().join(format!(
+                "selara-client-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+            )))
+        }
+    }
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     async fn fixture(mode: &str) -> Arc<Client> {
         Client::spawn(
             Path::new("python3"),
@@ -614,18 +697,105 @@ mod tests {
         .unwrap()
     }
     #[tokio::test]
+    async fn creates_missing_home_privately_before_spawning_runtime() {
+        let directory = TestDirectory::new();
+        let home = directory.0.join("account/.codex");
+        assert!(!directory.0.exists());
+        let client = Client::spawn(
+            Path::new("python3"),
+            &["-u", "-c", FIXTURE, "normal"],
+            &home,
+        )
+        .await
+        .unwrap();
+        assert!(home.is_dir());
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&directory.0, &directory.0.join("account"), &home] {
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+        }
+        client.stop().await;
+    }
+    #[test]
+    fn existing_home_keeps_its_contents_and_permissions() {
+        let directory = TestDirectory::new();
+        std::fs::create_dir(&directory.0).unwrap();
+        let auth = b"synthetic auth fixture, not credentials";
+        let config = b"synthetic config fixture";
+        std::fs::write(directory.0.join("auth.json"), auth).unwrap();
+        std::fs::write(directory.0.join("config.toml"), config).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o750)).unwrap();
+        }
+        let permissions = std::fs::metadata(&directory.0).unwrap().permissions();
+        assert_eq!(
+            prepare_home(&directory.0).unwrap(),
+            directory.0.canonicalize().unwrap()
+        );
+        assert_eq!(std::fs::read(directory.0.join("auth.json")).unwrap(), auth);
+        assert_eq!(
+            std::fs::read(directory.0.join("config.toml")).unwrap(),
+            config
+        );
+        assert_eq!(std::fs::read_dir(&directory.0).unwrap().count(), 2);
+        assert_eq!(
+            std::fs::metadata(&directory.0).unwrap().permissions(),
+            permissions
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn existing_home_symlink_resolves_to_the_same_account_store() {
+        let directory = TestDirectory::new();
+        let home = directory.0.join("account");
+        let alias = directory.0.join("alias");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        assert_eq!(prepare_home(&alias).unwrap(), home.canonicalize().unwrap());
+        assert!(alias.is_symlink());
+        assert_eq!(std::fs::read_dir(home).unwrap().count(), 0);
+    }
+    #[tokio::test]
+    async fn unusable_home_returns_actionable_error_before_runtime_launch() {
+        let directory = TestDirectory::new();
+        std::fs::create_dir(&directory.0).unwrap();
+        let file = directory.0.join("file");
+        std::fs::write(&file, "keep this file").unwrap();
+        for home in [
+            file.clone(),
+            file.join(".codex"),
+            PathBuf::from("relative-home"),
+        ] {
+            let result = Client::spawn(Path::new("runtime-that-must-not-start"), &[], &home).await;
+            let message = result.err().unwrap().to_string();
+            assert!(
+                message.contains("Could not prepare Codex home"),
+                "{message}"
+            );
+            assert!(message.contains(&home.display().to_string()), "{message}");
+            assert!(message.contains("provider.codex_home"), "{message}");
+        }
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "keep this file");
+    }
+    #[tokio::test]
     #[ignore = "requires the locally built native runtime; CI runs this after packaging"]
     async fn native_runtime_handshake_and_signed_out_account() {
-        let program = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/selara-codex");
-        let directory = std::env::temp_dir().join(format!(
-            "selara-native-client-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&directory).unwrap();
+        let program = std::env::var_os("SELARA_TEST_CODEX_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/selara-codex")
+            });
+        let directory = TestDirectory::new();
+        let home = directory.0.join(".codex");
+        assert!(!home.exists());
         let client = Client::spawn(
             &program,
             &[
@@ -634,7 +804,7 @@ mod tests {
                 "stdio://",
                 "--selara-writing-mode",
             ],
-            &directory,
+            &home,
         )
         .await
         .unwrap();
@@ -644,7 +814,7 @@ mod tests {
             .unwrap();
         assert!(status["account"].is_null());
         client.stop().await;
-        std::fs::remove_dir_all(directory).unwrap();
+        assert!(home.is_dir());
     }
     #[tokio::test]
     async fn requires_writing_capability_before_other_operations() {

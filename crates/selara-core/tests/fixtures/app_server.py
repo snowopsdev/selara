@@ -6,6 +6,7 @@ import threading
 import time
 
 mode = sys.argv[1]
+assert os.path.isdir(os.environ["CODEX_HOME"])
 writer = threading.Lock()
 
 
