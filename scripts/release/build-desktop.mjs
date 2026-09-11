@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { preflightUpdaterKey, UPDATER_PLACEHOLDER } from "./updater-artifacts.mjs";
+import { validateAppleCredentials } from "./apple-signing.mjs";
 
 const helperRoot = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const supportedEnvironment = [
@@ -22,6 +24,8 @@ const value = (environment, name) => {
 const meaningful = (environment, name) => value(environment, name).trim() !== "";
 
 function configuration(desktopDirectory, environment = process.env) {
+  const mode = environment.SELARA_BUILD_MODE || "local";
+  if (!["local", "ci", "release", "recovery"].includes(mode)) throw new Error(`Unknown build mode: ${mode}`);
   const certificate = meaningful(environment, "APPLE_CERTIFICATE");
   const identity = value(environment, "APPLE_SIGNING_IDENTITY").trim();
   const password = value(environment, "APPLE_CERTIFICATE_PASSWORD");
@@ -49,11 +53,21 @@ function configuration(desktopDirectory, environment = process.env) {
 
   const tauriConfigPath = resolve(desktopDirectory, "src-tauri", "tauri.conf.json");
   const baseConfig = JSON.parse(readFileSync(tauriConfigPath, "utf8"));
-  const pubkey = baseConfig.plugins?.updater?.pubkey;
+  const sourcePubkey = baseConfig.plugins?.updater?.pubkey;
   const configuredArtifacts = baseConfig.bundle?.createUpdaterArtifacts ?? false;
-  const artifacts = configuredArtifacts !== false;
-  const placeholder = typeof pubkey !== "string" || pubkey.trim() === "" || pubkey.trim() === "REPLACE_WITH_TAURI_UPDATER_PUBKEY";
-  if (artifacts && !placeholder && !meaningful(environment, "TAURI_SIGNING_PRIVATE_KEY")) {
+  const placeholder = typeof sourcePubkey !== "string" || sourcePubkey.trim() === "" || sourcePubkey.trim() === UPDATER_PLACEHOLDER;
+  const production = mode === "release" || (mode === "recovery" && !placeholder);
+  if (production && (!certificate || !identity.startsWith("Developer ID Application:") || !notarization.every(Boolean))) {
+    throw new Error("Production releases require Developer ID signing and complete notarization credentials");
+  }
+  if (production && (placeholder || configuredArtifacts === false)) throw new Error("Production releases require an enabled updater with a real public key");
+  const testPubkey = value(environment, "SELARA_UPDATER_PUBLIC_KEY").trim();
+  if (mode === "ci" && (!testPubkey || testPubkey === sourcePubkey?.trim() || testPubkey === UPDATER_PLACEHOLDER)) {
+    throw new Error("CI requires a separate temporary test public key (SELARA_UPDATER_PUBLIC_KEY)");
+  }
+  const artifacts = production || mode === "ci";
+  const pubkey = mode === "ci" ? testPubkey : production ? sourcePubkey : UPDATER_PLACEHOLDER;
+  if (artifacts && !meaningful(environment, "TAURI_SIGNING_PRIVATE_KEY")) {
     throw new Error("Updater artifacts are enabled but TAURI_SIGNING_PRIVATE_KEY is missing");
   }
 
@@ -67,20 +81,23 @@ function configuration(desktopDirectory, environment = process.env) {
   if (notarization.every(Boolean)) {
     for (const name of notarizationNames) normalizedEnvironment[name] = value(environment, name);
   }
-  if (artifacts && !placeholder) {
+  if (artifacts) {
     normalizedEnvironment.TAURI_SIGNING_PRIVATE_KEY = value(environment, "TAURI_SIGNING_PRIVATE_KEY");
     normalizedEnvironment.TAURI_SIGNING_PRIVATE_KEY_PASSWORD = value(environment, "TAURI_SIGNING_PRIVATE_KEY_PASSWORD");
   }
 
   return {
     cwd: resolve(desktopDirectory),
+    mode,
+    artifacts,
+    pubkey,
     environment: normalizedEnvironment,
     overlay: {
       bundle: {
         macOS: { signingIdentity: certificate && identity !== "-" ? identity : "-" },
-        // Preserve explicitly enabled updater signing; placeholder builds cannot update.
-        createUpdaterArtifacts: artifacts && !placeholder ? configuredArtifacts : false,
+        createUpdaterArtifacts: artifacts ? true : false,
       },
+      plugins: { updater: { pubkey } },
     },
   };
 }
@@ -95,11 +112,17 @@ export function buildArguments(desktopDirectory, environment = process.env) {
     env: settings.environment,
     args: ["build", "--ci", "--bundles", "app,dmg", "--config", JSON.stringify(settings.overlay)],
     overlay: settings.overlay,
+    artifacts: settings.artifacts,
+    pubkey: settings.pubkey,
   };
 }
 
 export function runBuild(desktopDirectory, { environment = process.env, spawnProcess = spawn } = {}) {
   const build = buildArguments(desktopDirectory, environment);
+  // Fail before compilation if the private key/password does not sign for the
+  // public key that will be embedded in this exact build.
+  if (build.artifacts) preflightUpdaterKey(build.cli, build.pubkey, build.env);
+  if (build.env.APPLE_CERTIFICATE) validateAppleCredentials(build.env);
   return new Promise((resolvePromise, reject) => {
     const child = spawnProcess(process.execPath, [build.cli, ...build.args], {
       cwd: build.cwd,

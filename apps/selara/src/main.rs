@@ -15,6 +15,7 @@ mod serve;
 #[derive(Parser, Debug)]
 #[command(
     name = "selara",
+    version,
     about = "Cross-platform Selara writing assistant (Rust)"
 )]
 struct Cli {
@@ -49,7 +50,11 @@ enum Action {
         no_stream: bool,
     },
     /// Start the desktop shell (global hotkey + picker UI). macOS only for now.
-    Serve,
+    Serve {
+        /// Use the Settings app's versioned JSON-lines control protocol.
+        #[arg(long)]
+        desktop_protocol: bool,
+    },
     /// Show tokens used and estimated cost, from the local usage ledger
     Usage,
     /// Manage the provider API key in the OS keychain
@@ -94,13 +99,14 @@ fn main() -> Result<()> {
     let config_path = cli.config.clone().unwrap_or_else(AppConfig::default_path);
 
     match cli.command {
-        Action::Serve => {
+        Action::Serve { desktop_protocol } => {
             #[cfg(target_os = "macos")]
             {
-                serve::run(config_path)?;
+                serve::run(config_path, desktop_protocol)?;
             }
             #[cfg(not(target_os = "macos"))]
             {
+                let _ = desktop_protocol;
                 anyhow::bail!("`serve` is currently only supported on macOS");
             }
         }
@@ -231,7 +237,7 @@ async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
             let summary = usage::summary(&path)?;
             print!("{}", format_usage_table(&summary));
         }
-        Action::Serve => unreachable!("handled in main"),
+        Action::Serve { .. } => unreachable!("handled in main"),
     }
 
     Ok(())

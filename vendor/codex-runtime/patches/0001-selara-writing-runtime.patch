@@ -1,0 +1,3016 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index e217b70..63a7a43 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -394,7 +394,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+ 
+ [[package]]
+ name = "app_test_support"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1897,7 +1897,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-extension"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -1909,7 +1909,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-graph-store"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-protocol",
+  "codex-state",
+@@ -1924,7 +1924,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-identity"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1944,7 +1944,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-roles"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-config",
+  "codex-file-system",
+@@ -1957,7 +1957,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-analytics"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-app-server-protocol",
+  "codex-git-utils",
+@@ -1978,7 +1978,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ansi-escape"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "ansi-to-tui",
+  "ratatui",
+@@ -1987,7 +1987,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-api"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "assert_matches",
+@@ -2022,7 +2022,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2124,7 +2124,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-client"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-app-server",
+  "codex-app-server-protocol",
+@@ -2151,7 +2151,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-daemon"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol",
+@@ -2172,7 +2172,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-protocol"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol-noop-macros",
+@@ -2206,11 +2206,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-protocol-noop-macros"
+-version = "0.0.0"
++version = "0.153.4"
+ 
+ [[package]]
+ name = "codex-app-server-test-client"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2232,7 +2232,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-transport"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2274,7 +2274,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-apply-patch"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2294,7 +2294,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-arg0"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-apply-patch",
+@@ -2316,7 +2316,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-async-utils"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "pretty_assertions",
+  "tokio",
+@@ -2325,7 +2325,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-aws-auth"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "aws-config",
+  "aws-credential-types",
+@@ -2340,7 +2340,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-client"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-api",
+@@ -2360,7 +2360,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-openapi-models"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "serde",
+  "serde_json",
+@@ -2369,7 +2369,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-build-info"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-install-context",
+  "pretty_assertions",
+@@ -2381,7 +2381,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-bwrap"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "cc",
+  "libc",
+@@ -2390,7 +2390,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-chatgpt"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2412,7 +2412,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cli"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2502,7 +2502,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-client"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-http-client",
+  "eventsource-stream",
+@@ -2515,12 +2515,13 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-config"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+  "codex-agent-identity",
+  "codex-backend-client",
++ "codex-client",
+  "codex-config",
+  "codex-core",
+  "codex-http-client",
+@@ -2540,7 +2541,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2573,7 +2574,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-client"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2588,7 +2589,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-mock-client"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "chrono",
+  "codex-cloud-tasks-client",
+@@ -2597,7 +2598,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-code-mode-protocol",
+  "codex-http-client",
+@@ -2620,7 +2621,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-host"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2648,7 +2649,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-protocol"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-protocol",
+  "glob",
+@@ -2666,7 +2667,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-runtime"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-code-mode-protocol",
+@@ -2684,11 +2685,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-collaboration-mode-templates"
+-version = "0.0.0"
++version = "0.153.4"
+ 
+ [[package]]
+ name = "codex-config"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2737,7 +2738,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-config-schema"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2746,7 +2747,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2768,7 +2769,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors-extension"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-connectors",
+  "codex-core-plugins",
+@@ -2782,7 +2783,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-context-fragments"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -2790,7 +2791,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2924,7 +2925,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-api"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-analytics",
+  "codex-app-server-protocol",
+@@ -2947,7 +2948,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-plugins"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3003,7 +3004,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-diagnostics"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -3011,7 +3012,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -3060,7 +3061,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3119,7 +3120,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-protocol"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-file-system",
+@@ -3134,7 +3135,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-test-support"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-exec-server",
+@@ -3149,7 +3150,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-execpolicy"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3167,7 +3168,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-experimental-api-macros"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -3176,7 +3177,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-api"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-config",
+  "codex-context-fragments",
+@@ -3193,7 +3194,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-items"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "pretty_assertions",
+@@ -3205,7 +3206,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-external-agent-migration"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "chrono",
+  "codex-analytics",
+@@ -3235,7 +3236,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-features"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-otel",
+  "codex-protocol",
+@@ -3248,7 +3249,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-feedback"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "bytes",
+@@ -3270,7 +3271,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-search"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3286,7 +3287,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-system"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "bytes",
+  "codex-protocol",
+@@ -3298,7 +3299,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-watcher"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "notify",
+  "pretty_assertions",
+@@ -3309,7 +3310,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-git-attribution"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-backend-client",
+  "codex-extension-api",
+@@ -3322,7 +3323,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-git-utils"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3348,7 +3349,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-goal-extension"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3372,7 +3373,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-context"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-protocol",
+  "pretty_assertions",
+@@ -3381,7 +3382,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian-v2"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-analytics",
+@@ -3411,7 +3412,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-history"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-protocol",
+@@ -3423,7 +3424,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-history-notes-extension"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-api",
+  "codex-client",
+@@ -3447,7 +3448,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-home"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-extension-api",
+  "codex-utils-absolute-path",
+@@ -3458,7 +3459,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-hooks"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "async-channel",
+@@ -3484,7 +3485,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-http-client"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "bytes",
+  "codex-utils-cargo-bin",
+@@ -3516,7 +3517,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-image-generation-extension"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3543,7 +3544,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-install-context"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "codex-utils-home-dir",
+@@ -3556,7 +3557,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-keyring-store"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "keyring",
+  "tracing",
+@@ -3564,7 +3565,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-linux-sandbox"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "clap",
+  "codex-core",
+@@ -3591,7 +3592,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-lmstudio"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-core",
+  "codex-http-client",
+@@ -3605,7 +3606,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-login"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3648,7 +3649,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3688,7 +3689,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp-extension"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -3719,7 +3720,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp-server"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -3758,7 +3759,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-extension"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-core",
+  "codex-extension-api",
+@@ -3779,7 +3780,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-read"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -3789,7 +3790,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-write"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3826,7 +3827,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-message-history"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-config",
+  "memchr",
+@@ -3840,7 +3841,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-agent-identity",
+  "codex-api",
+@@ -3864,7 +3865,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider-info"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-api",
+  "codex-protocol",
+@@ -3881,7 +3882,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-models-manager"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "chrono",
+  "codex-collaboration-mode-templates",
+@@ -3901,7 +3902,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-network-proxy"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3939,7 +3940,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ollama"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "assert_matches",
+  "async-stream",
+@@ -3959,7 +3960,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-otel"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "chrono",
+  "codex-api",
+@@ -3992,7 +3993,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-otel-trace-websocket"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4003,7 +4004,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-plugin"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-config",
+  "codex-protocol",
+@@ -4017,7 +4018,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-process-hardening"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -4025,7 +4026,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-prompts"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-context-fragments",
+@@ -4039,7 +4040,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-protocol"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "chardetng",
+@@ -4083,7 +4084,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-queue-extension"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -4104,7 +4105,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-realtime-webrtc"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-install-context",
+@@ -4117,7 +4118,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-response-debug-context"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -4128,7 +4129,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-responses-api-proxy"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4145,7 +4146,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rmcp-client"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4191,7 +4192,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4218,7 +4219,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout-trace"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-code-mode",
+@@ -4234,7 +4235,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-sandboxing"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "appcontainer_common",
+@@ -4261,7 +4262,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-secrets"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "age",
+  "anyhow",
+@@ -4282,7 +4283,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-shell-command"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4305,7 +4306,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-shell-escalation"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4325,7 +4326,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -4342,7 +4343,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills-extension"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "assert_matches",
+  "codex-analytics",
+@@ -4379,7 +4380,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-state"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4403,7 +4404,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-stdio-to-uds"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-uds",
+@@ -4415,7 +4416,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-terminal-detection"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "pretty_assertions",
+  "tracing",
+@@ -4423,7 +4424,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-test-binary-support"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-arg0",
+  "tempfile",
+@@ -4431,7 +4432,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-manager-sample"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4442,7 +4443,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-store"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "chrono",
+  "codex-app-server-protocol",
+@@ -4472,7 +4473,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tools"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "bitflags 2.13.1",
+  "codex-code-mode",
+@@ -4497,7 +4498,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tui"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -4610,7 +4611,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-uds"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "async-io",
+  "pretty_assertions",
+@@ -4622,7 +4623,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-absolute-path"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "dirs",
+  "dunce",
+@@ -4636,14 +4637,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-approval-presets"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-protocol",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-audio"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-protocol",
+@@ -4657,7 +4658,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cache"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "lru",
+  "sha1 0.10.6",
+@@ -4666,7 +4667,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cargo-bin"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "assert_cmd",
+  "runfiles",
+@@ -4675,7 +4676,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cli"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "clap",
+  "codex-protocol",
+@@ -4687,15 +4688,15 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-elapsed"
+-version = "0.0.0"
++version = "0.153.4"
+ 
+ [[package]]
+ name = "codex-utils-fuzzy-match"
+-version = "0.0.0"
++version = "0.153.4"
+ 
+ [[package]]
+ name = "codex-utils-git-discovery"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-git-utils",
+  "codex-utils-absolute-path",
+@@ -4708,7 +4709,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-home-dir"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dirs",
+@@ -4718,7 +4719,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-image"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-cache",
+@@ -4731,7 +4732,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-json-to-toml"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "pretty_assertions",
+  "serde_json",
+@@ -4740,7 +4741,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-oss"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-core",
+  "codex-lmstudio",
+@@ -4750,7 +4751,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-output-truncation"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -4759,7 +4760,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dunce",
+@@ -4769,7 +4770,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path-uri"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-absolute-path",
+@@ -4785,7 +4786,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-plugins"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-exec-server",
+  "codex-exec-server-protocol",
+@@ -4799,7 +4800,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-pty"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "filedescriptor",
+@@ -4815,7 +4816,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-readiness"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "assert_matches",
+  "thiserror 2.0.18",
+@@ -4825,7 +4826,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-redacted-string"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "schemars 0.8.22",
+  "serde",
+@@ -4833,14 +4834,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-rustls-provider"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "rustls",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-sandbox-summary"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-absolute-path",
+@@ -4849,7 +4850,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-sleep-inhibitor"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "core-foundation 0.9.4",
+  "libc",
+@@ -4859,14 +4860,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-stream-parser"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-string"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "pretty_assertions",
+  "regex-lite",
+@@ -4876,14 +4877,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-template"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-v8-poc"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "pretty_assertions",
+  "v8",
+@@ -4891,7 +4892,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-voice-host"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-install-context",
+@@ -4905,7 +4906,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-web-search-extension"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-api",
+  "codex-core",
+@@ -4926,7 +4927,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-websocket-client"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-http-client",
+  "codex-utils-rustls-provider",
+@@ -4942,7 +4943,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-windows-sandbox"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4968,7 +4969,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-workload-identity"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "codex-http-client",
+  "pretty_assertions",
+@@ -4983,7 +4984,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-worktree"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-git-utils",
+@@ -5222,7 +5223,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "core_test_support"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -9520,7 +9521,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "mcp_test_support"
+-version = "0.0.0"
++version = "0.153.4"
+ dependencies = [
+  "anyhow",
+  "codex-login",
+@@ -12619,6 +12620,28 @@ dependencies = [
+  "libc",
+ ]
+ 
++[[package]]
++name = "selara-codex"
++version = "0.153.4"
++dependencies = [
++ "anyhow",
++ "codex-api",
++ "codex-cloud-config",
++ "codex-config",
++ "codex-exec-server",
++ "codex-http-client",
++ "codex-login",
++ "codex-protocol",
++ "codex-utils-home-dir",
++ "futures",
++ "http 1.4.0",
++ "serde",
++ "serde_json",
++ "tokio",
++ "toml 0.9.11+spec-1.1.0",
++ "uuid",
++]
++
+ [[package]]
+ name = "self_cell"
+ version = "0.10.3"
+diff --git a/codex-rs/Cargo.toml b/codex-rs/Cargo.toml
+index 351d1e6..5c0d86e 100644
+--- a/codex-rs/Cargo.toml
++++ b/codex-rs/Cargo.toml
+@@ -1,5 +1,6 @@
+ [workspace]
+ members = [
++    "selara-writing",
+     "aws-auth",
+     "analytics",
+     "agent-graph-store",
+diff --git a/codex-rs/cloud-config/Cargo.toml b/codex-rs/cloud-config/Cargo.toml
+index ecb33d3..d4e9e8e 100644
+--- a/codex-rs/cloud-config/Cargo.toml
++++ b/codex-rs/cloud-config/Cargo.toml
+@@ -13,7 +13,7 @@ chrono = { workspace = true, features = ["serde"] }
+ codex-backend-client = { workspace = true }
+ codex-config = { workspace = true }
+ codex-http-client = { workspace = true }
+-codex-core = { workspace = true }
++codex-client = { workspace = true }
+ codex-login = { workspace = true }
+ codex-otel = { workspace = true }
+ codex-protocol = { workspace = true }
+@@ -26,6 +26,7 @@ tokio = { workspace = true, features = ["fs", "rt", "sync", "time"] }
+ tracing = { workspace = true }
+ 
+ [dev-dependencies]
++codex-core = { workspace = true }
+ codex-agent-identity = { workspace = true }
+ pretty_assertions = { workspace = true }
+ tempfile = { workspace = true }
+diff --git a/codex-rs/cloud-config/src/service.rs b/codex-rs/cloud-config/src/service.rs
+index faafe89..ef56093 100644
+--- a/codex-rs/cloud-config/src/service.rs
++++ b/codex-rs/cloud-config/src/service.rs
+@@ -12,11 +12,11 @@ use crate::metrics::emit_fetch_attempt_metric;
+ use crate::metrics::emit_fetch_final_metric;
+ use crate::metrics::emit_load_metric;
+ use crate::validation::validate_bundle;
++use codex_client::backoff;
+ use codex_config::AbsolutePathBuf;
+ use codex_config::CloudConfigBundle;
+ use codex_config::CloudConfigBundleLoadError;
+ use codex_config::CloudConfigBundleLoadErrorCode;
+-use codex_core::util::backoff;
+ use codex_login::AuthManager;
+ use codex_login::CodexAuth;
+ use codex_login::RefreshTokenError;
+@@ -359,7 +359,7 @@ where
+                 max_attempts = CLOUD_CONFIG_BUNDLE_MAX_ATTEMPTS,
+                 "Failed to fetch cloud config bundle; retrying"
+             );
+-            sleep(backoff(attempt as u64)).await;
++            sleep(backoff(Duration::from_millis(200), attempt as u64)).await;
+             true
+         } else {
+             false
+@@ -432,7 +432,7 @@ where
+                             max_attempts = CLOUD_CONFIG_BUNDLE_MAX_ATTEMPTS,
+                             "Failed to recover from unauthorized cloud config bundle request; retrying"
+                         );
+-                        sleep(backoff(attempt as u64)).await;
++                        sleep(backoff(Duration::from_millis(200), attempt as u64)).await;
+                     }
+                     return Ok(UnauthorizedRecoveryAction::RetryNextAttempt);
+                 }
+diff --git a/codex-rs/login/Cargo.toml b/codex-rs/login/Cargo.toml
+index 2971dec..2efbeb4 100644
+--- a/codex-rs/login/Cargo.toml
++++ b/codex-rs/login/Cargo.toml
+@@ -7,7 +7,11 @@ license.workspace = true
+ [lints]
+ workspace = true
+ 
++[features]
++selara-test-support = []
++
+ [dependencies]
++tempfile = { workspace = true }
+ base64 = { workspace = true }
+ chrono = { workspace = true, features = ["serde"] }
+ codex-agent-identity = { workspace = true }
+diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
+index 2949b70..dad618c 100644
+--- a/codex-rs/login/src/auth/manager.rs
++++ b/codex-rs/login/src/auth/manager.rs
+@@ -51,7 +51,13 @@ pub use crate::auth::storage::AgentIdentityStorage;
+ pub use crate::auth::storage::AuthDotJson;
+ pub use crate::auth::storage::AuthKeyringBackendKind;
+ use crate::auth::storage::AuthStorageBackend;
++use crate::auth::storage::acquire_auth_refresh_lock;
+ use crate::auth::storage::create_auth_storage;
++pub use crate::auth::storage::enable_auth_persistence_locking;
++pub use crate::auth::storage::logout_selara_all_stores;
++#[cfg(feature = "selara-test-support")]
++pub use crate::auth::storage::logout_selara_test_stores;
++pub(crate) use crate::auth::storage::{LoginPersistenceGuard, begin_login_persistence};
+ use crate::auth::util::try_parse_error_message;
+ use crate::default_client::create_client;
+ use crate::default_client::create_default_auth_client;
+@@ -1553,29 +1559,62 @@ async fn load_auth(
+ }
+ 
+ // Persist refreshed tokens into auth storage and update last_refresh.
++#[cfg(test)]
+ fn persist_tokens(
+     storage: &Arc<dyn AuthStorageBackend>,
+     id_token: Option<String>,
+     access_token: Option<String>,
+     refresh_token: Option<String>,
+ ) -> std::io::Result<AuthDotJson> {
+-    let mut auth_dot_json = storage
+-        .load()?
+-        .ok_or(std::io::Error::other("Token data is not available."))?;
++    persist_tokens_checked(storage, id_token, access_token, refresh_token, None, None)
++}
+ 
+-    let tokens = auth_dot_json.tokens.get_or_insert_with(TokenData::default);
+-    if let Some(id_token) = id_token {
+-        tokens.id_token = parse_chatgpt_jwt_claims(&id_token).map_err(std::io::Error::other)?;
+-    }
+-    if let Some(access_token) = access_token {
+-        tokens.access_token = access_token;
+-    }
+-    if let Some(refresh_token) = refresh_token {
+-        tokens.refresh_token = refresh_token;
+-    }
+-    auth_dot_json.last_refresh = Some(Utc::now());
+-    storage.save(&auth_dot_json)?;
+-    Ok(auth_dot_json)
++fn persist_tokens_checked(
++    storage: &Arc<dyn AuthStorageBackend>,
++    id_token: Option<String>,
++    access_token: Option<String>,
++    refresh_token: Option<String>,
++    expected_account_id: Option<&str>,
++    expected_refresh_token: Option<&str>,
++) -> std::io::Result<AuthDotJson> {
++    let expected_account_id = expected_account_id.map(ToOwned::to_owned);
++    let expected_refresh_token = if crate::auth::storage::auth_persistence_locking_enabled() {
++        expected_refresh_token.map(ToOwned::to_owned)
++    } else {
++        None
++    };
++    storage.update(Box::new(move |auth_dot_json| {
++        if let Some(expected_refresh_token) = expected_refresh_token.as_deref() {
++            let tokens = auth_dot_json
++                .tokens
++                .as_ref()
++                .ok_or_else(|| std::io::Error::other(REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE))?;
++            let account_matches = expected_account_id
++                .as_deref()
++                .zip(tokens.account_id.as_deref())
++                .is_some_and(|(expected, actual)| expected == actual);
++            if tokens.refresh_token != expected_refresh_token || !account_matches {
++                return Err(std::io::Error::other(
++                    REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE,
++                ));
++            }
++        }
++        let tokens = auth_dot_json.tokens.get_or_insert_with(TokenData::default);
++        if let Some(id_token) = id_token {
++            tokens.id_token = parse_chatgpt_jwt_claims(&id_token).map_err(std::io::Error::other)?;
++        }
++        if let Some(access_token) = access_token {
++            tokens.access_token = access_token;
++        }
++        if let Some(refresh_token) = refresh_token {
++            tokens.refresh_token = refresh_token;
++        }
++        auth_dot_json.last_refresh = Some(Utc::now());
++        Ok(())
++    }))?;
++    storage
++        .load()?
++        .ok_or_else(|| std::io::Error::other("Token data is not available."))
+ }
+ 
+ // Requests refreshed ChatGPT OAuth tokens from the auth service using a refresh token.
+@@ -2730,6 +2769,14 @@ impl AuthManager {
+         Ok(manager)
+     }
+ 
++    /// Builds the manager used by Selara's writing mode. This deliberately
++    /// skips process-configured workload identity and enables cross-process
++    /// persistence coordination for OAuth callbacks, refresh, and logout.
++    pub async fn shared_for_selara_writing(auth_config: AuthConfig) -> Arc<Self> {
++        enable_auth_persistence_locking();
++        Arc::new(Self::new_from_auth_config(auth_config, false).await)
++    }
++
+     pub fn unauthorized_recovery(self: &Arc<Self>) -> UnauthorizedRecovery {
+         UnauthorizedRecovery::new(Arc::clone(self))
+     }
+@@ -3014,13 +3061,43 @@ impl AuthManager {
+         auth: &ChatgptAuth,
+         refresh_token: String,
+     ) -> Result<(), RefreshTokenError> {
++        let expected_refresh_token = refresh_token.clone();
++        let refresh_lock_home = self.codex_home.clone();
++        let _refresh_operation_lock =
++            tokio::task::spawn_blocking(move || acquire_auth_refresh_lock(&refresh_lock_home))
++                .await
++                .map_err(|err| RefreshTokenError::Transient(std::io::Error::other(err)))??;
++        if crate::auth::storage::auth_persistence_locking_enabled() {
++            // Reload after acquiring the cross-process refresh lock. A waiter
++            // must never send a refresh token another process already rotated.
++            let current = auth.storage().load()?.and_then(|stored| stored.tokens);
++            let expected_account = auth
++                .current_token_data()
++                .and_then(|tokens| tokens.account_id);
++            let current = current
++                .ok_or_else(|| std::io::Error::other("Authentication changed before refresh"))?;
++            if current.account_id != expected_account {
++                return Err(
++                    std::io::Error::other("Authentication account changed before refresh").into(),
++                );
++            }
++            if current.refresh_token != refresh_token {
++                self.reload().await;
++                return Ok(());
++            }
++        }
+         let refresh_response = request_chatgpt_token_refresh(refresh_token, auth.client()).await?;
+ 
+-        persist_tokens(
++        let expected_account_id = auth
++            .current_token_data()
++            .and_then(|tokens| tokens.account_id);
++        persist_tokens_checked(
+             auth.storage(),
+             refresh_response.id_token,
+             refresh_response.access_token,
+             refresh_response.refresh_token,
++            expected_account_id.as_deref(),
++            Some(&expected_refresh_token),
+         )
+         .map_err(RefreshTokenError::from)?;
+         self.reload().await;
+@@ -3045,3 +3122,21 @@ fn auth_config_from(config: &impl AuthManagerConfig) -> AuthConfig {
+ #[cfg(test)]
+ #[path = "auth_tests.rs"]
+ mod tests;
++
++pub(crate) fn save_auth_guarded(
++    home: &Path,
++    auth: &AuthDotJson,
++    mode: AuthCredentialsStoreMode,
++    backend: AuthKeyringBackendKind,
++    guard: Option<&LoginPersistenceGuard>,
++) -> std::io::Result<()> {
++    let storage = create_auth_storage(home.to_path_buf(), mode, backend);
++    match guard {
++        Some(guard) => storage.save_guarded(auth, guard),
++        None => storage.save(auth),
++    }
++}
++
++#[cfg(test)]
++#[path = "selara_process_tests.rs"]
++mod selara_process_tests;
+diff --git a/codex-rs/login/src/auth/selara_process_tests.rs b/codex-rs/login/src/auth/selara_process_tests.rs
+new file mode 100644
+index 0000000..1407393
+--- /dev/null
++++ b/codex-rs/login/src/auth/selara_process_tests.rs
+@@ -0,0 +1,270 @@
++//! Real-process regression tests for the opt-in Selara persistence boundary.
++use super::*;
++use base64::Engine;
++use std::process::{Child, Command, Stdio};
++use tempfile::TempDir;
++use wiremock::matchers::{method, path};
++use wiremock::{Mock, MockServer, ResponseTemplate};
++
++fn fixture(account: &str, refresh: &str) -> AuthDotJson {
++    let payload = serde_json::json!({"email":"fixture@example.invalid","https://api.openai.com/auth":{"chatgpt_account_id":account,"chatgpt_plan_type":"plus"}});
++    let jwt = format!(
++        "e30.{}.fixture",
++        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
++    );
++    serde_json::from_value(serde_json::json!({"auth_mode":"chatgpt","tokens":{"id_token":jwt,"access_token":"fixture-access","refresh_token":refresh,"account_id":account},"last_refresh":"2020-01-01T00:00:00Z"})).unwrap()
++}
++fn config(home: &Path) -> AuthConfig {
++    AuthConfig {
++        codex_home: home.into(),
++        auth_credentials_store_mode: AuthCredentialsStoreMode::File,
++        keyring_backend_kind: AuthKeyringBackendKind::Direct,
++        forced_login_method: None,
++        chatgpt_base_url: None,
++        forced_chatgpt_workspace_id: None,
++        managed_auth_policy: ManagedAuthPolicy::default(),
++        auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
++            OutboundProxyPolicy::ReqwestDefault,
++        )),
++    }
++}
++fn child(home: &Path, operation: &str, endpoint: &str) -> Child {
++    Command::new(std::env::current_exe().unwrap())
++        .arg("selara_process_child")
++        .arg("--nocapture")
++        .env("SELARA_AUTH_TEST_HOME", home)
++        .env("SELARA_AUTH_TEST_OP", operation)
++        .env(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, endpoint)
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .spawn()
++        .unwrap()
++}
++#[tokio::test]
++async fn selara_process_child() {
++    let Ok(home) = std::env::var("SELARA_AUTH_TEST_HOME") else {
++        return;
++    };
++    let home = PathBuf::from(home);
++    enable_auth_persistence_locking();
++    match std::env::var("SELARA_AUTH_TEST_OP").unwrap().as_str() {
++        "refresh" | "refresh-stale" => {
++            let manager = AuthManager::shared_for_selara_writing(config(&home)).await;
++            let result = manager.refresh_token().await;
++            if std::env::var("SELARA_AUTH_TEST_OP").unwrap() == "refresh" {
++                assert!(result.is_ok(), "refresh failed");
++            } else {
++                assert!(result.is_err(), "stale refresh was accepted");
++            }
++        }
++        "logout" => {
++            logout(
++                &home,
++                AuthCredentialsStoreMode::File,
++                AuthKeyringBackendKind::Direct,
++            )
++            .unwrap();
++        }
++        "login" => {
++            save_auth(
++                &home,
++                &fixture("new-account", "new-refresh"),
++                AuthCredentialsStoreMode::File,
++                AuthKeyringBackendKind::Direct,
++            )
++            .unwrap();
++        }
++        "old-cancel" => {
++            let guard = begin_login_persistence(&home).unwrap().unwrap();
++            std::fs::write(home.join("old-ready"), b"ready").unwrap();
++            while !home.join("old-continue").exists() {
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++            guard.cancel();
++            guard.cancel();
++        }
++        "new-callback" => {
++            let guard = begin_login_persistence(&home).unwrap().unwrap();
++            std::fs::write(home.join("new-ready"), b"ready").unwrap();
++            while !home.join("new-continue").exists() {
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++            save_auth_guarded(
++                &home,
++                &fixture("new-account", "new-refresh"),
++                AuthCredentialsStoreMode::File,
++                AuthKeyringBackendKind::Direct,
++                Some(&guard),
++            )
++            .unwrap();
++        }
++        "callback" => {
++            let guard = begin_login_persistence(&home).unwrap().unwrap();
++            std::fs::write(home.join("callback-ready"), b"ready").unwrap();
++            while !home.join("callback-continue").exists() {
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++            assert!(
++                save_auth_guarded(
++                    &home,
++                    &fixture("callback-account", "callback-refresh"),
++                    AuthCredentialsStoreMode::File,
++                    AuthKeyringBackendKind::Direct,
++                    Some(&guard)
++                )
++                .is_err()
++            );
++        }
++        _ => panic!("unknown child operation"),
++    }
++}
++async fn refresh_server() -> MockServer {
++    let server = MockServer::start().await;
++    Mock::given(method("POST")).and(path("/token")).respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(650)).set_body_json(serde_json::json!({"access_token":"rotated-access","refresh_token":"rotated-refresh"}))).mount(&server).await;
++    server
++}
++async fn request_started(server: &MockServer) {
++    for _ in 0..500 {
++        if !server.received_requests().await.unwrap().is_empty() {
++            return;
++        }
++        tokio::time::sleep(Duration::from_millis(10)).await;
++    }
++    panic!("mock refresh request never started");
++}
++fn home() -> TempDir {
++    let home = TempDir::new().unwrap();
++    save_auth(
++        home.path(),
++        &fixture("original-account", "original-refresh"),
++        AuthCredentialsStoreMode::File,
++        AuthKeyringBackendKind::Direct,
++    )
++    .unwrap();
++    home
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
++async fn selara_two_process_delayed_refresh_cannot_restore_logout() {
++    let home = home();
++    let server = refresh_server().await;
++    let endpoint = format!("{}/token", server.uri());
++    let mut refresh = child(home.path(), "refresh-stale", &endpoint);
++    request_started(&server).await;
++    assert!(
++        child(home.path(), "logout", &endpoint)
++            .wait()
++            .unwrap()
++            .success()
++    );
++    assert!(refresh.wait().unwrap().success());
++    assert!(
++        load_auth_dot_json(
++            home.path(),
++            AuthCredentialsStoreMode::File,
++            AuthKeyringBackendKind::Direct
++        )
++        .unwrap()
++        .is_none()
++    );
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
++async fn selara_two_process_delayed_refresh_cannot_overwrite_login() {
++    let home = home();
++    let server = refresh_server().await;
++    let endpoint = format!("{}/token", server.uri());
++    let mut refresh = child(home.path(), "refresh-stale", &endpoint);
++    request_started(&server).await;
++    assert!(
++        child(home.path(), "login", &endpoint)
++            .wait()
++            .unwrap()
++            .success()
++    );
++    assert!(refresh.wait().unwrap().success());
++    let auth = load_auth_dot_json(
++        home.path(),
++        AuthCredentialsStoreMode::File,
++        AuthKeyringBackendKind::Direct,
++    )
++    .unwrap()
++    .unwrap()
++    .tokens
++    .unwrap();
++    assert_eq!(auth.account_id.as_deref(), Some("new-account"));
++    assert_eq!(auth.refresh_token, "new-refresh");
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
++async fn selara_two_process_refresh_exchanges_once() {
++    let home = home();
++    let server = refresh_server().await;
++    let endpoint = format!("{}/token", server.uri());
++    let mut first = child(home.path(), "refresh", &endpoint);
++    request_started(&server).await;
++    let mut second = child(home.path(), "refresh", &endpoint);
++    assert!(first.wait().unwrap().success());
++    assert!(second.wait().unwrap().success());
++    assert_eq!(server.received_requests().await.unwrap().len(), 1);
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
++async fn selara_two_process_callback_cannot_restore_logout() {
++    let home = home();
++    let mut callback = child(home.path(), "callback", "");
++    for _ in 0..500 {
++        if home.path().join("callback-ready").exists() {
++            break;
++        }
++        tokio::time::sleep(Duration::from_millis(10)).await;
++    }
++    assert!(home.path().join("callback-ready").exists());
++    assert!(child(home.path(), "logout", "").wait().unwrap().success());
++    std::fs::write(home.path().join("callback-continue"), b"go").unwrap();
++    assert!(callback.wait().unwrap().success());
++    assert!(
++        load_auth_dot_json(
++            home.path(),
++            AuthCredentialsStoreMode::File,
++            AuthKeyringBackendKind::Direct
++        )
++        .unwrap()
++        .is_none()
++    );
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
++async fn selara_two_process_old_cancel_preserves_new_login() {
++    let home = home();
++    let mut old = child(home.path(), "old-cancel", "");
++    for _ in 0..500 {
++        if home.path().join("old-ready").exists() {
++            break;
++        }
++        tokio::time::sleep(Duration::from_millis(10)).await;
++    }
++    assert!(home.path().join("old-ready").exists());
++    let mut new = child(home.path(), "new-callback", "");
++    for _ in 0..500 {
++        if home.path().join("new-ready").exists() {
++            break;
++        }
++        tokio::time::sleep(Duration::from_millis(10)).await;
++    }
++    assert!(home.path().join("new-ready").exists());
++    std::fs::write(home.path().join("old-continue"), b"go").unwrap();
++    assert!(old.wait().unwrap().success());
++    std::fs::write(home.path().join("new-continue"), b"go").unwrap();
++    assert!(new.wait().unwrap().success());
++    assert_eq!(
++        load_auth_dot_json(
++            home.path(),
++            AuthCredentialsStoreMode::File,
++            AuthKeyringBackendKind::Direct
++        )
++        .unwrap()
++        .unwrap()
++        .tokens
++        .unwrap()
++        .account_id
++        .as_deref(),
++        Some("new-account")
++    );
++}
+diff --git a/codex-rs/login/src/auth/storage.rs b/codex-rs/login/src/auth/storage.rs
+index 8a9d75f..0d0f387 100644
+--- a/codex-rs/login/src/auth/storage.rs
++++ b/codex-rs/login/src/auth/storage.rs
+@@ -164,7 +164,26 @@ pub(super) fn delete_file_if_exists(codex_home: &Path) -> std::io::Result<bool>
+     }
+ }
+ 
++type AuthUpdater = Box<dyn FnOnce(&mut AuthDotJson) -> std::io::Result<()> + Send>;
++
+ pub(super) trait AuthStorageBackend: Debug + Send + Sync {
++    fn update(&self, updater: AuthUpdater) -> std::io::Result<()> {
++        let mut auth = self
++            .load()?
++            .ok_or(std::io::Error::other("Token data is not available."))?;
++        updater(&mut auth)?;
++        self.save(&auth)
++    }
++    fn save_guarded(
++        &self,
++        _auth: &AuthDotJson,
++        _guard: &LoginPersistenceGuard,
++    ) -> std::io::Result<()> {
++        Err(std::io::Error::other(
++            "Guarded authentication persistence is unavailable",
++        ))
++    }
++
+     fn load(&self) -> std::io::Result<Option<AuthDotJson>>;
+     fn save(&self, auth: &AuthDotJson) -> std::io::Result<()>;
+     fn delete(&self) -> std::io::Result<bool>;
+@@ -210,6 +229,9 @@ impl AuthStorageBackend for FileAuthStorage {
+             std::fs::create_dir_all(parent)?;
+         }
+         let json_data = serde_json::to_string_pretty(auth_dot_json)?;
++        if auth_persistence_locking_enabled() {
++            return atomic_auth_write(&self.codex_home, "auth.json", json_data.as_bytes());
++        }
+         let mut options = OpenOptions::new();
+         options.truncate(true).write(true).create(true);
+         #[cfg(unix)]
+@@ -514,7 +536,8 @@ fn create_auth_storage_with_store(
+     keyring_store: Arc<dyn KeyringStore>,
+     keyring_backend_kind: AuthKeyringBackendKind,
+ ) -> Arc<dyn AuthStorageBackend> {
+-    match mode {
++    let home = codex_home.clone();
++    let backend: Arc<dyn AuthStorageBackend> = match mode {
+         AuthCredentialsStoreMode::File => Arc::new(FileAuthStorage::new(codex_home)),
+         AuthCredentialsStoreMode::Keyring => {
+             create_keyring_auth_storage(codex_home, keyring_store, keyring_backend_kind)
+@@ -525,6 +548,14 @@ fn create_auth_storage_with_store(
+             keyring_backend_kind,
+         )),
+         AuthCredentialsStoreMode::Ephemeral => Arc::new(EphemeralAuthStorage::new(codex_home)),
++    };
++    if auth_persistence_locking_enabled() {
++        Arc::new(LockedAuthStorage {
++            codex_home: home,
++            backend,
++        })
++    } else {
++        backend
+     }
+ }
+ 
+@@ -546,3 +577,184 @@ fn create_keyring_auth_storage(
+ #[cfg(test)]
+ #[path = "storage_tests.rs"]
+ mod tests;
++
++// The wrapper owns the entire transaction, including Auto store fallback and
++// keyring migration. Internal backends never recursively acquire the same lock.
++static AUTH_PERSISTENCE_LOCKING_ENABLED: std::sync::atomic::AtomicBool =
++    std::sync::atomic::AtomicBool::new(false);
++
++pub fn enable_auth_persistence_locking() {
++    AUTH_PERSISTENCE_LOCKING_ENABLED.store(true, std::sync::atomic::Ordering::Release);
++}
++pub(crate) fn auth_persistence_locking_enabled() -> bool {
++    AUTH_PERSISTENCE_LOCKING_ENABLED.load(std::sync::atomic::Ordering::Acquire)
++}
++fn home_lock(home: &Path, name: &str) -> std::io::Result<File> {
++    std::fs::create_dir_all(home)?;
++    let mut options = OpenOptions::new();
++    options.create(true).read(true).write(true);
++    #[cfg(unix)]
++    options.mode(0o600);
++    let file = options.open(home.canonicalize()?.join(name))?;
++    file.lock()?;
++    Ok(file)
++}
++pub(crate) fn acquire_auth_refresh_lock(home: &Path) -> std::io::Result<Option<File>> {
++    if auth_persistence_locking_enabled() {
++        home_lock(home, ".auth.refresh.lock").map(Some)
++    } else {
++        Ok(None)
++    }
++}
++fn atomic_auth_write(home: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> {
++    let mut temporary = tempfile::NamedTempFile::new_in(home)?;
++    temporary.write_all(contents)?;
++    temporary.as_file().sync_all()?;
++    temporary
++        .persist(home.join(name))
++        .map_err(|error| error.error)?;
++    Ok(())
++}
++fn generation(home: &Path) -> std::io::Result<String> {
++    match std::fs::read_to_string(home.join(".auth.generation")) {
++        Ok(value) if value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
++            Ok(value)
++        }
++        // Corruption invalidates pending callbacks. The next mutation replaces
++        // it atomically with a new unpredictable generation; logout stays usable.
++        Ok(_) => Ok(String::new()),
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
++        Err(e) => Err(e),
++    }
++}
++fn advance_generation(home: &Path) -> std::io::Result<()> {
++    let next = format!("{:032x}", rand::random::<u128>());
++    atomic_auth_write(home, ".auth.generation", next.as_bytes())
++}
++#[derive(Debug)]
++pub(crate) struct LoginPersistenceGuard {
++    home: PathBuf,
++    generation: String,
++    cancelled: std::sync::atomic::AtomicBool,
++}
++impl LoginPersistenceGuard {
++    pub(crate) fn cancel(&self) {
++        self.cancelled
++            .store(true, std::sync::atomic::Ordering::Release);
++        // Serialize cancellation with any callback already committing.
++        if let Ok(_lock) = home_lock(&self.home, ".auth.lock")
++            && generation(&self.home).ok().as_ref() == Some(&self.generation)
++        {
++            let _ = advance_generation(&self.home);
++        }
++    }
++}
++pub(crate) fn begin_login_persistence(
++    home: &Path,
++) -> std::io::Result<Option<Arc<LoginPersistenceGuard>>> {
++    if !auth_persistence_locking_enabled() {
++        return Ok(None);
++    }
++    let _lock = home_lock(home, ".auth.lock")?;
++    // Beginning a newer login invalidates an older in-flight callback.
++    advance_generation(home)?;
++    Ok(Some(Arc::new(LoginPersistenceGuard {
++        home: home.canonicalize()?,
++        generation: generation(home)?,
++        cancelled: std::sync::atomic::AtomicBool::new(false),
++    })))
++}
++#[derive(Debug)]
++struct LockedAuthStorage {
++    codex_home: PathBuf,
++    backend: Arc<dyn AuthStorageBackend>,
++}
++impl AuthStorageBackend for LockedAuthStorage {
++    fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
++        let _lock = home_lock(&self.codex_home, ".auth.lock")?;
++        self.backend.load()
++    }
++    fn save(&self, auth: &AuthDotJson) -> std::io::Result<()> {
++        let _lock = home_lock(&self.codex_home, ".auth.lock")?;
++        // Advance first: an interrupted write still invalidates pending callbacks.
++        advance_generation(&self.codex_home)?;
++        self.backend.save(auth)
++    }
++    fn delete(&self) -> std::io::Result<bool> {
++        let _lock = home_lock(&self.codex_home, ".auth.lock")?;
++        advance_generation(&self.codex_home)?;
++        self.backend.delete()
++    }
++    fn update(&self, updater: AuthUpdater) -> std::io::Result<()> {
++        let _lock = home_lock(&self.codex_home, ".auth.lock")?;
++        let mut auth = self
++            .backend
++            .load()?
++            .ok_or(std::io::Error::other("Token data is not available."))?;
++        updater(&mut auth)?;
++        advance_generation(&self.codex_home)?;
++        self.backend.save(&auth)
++    }
++    fn save_guarded(
++        &self,
++        auth: &AuthDotJson,
++        guard: &LoginPersistenceGuard,
++    ) -> std::io::Result<()> {
++        let _lock = home_lock(&self.codex_home, ".auth.lock")?;
++        if guard.cancelled.load(std::sync::atomic::Ordering::Acquire)
++            || self.codex_home.canonicalize()? != guard.home
++            || generation(&self.codex_home)? != guard.generation
++        {
++            return Err(std::io::Error::other(
++                "Login was canceled or authentication changed while login was pending",
++            ));
++        }
++        advance_generation(&self.codex_home)?;
++        self.backend.save(auth)
++    }
++}
++
++/// Sign out every official Codex auth backend for this selected home. This is
++/// independent of cloud availability and never touches another application's
++/// credential namespace. Partial deletion is an error, never a successful logout.
++pub fn logout_selara_all_stores(home: &Path) -> std::io::Result<bool> {
++    logout_selara_with_store(home, Arc::new(DefaultKeyringStore))
++}
++
++#[cfg(feature = "selara-test-support")]
++pub fn logout_selara_test_stores(home: &Path) -> std::io::Result<bool> {
++    logout_selara_with_store(
++        home,
++        Arc::new(codex_keyring_store::tests::MockKeyringStore::default()),
++    )
++}
++
++fn logout_selara_with_store(home: &Path, keyring: Arc<dyn KeyringStore>) -> std::io::Result<bool> {
++    let _lock = home_lock(home, ".auth.lock")?;
++    advance_generation(home)?;
++    let backends: Vec<Box<dyn AuthStorageBackend>> = vec![
++        Box::new(FileAuthStorage::new(home.to_path_buf())),
++        Box::new(DirectKeyringAuthStorage::new(
++            home.to_path_buf(),
++            keyring.clone(),
++        )),
++        Box::new(SecretsKeyringAuthStorage::new(home.to_path_buf(), keyring)),
++        Box::new(EphemeralAuthStorage::new(home.to_path_buf())),
++    ];
++    let mut removed = false;
++    let mut errors = Vec::new();
++    for backend in backends {
++        match backend.delete() {
++            Ok(deleted) => removed |= deleted,
++            Err(error) => errors.push(error.to_string()),
++        }
++    }
++    if errors.is_empty() {
++        Ok(removed)
++    } else {
++        Err(std::io::Error::other(format!(
++            "Some Codex authentication stores could not be cleared: {}",
++            errors.join("; ")
++        )))
++    }
++}
+diff --git a/codex-rs/login/src/auth/storage_tests.rs b/codex-rs/login/src/auth/storage_tests.rs
+index 0c69343..6bedcdc 100644
+--- a/codex-rs/login/src/auth/storage_tests.rs
++++ b/codex-rs/login/src/auth/storage_tests.rs
+@@ -815,3 +815,43 @@ fn auto_auth_storage_delete_removes_keyring_and_file() -> anyhow::Result<()> {
+     );
+     Ok(())
+ }
++
++#[test]
++fn selara_logout_removes_mixed_official_backends_without_configuration() -> anyhow::Result<()> {
++    let home = tempdir()?;
++    let keyring = MockKeyringStore::default();
++    let auth = auth_with_prefix("mixed");
++    seed_secrets_backend_with_auth(&keyring, home.path(), &auth)?;
++    let direct = DirectKeyringAuthStorage::new(home.path().into(), Arc::new(keyring.clone()));
++    direct.save(&auth)?;
++    let file = FileAuthStorage::new(home.path().into());
++    file.save(&auth)?;
++    assert!(logout_selara_with_store(
++        home.path(),
++        Arc::new(keyring.clone())
++    )?);
++    assert!(file.load()?.is_none());
++    assert!(direct.load()?.is_none());
++    assert!(
++        SecretsKeyringAuthStorage::new(home.path().into(), Arc::new(keyring))
++            .load()?
++            .is_none()
++    );
++    Ok(())
++}
++
++#[test]
++fn selara_logout_reports_backend_failure_after_attempting_other_stores() -> anyhow::Result<()> {
++    let home = tempdir()?;
++    let keyring = MockKeyringStore::default();
++    let auth = auth_with_prefix("mixed");
++    FileAuthStorage::new(home.path().into()).save(&auth)?;
++    let key = compute_store_key(home.path())?;
++    keyring.set_error(
++        &key,
++        KeyringError::Invalid("fixture".into(), "delete".into()),
++    );
++    assert!(logout_selara_with_store(home.path(), Arc::new(keyring)).is_err());
++    assert!(!get_auth_file(home.path()).exists());
++    Ok(())
++}
+diff --git a/codex-rs/login/src/server.rs b/codex-rs/login/src/server.rs
+index 677c740..52fba99 100644
+--- a/codex-rs/login/src/server.rs
++++ b/codex-rs/login/src/server.rs
+@@ -26,7 +26,7 @@ use std::time::Duration;
+ 
+ use crate::auth::AuthDotJson;
+ use crate::auth::AuthKeyringBackendKind;
+-use crate::auth::save_auth;
++use crate::auth::{LoginPersistenceGuard, begin_login_persistence, save_auth_guarded};
+ use crate::callback_params::LoginCallbackResult;
+ use crate::callback_params::login_callback_result_from_state;
+ use crate::default_client::create_raw_auth_client;
+@@ -147,11 +147,15 @@ impl LoginServer {
+ #[derive(Clone, Debug)]
+ pub struct ShutdownHandle {
+     shutdown_notify: Arc<tokio::sync::Notify>,
++    persistence_guard: Option<Arc<LoginPersistenceGuard>>,
+ }
+ 
+ impl ShutdownHandle {
+     /// Signals the login loop to terminate.
+     pub fn shutdown(&self) {
++        if let Some(guard) = &self.persistence_guard {
++            guard.cancel();
++        }
+         self.shutdown_notify.notify_one();
+     }
+ }
+@@ -206,7 +210,9 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
+     };
+ 
+     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
++    let persistence_guard = begin_login_persistence(&opts.codex_home)?;
+     let server_handle = {
++        let persistence_guard = persistence_guard.clone();
+         let shutdown_notify = shutdown_notify.clone();
+         let server = server;
+         tokio::spawn(async move {
+@@ -222,16 +228,18 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
+                         };
+ 
+                         let url_raw = req.url().to_string();
+-                        let response =
+-                            process_request(
++                        let response = tokio::select! {
++                            _ = shutdown_notify.notified() => { break Err(io::Error::other("Login was not completed")); }
++                            response = process_request(
+                                 &url_raw,
+                                 &opts,
+                                 &redirect_uri,
+                                 &pkce,
+                                 actual_port,
+                                 &state,
+-                            )
+-                            .await;
++                                persistence_guard.clone(),
++                            ) => response,
++                        };
+ 
+                         let exit_result = match response {
+                             HandledRequest::Response(response) => {
+@@ -301,7 +309,10 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
+         auth_url,
+         actual_port,
+         server_handle,
+-        shutdown_handle: ShutdownHandle { shutdown_notify },
++        shutdown_handle: ShutdownHandle {
++            shutdown_notify,
++            persistence_guard,
++        },
+     })
+ }
+ 
+@@ -330,6 +341,7 @@ async fn process_request(
+     pkce: &PkceCodes,
+     actual_port: u16,
+     state: &str,
++    persistence_guard: Option<Arc<LoginPersistenceGuard>>,
+ ) -> HandledRequest {
+     let parsed_url = match url::Url::parse(&format!("http://localhost{url_raw}")) {
+         Ok(u) => u,
+@@ -434,7 +446,7 @@ async fn process_request(
+                     )
+                     .await
+                     .ok();
+-                    if let Err(err) = persist_tokens_async(
++                    if let Err(err) = persist_tokens_async_guarded(
+                         &opts.codex_home,
+                         api_key.clone(),
+                         tokens.id_token.clone(),
+@@ -442,6 +454,7 @@ async fn process_request(
+                         tokens.refresh_token.clone(),
+                         opts.cli_auth_credentials_store_mode,
+                         opts.auth_keyring_backend_kind,
++                        persistence_guard,
+                     )
+                     .await
+                     {
+@@ -891,6 +904,30 @@ pub(crate) async fn persist_tokens_async(
+     refresh_token: String,
+     auth_credentials_store_mode: AuthCredentialsStoreMode,
+     keyring_backend_kind: AuthKeyringBackendKind,
++) -> io::Result<()> {
++    persist_tokens_async_guarded(
++        codex_home,
++        api_key,
++        id_token,
++        access_token,
++        refresh_token,
++        auth_credentials_store_mode,
++        keyring_backend_kind,
++        None,
++    )
++    .await
++}
++
++#[allow(clippy::too_many_arguments)] // Keep the upstream persistence arguments plus the optional guard.
++pub(crate) async fn persist_tokens_async_guarded(
++    codex_home: &Path,
++    api_key: Option<String>,
++    id_token: String,
++    access_token: String,
++    refresh_token: String,
++    auth_credentials_store_mode: AuthCredentialsStoreMode,
++    keyring_backend_kind: AuthKeyringBackendKind,
++    persistence_guard: Option<Arc<LoginPersistenceGuard>>,
+ ) -> io::Result<()> {
+     // Reuse existing synchronous logic but run it off the async runtime.
+     let codex_home = codex_home.to_path_buf();
+@@ -917,11 +954,12 @@ pub(crate) async fn persist_tokens_async(
+             bedrock_api_key: None,
+             bedrock_access_keys: None,
+         };
+-        save_auth(
++        save_auth_guarded(
+             &codex_home,
+             &auth,
+             auth_credentials_store_mode,
+             keyring_backend_kind,
++            persistence_guard.as_deref(),
+         )
+     })
+     .await
+diff --git a/codex-rs/selara-writing/Cargo.toml b/codex-rs/selara-writing/Cargo.toml
+new file mode 100644
+index 0000000..2e7e80d
+--- /dev/null
++++ b/codex-rs/selara-writing/Cargo.toml
+@@ -0,0 +1,27 @@
++[package]
++name = "selara-codex"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++
++[features]
++# A separate, unshipped build for loopback transport and managed-policy fixtures.
++selara-test-support = ["codex-login/selara-test-support"]
++
++[dependencies]
++anyhow = { workspace = true }
++codex-api = { workspace = true }
++codex-cloud-config = { workspace = true }
++codex-config = { workspace = true }
++codex-exec-server = { workspace = true }
++codex-utils-home-dir = { workspace = true }
++codex-http-client = { workspace = true }
++codex-login = { workspace = true }
++codex-protocol = { workspace = true }
++futures = { workspace = true }
++http = { workspace = true }
++serde = { workspace = true, features = ["derive"] }
++serde_json = { workspace = true }
++tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
++toml = { workspace = true }
++uuid = { workspace = true, features = ["v4"] }
+diff --git a/codex-rs/selara-writing/src/main.rs b/codex-rs/selara-writing/src/main.rs
+new file mode 100644
+index 0000000..7934f2c
+--- /dev/null
++++ b/codex-rs/selara-writing/src/main.rs
+@@ -0,0 +1,636 @@
++//! Deliberately separate from the Codex agent session. Only pinned upstream auth,
++//! managed auth policy, model discovery, and Responses SSE transport are used.
++//! No thread store, instruction discovery, tool registry, hooks, plugins, skills,
++//! MCP, environment roots, or execution methods are constructed on this path.
++use anyhow::{Context, Result, bail, ensure};
++use codex_api::{
++    AuthProvider, Compression, ModelsClient, Provider, ReqwestTransport, ResponseEvent,
++    ResponsesClient, RetryConfig,
++};
++use codex_config::{ConfigLayerStack, ConfigLoadOptions, LoaderOverrides, NoopThreadConfigLoader};
++use codex_login::{
++    AuthConfig, AuthCredentialsStoreMode, AuthKeyringBackendKind, AuthManager, AuthRouteConfig,
++    CodexAuth,
++};
++use codex_protocol::config_types::ForcedLoginMethod;
++use codex_protocol::openai_models::ModelInfo;
++use futures::StreamExt;
++use http::{HeaderMap, HeaderValue};
++use serde::Deserialize;
++use serde_json::{Value, json};
++use std::{
++    collections::{BTreeMap, HashMap},
++    path::PathBuf,
++    sync::Arc,
++    time::Duration,
++};
++use tokio::{
++    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
++    sync::mpsc,
++};
++
++const CHATGPT_BASE: &str = "https://chatgpt.com/backend-api/";
++const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
++const MAX_FRAME: u64 = 4 * 1024 * 1024;
++const MAX_THREADS: usize = 32;
++const TURN_TIMEOUT: Duration = Duration::from_secs(120);
++
++type Out = mpsc::Sender<Value>;
++
++#[derive(Default, Deserialize)]
++struct AuthSettings {
++    cli_auth_credentials_store: Option<AuthCredentialsStoreMode>,
++    forced_login_method: Option<ForcedLoginMethod>,
++    forced_chatgpt_workspace_id: Option<Value>,
++    #[serde(default)]
++    features: BTreeMap<String, Value>,
++}
++
++#[derive(Clone)]
++struct Settings {
++    home: PathBuf,
++    overrides: LoaderOverrides,
++    endpoint: String,
++}
++
++fn main() -> Result<()> {
++    let args: Vec<_> = std::env::args().skip(1).collect();
++    if args == ["--version"] {
++        println!("selara-codex {}", env!("CARGO_PKG_VERSION"));
++        return Ok(());
++    }
++    let expected = [
++        "app-server",
++        "--listen",
++        "stdio://",
++        "--selara-writing-mode",
++    ];
++    ensure!(
++        args.iter().take(4).map(String::as_str).eq(expected),
++        "this bundled runtime requires app-server --listen stdio:// --selara-writing-mode"
++    );
++    #[allow(unused_mut)]
++    let mut endpoint = CODEX_BASE.to_owned();
++    #[allow(unused_mut)]
++    let mut overrides = LoaderOverrides {
++        ignore_project_config: true,
++        ignore_user_and_project_exec_policy_rules: true,
++        ..Default::default()
++    };
++    if args.len() != 4 {
++        #[cfg(feature = "selara-test-support")]
++        {
++            ensure!(
++                args.len() == 8 && args[4] == "--test-endpoint" && args[6] == "--test-policy-dir",
++                "invalid test arguments"
++            );
++            ensure!(
++                args[5].starts_with("http://127.0.0.1:"),
++                "test endpoint must be loopback"
++            );
++            endpoint = args[5].clone();
++            overrides = LoaderOverrides::with_managed_config_path_for_tests(
++                PathBuf::from(&args[7]).join("managed_config.toml"),
++            );
++            overrides.ignore_project_config = true;
++            overrides.ignore_user_and_project_exec_policy_rules = true;
++        }
++        #[cfg(not(feature = "selara-test-support"))]
++        bail!("unsupported runtime arguments");
++    }
++    // Runs before creating any runtime threads. Ignore legacy endpoint, auth,
++    // model, and feature environment overrides; only CODEX_HOME selects a store.
++    for (key, _) in std::env::vars_os() {
++        let name = key.to_string_lossy();
++        if (name.starts_with("CODEX_") && name != "CODEX_HOME") || name.starts_with("OPENAI_") {
++            // SAFETY: this is single-threaded process startup, before Tokio.
++            unsafe {
++                std::env::remove_var(key);
++            }
++        }
++    }
++    let home = codex_utils_home_dir::find_codex_home()?;
++    std::fs::create_dir_all(&home)?;
++    let home = std::fs::canonicalize(home)?;
++    codex_login::auth::enable_auth_persistence_locking();
++    tokio::runtime::Builder::new_multi_thread()
++        .enable_all()
++        .build()?
++        .block_on(run(Settings {
++            home,
++            overrides,
++            endpoint,
++        }))
++}
++
++impl Settings {
++    async fn layers(
++        &self,
++        cloud: codex_config::CloudConfigBundleLoader,
++    ) -> Result<ConfigLayerStack> {
++        Ok(codex_config::loader::load_config_layers_state(
++            codex_exec_server::LOCAL_FS.as_ref(),
++            &self.home,
++            None,
++            &[],
++            ConfigLoadOptions {
++                loader_overrides: self.overrides.clone(),
++                strict_config: false,
++                cloud_config_bundle: cloud,
++            },
++            &NoopThreadConfigLoader,
++        )
++        .await?)
++    }
++    fn auth_config(&self, stack: &ConfigLayerStack) -> Result<AuthConfig> {
++        // Deserialize only the account/store allowlist. All other configuration
++        // values are inert and cannot enter requests or construct extensions.
++        let settings: AuthSettings = stack.effective_config().try_into()?;
++        let requirements = stack.requirements();
++        ensure!(
++            requirements.network.is_none(),
++            "managed network constraints require a transport policy unsupported by Selara writing mode"
++        );
++        if let Some(required) = &requirements.chatgpt_base_url {
++            ensure!(
++                required.value.trim_end_matches('/') == CHATGPT_BASE.trim_end_matches('/'),
++                "managed ChatGPT endpoint is incompatible with Selara's fixed transport"
++            );
++        }
++        let workspaces = match settings.forced_chatgpt_workspace_id {
++            None => None,
++            Some(Value::String(s)) => Some(vec![s]),
++            Some(Value::Array(a)) => Some(
++                a.into_iter()
++                    .map(|s| {
++                        s.as_str()
++                            .map(str::to_owned)
++                            .context("invalid workspace restriction")
++                    })
++                    .collect::<Result<Vec<_>>>()?,
++            ),
++            _ => bail!("invalid workspace restriction"),
++        }
++        .map(|a| {
++            a.into_iter()
++                .map(|s| s.trim().to_owned())
++                .filter(|s| !s.is_empty())
++                .collect::<Vec<_>>()
++        })
++        .filter(|a| !a.is_empty());
++        let secret_store = requirements
++            .feature_requirements
++            .as_ref()
++            .and_then(|s| s.value.entries.get("secret_auth_storage").copied())
++            .or_else(|| {
++                settings
++                    .features
++                    .get("secret_auth_storage")
++                    .and_then(Value::as_bool)
++            })
++            .unwrap_or(cfg!(windows));
++        codex_login::default_client::set_default_client_residency_requirement(
++            *requirements.enforce_residency.get(),
++        );
++        let respect_system_proxy = requirements
++            .feature_requirements
++            .as_ref()
++            .and_then(|s| s.value.entries.get("respect_system_proxy").copied())
++            .or_else(|| {
++                settings
++                    .features
++                    .get("respect_system_proxy")
++                    .and_then(Value::as_bool)
++            })
++            .unwrap_or(false);
++        let route = codex_http_client::HttpClientFactory::new(if respect_system_proxy {
++            codex_http_client::OutboundProxyPolicy::RespectSystemProxy
++        } else {
++            codex_http_client::OutboundProxyPolicy::ReqwestDefault
++        });
++        let config = AuthConfig {
++            codex_home: self.home.clone(),
++            auth_credentials_store_mode: requirements
++                .cli_auth_credentials_store
++                .as_ref()
++                .map(|s| s.value)
++                .or(settings.cli_auth_credentials_store)
++                .unwrap_or_default(),
++            keyring_backend_kind: if secret_store {
++                AuthKeyringBackendKind::Secrets
++            } else {
++                AuthKeyringBackendKind::Direct
++            },
++            forced_login_method: settings.forced_login_method,
++            forced_chatgpt_workspace_id: workspaces,
++            managed_auth_policy: requirements.managed_auth_policy(),
++            chatgpt_base_url: Some(CHATGPT_BASE.into()),
++            auth_route_config: AuthRouteConfig::from_http_client_factory(route),
++        };
++        config.validate()?;
++        Ok(config)
++    }
++    async fn auth(&self) -> Result<(AuthConfig, Arc<AuthManager>)> {
++        let local = self.layers(Default::default()).await?;
++        let config = self.auth_config(&local)?;
++        let manager = AuthManager::shared_for_selara_writing(config.clone()).await;
++        // Retain enterprise requirements through the upstream authenticated
++        // loader. No cloud execution configuration is interpreted by this bin.
++        #[cfg(feature = "selara-test-support")]
++        if self.endpoint != CODEX_BASE {
++            return Ok((config, manager));
++        }
++        let cloud = codex_cloud_config::cloud_config_bundle_loader(
++            manager,
++            CHATGPT_BASE.into(),
++            self.home.clone(),
++            config.auth_route_config.http_client_factory().clone(),
++        );
++        let stack = self.layers(cloud).await?;
++        let config = self.auth_config(&stack)?;
++        let manager = AuthManager::shared_for_selara_writing(config.clone()).await;
++        Ok((config, manager))
++    }
++    fn provider(&self) -> Provider {
++        Provider {
++            name: "OpenAI".into(),
++            base_url: self.endpoint.clone(),
++            query_params: None,
++            headers: HeaderMap::new(),
++            retry: RetryConfig {
++                max_attempts: 2,
++                base_delay: Duration::from_millis(250),
++                retry_429: true,
++                retry_5xx: true,
++                retry_transport: true,
++            },
++            stream_idle_timeout: Duration::from_secs(60),
++        }
++    }
++}
++
++struct RequestAuth(HeaderMap);
++impl AuthProvider for RequestAuth {
++    fn add_auth_headers(&self, headers: &mut HeaderMap) {
++        headers.extend(self.0.clone());
++    }
++}
++
++async fn transport(
++    settings: &Settings,
++) -> Result<(ReqwestTransport, Provider, Arc<dyn AuthProvider>)> {
++    let (config, manager) = settings.auth().await?;
++    ensure!(
++        config.is_login_method_allowed(ForcedLoginMethod::Chatgpt),
++        "managed policy does not permit ChatGPT login"
++    );
++    manager.reload().await;
++    let auth = manager
++        .auth()
++        .await
++        .context("Sign in with ChatGPT to use Selara")?;
++    ensure!(
++        matches!(auth, CodexAuth::Chatgpt(_)),
++        "Selara requires a persisted ChatGPT login"
++    );
++    ensure!(
++        config.allows_auth(&auth),
++        "ChatGPT account is restricted by managed policy"
++    );
++    let mut headers = HeaderMap::new();
++    headers.insert(
++        http::header::AUTHORIZATION,
++        HeaderValue::from_str(&format!("Bearer {}", auth.get_token()?))?,
++    );
++    headers.insert(
++        "ChatGPT-Account-Id",
++        HeaderValue::from_str(
++            &auth
++                .get_account_id()
++                .context("ChatGPT account id is missing")?,
++        )?,
++    );
++    let client = codex_login::default_client::create_client_for_route_async(
++        config.auth_route_config.http_client_factory().clone(),
++        settings.endpoint.clone(),
++        codex_http_client::ClientRouteClass::Api,
++    )
++    .await?;
++    Ok((
++        ReqwestTransport::from_http_client(client),
++        settings.provider(),
++        Arc::new(RequestAuth(headers)),
++    ))
++}
++
++async fn models(settings: &Settings) -> Result<Vec<ModelInfo>> {
++    let (transport, provider, auth) = transport(settings).await?;
++    let url = ModelsClient::<ReqwestTransport>::request_url(&provider, env!("CARGO_PKG_VERSION"));
++    let (mut list, _) = ModelsClient::new(transport, provider, auth)
++        .list_models(url, HeaderMap::new())
++        .await?;
++    list.retain(|m| {
++        serde_json::to_value(&m.input_modalities)
++            .ok()
++            .and_then(|v| v.as_array().map(|a| a.iter().any(|v| v == "text")))
++            .unwrap_or(false)
++    });
++    list.sort_by_key(|m| m.priority);
++    Ok(list)
++}
++
++struct WritingThread {
++    model: String,
++    instructions: String,
++    turn: Option<(String, tokio::task::JoinHandle<()>)>,
++    used: bool,
++}
++struct Login {
++    id: String,
++    cancel: codex_login::ShutdownHandle,
++}
++
++async fn emit(out: &Out, method: &str, params: Value) {
++    let _ = out
++        .send(json!({"jsonrpc":"2.0", "method":method,"params":params}))
++        .await;
++}
++async fn reply(out: &Out, id: Value, result: Result<Value>) {
++    let value = match result {
++        Ok(v) => json!({"jsonrpc":"2.0","id":id,"result":v}),
++        Err(e) => json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":e.to_string()}}),
++    };
++    let _ = out.send(value).await;
++}
++fn fields(params: &Value, allowed: &[&str]) -> Result<()> {
++    let map = params.as_object().context("params must be an object")?;
++    ensure!(
++        map.keys().all(|key| allowed.contains(&key.as_str())),
++        "unsupported parameters in writing mode"
++    );
++    Ok(())
++}
++fn required<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
++    p.get(key)
++        .and_then(Value::as_str)
++        .with_context(|| format!("missing {key}"))
++}
++
++async fn run(settings: Settings) -> Result<()> {
++    let (out, mut rx) = mpsc::channel::<Value>(64);
++    let writer = tokio::spawn(async move {
++        let mut stdout = tokio::io::stdout();
++        while let Some(v) = rx.recv().await {
++            stdout.write_all(v.to_string().as_bytes()).await?;
++            stdout.write_all(b"\n").await?;
++            stdout.flush().await?;
++        }
++        Ok::<_, std::io::Error>(())
++    });
++    let mut stdin = BufReader::new(tokio::io::stdin());
++    let mut initialized = false;
++    let mut threads: HashMap<String, WritingThread> = HashMap::new();
++    let mut login: Option<Login> = None;
++    let mut catalog: Vec<ModelInfo> = Vec::new();
++    loop {
++        let mut frame = String::new();
++        let count = (&mut stdin)
++            .take(MAX_FRAME + 1)
++            .read_line(&mut frame)
++            .await?;
++        if count == 0 {
++            break;
++        }
++        if count as u64 > MAX_FRAME || !frame.ends_with('\n') {
++            bail!("invalid or oversized RPC frame");
++        }
++        let request: Value = serde_json::from_str(&frame)?;
++        let method = required(&request, "method")?;
++        if request.get("id").is_none() {
++            ensure!(
++                method == "initialized" && initialized,
++                "unsupported notification"
++            );
++            continue;
++        }
++        let id = request["id"].clone();
++        ensure!(id.is_number() || id.is_string(), "invalid request id");
++        let p = request.get("params").cloned().unwrap_or(json!({}));
++        let result:Result<Value>=async {
++            if method=="initialize" {
++                ensure!(!initialized,"already initialized");
++                fields(&p,&["clientInfo","capabilities","selaraWritingMode"])?;
++                ensure!(p.get("selaraWritingMode")==Some(&json!(1)),"Selara writing mode version 1 is required");
++                initialized=true;
++                return Ok(json!({"userAgent":format!("selara-codex/{}",env!("CARGO_PKG_VERSION")),"selaraWritingMode":1}));
++            }
++            ensure!(initialized,"initialize is required");
++            match method {
++                "account/read" => {
++                    fields(&p,&["refreshToken"])?;
++                    let (config,manager)=settings.auth().await?;
++                    if p["refreshToken"]==true { manager.refresh_token().await?; }
++                    manager.reload().await;
++                    let account=match manager.auth_cached() {
++                        Some(auth) if matches!(auth,CodexAuth::Chatgpt(_)) && config.allows_auth(&auth) => json!({"type":"chatgpt","email":auth.get_account_email(),"planType":auth.account_plan_type()}),
++                        Some(auth) if auth.is_api_key_auth() => json!({"type":"apiKey"}),
++                        _=>Value::Null,
++                    };
++                    Ok(json!({"account":account,"requiresOpenaiAuth":true}))
++                },
++                "account/login/start" => {
++                    fields(&p,&["type"])?; ensure!(p["type"]=="chatgpt","only ChatGPT login is supported");
++                    let (config,_)=settings.auth().await?;
++                    ensure!(config.is_login_method_allowed(ForcedLoginMethod::Chatgpt),"managed policy does not permit ChatGPT login");
++                    if let Some(previous)=login.take(){previous.cancel.shutdown();}
++                    let mut options=codex_login::ServerOptions::new(settings.home.clone(),codex_login::oauth_client_id(),config.effective_chatgpt_workspaces(),config.auth_credentials_store_mode,config.keyring_backend_kind,config.auth_route_config);
++                    options.open_browser=false;
++                    let server=codex_login::run_login_server(options)?;
++                    let login_id=uuid::Uuid::new_v4().to_string();
++                    let result=json!({"type":"chatgpt","loginId":login_id,"authUrl":server.auth_url});
++                    login=Some(Login{id:login_id.clone(),cancel:server.cancel_handle()});
++                    let output=out.clone();
++                    tokio::spawn(async move { let done=server.block_until_done().await; emit(&output,"account/login/completed",json!({"loginId":login_id,"success":done.is_ok(),"error":done.err().map(|_|"ChatGPT login did not complete")})).await; });
++                    catalog.clear(); Ok(result)
++                },
++                "account/login/cancel" => {
++                    fields(&p,&["loginId"])?;
++                    let login_id=required(&p,"loginId")?;
++                    ensure!(login.as_ref().is_some_and(|l|l.id==login_id),"unknown login id");
++                    if let Some(current)=login.take(){current.cancel.shutdown();} Ok(json!({"status":"canceled"}))
++                },
++                "account/logout" => {
++                    fields(&p,&[])?;
++                    if let Some(current)=login.take(){current.cancel.shutdown();}
++                    for thread in threads.values_mut(){ if let Some((_,handle))=thread.turn.take(){handle.abort();} }
++                    threads.clear(); catalog.clear();
++                    // Shared-account logout covers official Codex stores for
++                    // this home even when cloud configuration is unavailable.
++                    #[cfg(feature="selara-test-support")]
++                    codex_login::auth::logout_selara_test_stores(&settings.home)?;
++                    #[cfg(not(feature="selara-test-support"))]
++                    codex_login::auth::logout_selara_all_stores(&settings.home)?;
++                    emit(&out,"account/updated",json!({"authMode":null,"planType":null})).await;
++                    Ok(json!({}))
++                },
++                "model/list" => {
++                    fields(&p,&["cursor","limit","includeHidden"])?;
++                    ensure!(p.get("cursor").is_none_or(Value::is_null),"unsupported model cursor");
++                    catalog=models(&settings).await?;
++                    let data:Vec<_>=catalog.iter().map(|m|json!({"id":m.slug,"model":m.slug,"displayName":m.display_name,"description":m.description,"hidden":serde_json::to_value(m.visibility).ok()!=Some(json!("list")),"isDefault":catalog.first().is_some_and(|x|x.slug==m.slug),"inputModalities":["text"],"supportedReasoningEfforts":m.supported_reasoning_levels,"defaultReasoningEffort":m.default_reasoning_level})).collect();
++                    Ok(json!({"data":data,"nextCursor":null}))
++                },
++                "thread/start" => {
++                    fields(&p,&["ephemeral","model","baseInstructions"])?;
++                    ensure!(p["ephemeral"]==true,"writing threads must be ephemeral");
++                    ensure!(threads.len()<MAX_THREADS,"too many writing threads");
++                    let model=required(&p,"model")?.to_owned();
++                    ensure!(!model.is_empty()&&model.len()<128,"invalid model");
++                    let instructions=required(&p,"baseInstructions")?.to_owned();
++                    ensure!(instructions.len()<1024*1024,"instructions too long");
++                    let thread_id=uuid::Uuid::new_v4().to_string();
++                    threads.insert(thread_id.clone(),WritingThread{model,instructions,turn:None,used:false});
++                    Ok(json!({"thread":{"id":thread_id,"ephemeral":true},"modelProvider":"openai"}))
++                },
++                "turn/start" => {
++                    fields(&p,&["threadId","input","model","effort"])?;
++                    let thread_id=required(&p,"threadId")?.to_owned();
++                    let thread=threads.get_mut(&thread_id).context("unknown writing thread")?;
++                    ensure!(!thread.used,"writing threads allow a single text turn");
++                    if let Some(model)=p.get("model"){ensure!(model==&thread.model,"model must match the writing thread");}
++                    let input=p["input"].as_array().context("text input is required")?;
++                    ensure!(!input.is_empty() && input.len()<=32,"invalid input count");
++                    let mut text=String::new();
++                    for item in input { fields(item,&["type","text","text_elements"])?; ensure!(item["type"]=="text","only text input is supported"); ensure!(item.get("text_elements").is_none_or(|v|v.as_array().is_some_and(Vec::is_empty)),"text annotations are unsupported"); text.push_str(required(item,"text")?); }
++                    ensure!(!text.trim().is_empty(),"text input is empty");
++                    let effort=p.get("effort").cloned();
++                    let body=json!({"model":thread.model,"instructions":thread.instructions,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}],"tools":[],"tool_choice":"none","parallel_tool_calls":false,"store":false,"stream":true});
++                    let turn_id=uuid::Uuid::new_v4().to_string();
++                    // Queue acknowledgement before any task can emit notifications.
++                    reply(&out,id.clone(),Ok(json!({"turn":{"id":turn_id,"status":"inProgress","items":[],"error":null}}))).await;
++                    let output=out.clone(); let settings=settings.clone(); let tid=thread_id.clone(); let turn=turn_id.clone();
++                    let handle=tokio::spawn(async move {
++                        let result=tokio::time::timeout(TURN_TIMEOUT,complete(&settings,body,effort)).await;
++                        match result {
++                            Ok(Ok((text,usage))) => {
++                                emit(&output,"item/completed",json!({"threadId":tid,"turnId":turn,"item":{"id":uuid::Uuid::new_v4().to_string(),"type":"agentMessage","text":text}})).await;
++                                if let Some(usage)=usage { emit(&output,"thread/tokenUsage/updated",json!({"threadId":tid,"turnId":turn,"tokenUsage":{"last":usage,"total":usage,"modelContextWindow":null}})).await; }
++                                emit(&output,"turn/completed",json!({"threadId":tid,"turn":{"id":turn,"status":"completed","error":null}})).await;
++                            },
++                            error => { let message=match error {Ok(Err(e))=>e.to_string(),_=>"writing turn timed out".into()}; emit(&output,"turn/completed",json!({"threadId":tid,"turn":{"id":turn,"status":"failed","error":{"message":message}}})).await; }
++                        }
++                    });
++                    thread.used=true; thread.turn=Some((turn_id,handle));
++                    Ok(json!({"_alreadyReplied":true}))
++                },
++                "turn/interrupt" => {
++                    fields(&p,&["threadId","turnId"])?;
++                    let thread_id=required(&p,"threadId")?; let turn_id=required(&p,"turnId")?;
++                    let thread=threads.get_mut(thread_id).context("unknown writing thread")?;
++                    ensure!(thread.turn.as_ref().is_some_and(|(id,_)|id==turn_id),"unknown writing turn");
++                    if let Some((_,handle))=thread.turn.take(){handle.abort();}
++                    emit(&out,"turn/completed",json!({"threadId":thread_id,"turn":{"id":turn_id,"status":"interrupted","error":null}})).await;
++                    Ok(json!({}))
++                },
++                "thread/unsubscribe" => {
++                    fields(&p,&["threadId"])?;
++                    if let Some(mut thread)=threads.remove(required(&p,"threadId")?) && let Some((_,handle))=thread.turn.take(){handle.abort();}
++                    Ok(json!({"status":"unsubscribed"}))
++                },
++                _=>bail!("method is unavailable in Selara writing mode"),
++            }
++        }.await;
++        if !matches!(&result,Ok(v) if v.get("_alreadyReplied")==Some(&json!(true))) {
++            reply(&out, id, result).await;
++        }
++    }
++    if let Some(login) = login {
++        login.cancel.shutdown();
++    }
++    for (_, mut thread) in threads {
++        if let Some((_, handle)) = thread.turn.take() {
++            handle.abort();
++        }
++    }
++    drop(out);
++    writer.await??;
++    Ok(())
++}
++
++async fn complete(
++    settings: &Settings,
++    mut body: Value,
++    effort: Option<Value>,
++) -> Result<(String, Option<Value>)> {
++    // Validate against authenticated upstream discovery, never a baked-in catalog.
++    let catalog = models(settings).await?;
++    let model = catalog
++        .iter()
++        .find(|m| Some(m.slug.as_str()) == body["model"].as_str())
++        .context("model is unavailable for this ChatGPT account")?;
++    if let Some(effort) = effort {
++        ensure!(
++            model
++                .supported_reasoning_levels
++                .iter()
++                .any(|r| serde_json::to_value(&r.effort).ok() == Some(effort.clone())),
++            "unsupported reasoning effort"
++        );
++        body["reasoning"] = json!({"effort":effort});
++    }
++    let (transport, mut provider, auth) = transport(settings).await?;
++    // A gateway/transport error may arrive after the backend accepted a
++    // generation. Never replay this non-idempotent POST on ambiguous failures.
++    provider.retry.retry_5xx = false;
++    provider.retry.retry_transport = false;
++    let mut stream = ResponsesClient::new(transport, provider, auth)
++        .stream(body, HeaderMap::new(), Compression::None, None)
++        .await?;
++    let mut text = String::new();
++    let mut completed = false;
++    let mut usage = None;
++    while let Some(event) = stream.next().await {
++        match event? {
++            ResponseEvent::OutputItemDone(item) => {
++                let item = serde_json::to_value(item)?;
++                match item["type"].as_str() {
++                    Some("message")
++                        if item["role"] == "assistant"
++                            && (item["phase"].is_null() || item["phase"] == "final_answer") =>
++                    {
++                        for part in item["content"]
++                            .as_array()
++                            .context("invalid assistant content")?
++                        {
++                            ensure!(
++                                part["type"] == "output_text",
++                                "non-text output is unsupported"
++                            );
++                            text.push_str(required(part, "text")?);
++                        }
++                    }
++                    Some("message" | "reasoning") => {}
++                    _ => bail!("tool or non-text output is unavailable in writing mode"),
++                }
++            }
++            ResponseEvent::Completed { token_usage, .. } => {
++                completed = true;
++                usage=token_usage.map(|u|json!({"inputTokens":u.input_tokens,"cachedInputTokens":u.cached_input_tokens,"outputTokens":u.output_tokens,"reasoningOutputTokens":u.reasoning_output_tokens,"totalTokens":u.total_tokens}));
++                break;
++            }
++            ResponseEvent::ToolCallInputDelta { .. } => {
++                bail!("tool output is unavailable in writing mode")
++            }
++            _ => {}
++        }
++    }
++    ensure!(
++        completed,
++        "response stream ended before successful completion"
++    );
++    ensure!(
++        !text.trim().is_empty(),
++        "response contained no completed assistant text"
++    );
++    Ok((text, usage))
++}

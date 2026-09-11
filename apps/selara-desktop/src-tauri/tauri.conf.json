@@ -35,8 +35,10 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/selara"
+      "binaries/selara",
+      "binaries/selara-codex"
     ],
+    "resources": { "runtime-notices/": "runtime-notices/" },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -46,14 +48,14 @@
     "macOS": {
       "minimumSystemVersion": "11.0"
     },
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "updater": {
       "endpoints": [
         "https://github.com/snowopsdev/selara/releases/latest/download/latest.json"
       ],
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBKEY"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM2RkRFNTdFRjc3NDRBMUYKUldRZlNuVDNmdVg5eG0yZE5jQkROR3UxYjRINkFQU3hnMVQyNEZXQVRKZU80ZFhKaWJsZHpkZ2oK"
     }
   }
 }

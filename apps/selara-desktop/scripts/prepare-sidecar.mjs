@@ -35,6 +35,8 @@ if (!triple) {
 }
 
 const cargoArgs = ["build", "-p", "selara", "--release"];
+if (triple !== "aarch64-apple-darwin") throw new Error("The bundled writing runtime currently supports macOS Apple Silicon only");
+run("sh", [join(repoRoot, "scripts/codex-runtime/build.sh")], { stdio: "inherit" });
 if (targetIdx !== -1) cargoArgs.push("--target", triple);
 console.log(`prepare-sidecar: cargo ${cargoArgs.join(" ")}`);
 run("cargo", cargoArgs, { stdio: "inherit" });
@@ -48,3 +50,11 @@ mkdirSync(binariesDir, { recursive: true });
 copyFileSync(built, dest);
 if (process.platform !== "win32") chmodSync(dest, 0o755);
 console.log(`prepare-sidecar: ${built} -> ${dest}`);
+const runtime = join(binariesDir, `selara-codex-${triple}`);
+copyFileSync(join(repoRoot, "target/selara-codex"), runtime);
+chmodSync(runtime, 0o755);
+const notices = join(here, "..", "src-tauri", "runtime-notices");
+mkdirSync(notices, { recursive: true });
+for (const suffix of ["LICENSE", "NOTICE", "provenance.json"]) {
+  copyFileSync(join(repoRoot, `target/selara-codex.${suffix}`), join(notices, `selara-codex.${suffix}`));
+}

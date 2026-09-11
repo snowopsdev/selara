@@ -1,0 +1,10 @@
+# Official source archive and the maintained patch set are independently pinned.
+source_version = "0.153.4"
+source_revision = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+source_url = "https://codeload.github.com/openai/codex/tar.gz/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+source_archive_sha256 = "bbbf66ffa30846f1e9bc3ae8a87a5aa0bb768efee8dbb94759dc9eb64bb4aa3a"
+patches_sha256 = "937c1d7277e57a35da8b5b23cd5ced3fdd263ec7d9a55c0de56abaee44e3cb5f"
+rust_toolchain = "1.95.0"
+minimum_macos = "11.0"
+target = "aarch64-apple-darwin"
+binary_name = "selara-codex"

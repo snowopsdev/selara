@@ -1,6 +1,7 @@
 //! macOS desktop shell: global hotkey → command picker → replace / popup.
 
 use std::collections::VecDeque;
+use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +18,10 @@ use selara_core::commands::{
     WritingCommand,
 };
 use selara_core::config::{app_is_excluded, serve_pidfile, AppConfig, LimitsConfig, ProviderAuth};
+use selara_core::desktop_protocol::{
+    AxTrust, ProtocolCommand, ProtocolDecoder, ProtocolRequest, ProtocolResponse, ServeReadiness,
+    ServeStatus, PROTOCOL_VERSION,
+};
 use selara_core::guard::{provider_is_hosted, scan_secrets, SecretHit, SecretKind};
 use selara_core::history::{self, HistoryEntry};
 use selara_platform::macos::{
@@ -498,6 +503,45 @@ enum UiPhase {
     },
 }
 
+#[derive(Default)]
+struct WorkGate {
+    quiescing: bool,
+    paused: bool,
+    active: usize,
+}
+impl WorkGate {
+    fn admit(&mut self) -> bool {
+        if self.quiescing {
+            return false;
+        }
+        self.active += 1;
+        true
+    }
+    fn finish(&mut self) {
+        self.active = self.active.saturating_sub(1);
+    }
+    fn quiesce(&mut self) {
+        self.quiescing = true;
+    }
+    fn pause_if_idle(&mut self) -> bool {
+        if self.quiescing && self.active == 0 {
+            self.paused = true;
+            true
+        } else {
+            false
+        }
+    }
+    fn resume(&mut self) {
+        self.quiescing = false;
+        self.paused = false;
+    }
+}
+
+enum ProtocolInput {
+    Frame(Result<ProtocolRequest, String>),
+    Closed,
+}
+
 struct ServeApp {
     config: AppConfig,
     config_path: PathBuf,
@@ -566,9 +610,50 @@ struct ServeApp {
     last_adhoc: Option<WritingCommand>,
     /// One-line feedback in the picker and popup (e.g. "Saved as …").
     picker_notice: String,
+    protocol: Option<Receiver<ProtocolInput>>,
+    gate: WorkGate,
+    pending_quiesce: Vec<String>,
+    last_protocol_status: Option<ServeStatus>,
+    last_protocol_emit: Instant,
+    protocol_output: Option<Arc<std::sync::Mutex<std::io::BufWriter<std::io::Stdout>>>>,
 }
 
 impl ServeApp {
+    fn protocol_status(&self) -> ServeStatus {
+        ServeStatus {
+            version: PROTOCOL_VERSION,
+            id: None,
+            readiness: if self.gate.paused {
+                ServeReadiness::Quiesced
+            } else if self.gate.quiescing {
+                ServeReadiness::Quiescing
+            } else if self.gate.active > 0 {
+                ServeReadiness::Busy
+            } else {
+                ServeReadiness::Ready
+            },
+            ax_trust: if accessibility_trusted() {
+                AxTrust::Granted
+            } else {
+                AxTrust::Missing
+            },
+            generation: self.generation,
+            external: false,
+        }
+    }
+
+    fn protocol_write(
+        output: &Arc<std::sync::Mutex<std::io::BufWriter<std::io::Stdout>>>,
+        response: &ProtocolResponse,
+    ) {
+        if let Ok(mut out) = output.lock() {
+            if serde_json::to_writer(&mut *out, response).is_ok() {
+                let _ = out.write_all(b"\n");
+                let _ = out.flush();
+            }
+        }
+    }
+
     fn new(
         _cc: &eframe::CreationContext<'_>,
         config: AppConfig,
@@ -637,6 +722,12 @@ impl ServeApp {
             filter_caret_to_end: false,
             last_adhoc: None,
             picker_notice: String::new(),
+            protocol: None,
+            gate: WorkGate::default(),
+            pending_quiesce: Vec::new(),
+            last_protocol_status: None,
+            last_protocol_emit: Instant::now(),
+            protocol_output: None,
         })
     }
 
@@ -684,6 +775,146 @@ impl ServeApp {
                 egui::WindowLevel::AlwaysOnTop,
             ));
         }
+    }
+
+    fn start_protocol(&mut self) {
+        let (send, receive) = mpsc::sync_channel(128);
+        self.protocol = Some(receive);
+        self.protocol_output = Some(Arc::new(std::sync::Mutex::new(std::io::BufWriter::new(
+            std::io::stdout(),
+        ))));
+        let wake = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let mut decoder = ProtocolDecoder::default();
+            let mut bytes = [0; 8192];
+            loop {
+                match stdin.read(&mut bytes) {
+                    Ok(0) | Err(_) => {
+                        let _ = send.send(ProtocolInput::Closed);
+                        wake.request_repaint();
+                        break;
+                    }
+                    Ok(count) => {
+                        for frame in decoder.push(&bytes[..count]) {
+                            if send.send(ProtocolInput::Frame(frame)).is_err() {
+                                return;
+                            }
+                            wake.request_repaint();
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn poll_protocol(&mut self, ctx: &egui::Context) {
+        let frames: Vec<_> = self
+            .protocol
+            .as_ref()
+            .map(|r| r.try_iter().collect())
+            .unwrap_or_default();
+        for frame in frames {
+            let request = match frame {
+                ProtocolInput::Closed => {
+                    self.gate.quiesce();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    continue;
+                }
+                ProtocolInput::Frame(Err(error)) => {
+                    if let Some(output) = &self.protocol_output {
+                        Self::protocol_write(
+                            output,
+                            &ProtocolResponse::error(None, self.protocol_status(), error),
+                        );
+                    }
+                    continue;
+                }
+                ProtocolInput::Frame(Ok(request)) => request,
+            };
+            let mut error = None;
+            if request.version != PROTOCOL_VERSION {
+                error = Some("Unsupported desktop protocol version".to_string());
+            } else {
+                match request.command {
+                    ProtocolCommand::Status => {}
+                    ProtocolCommand::RequestPermission => prompt_accessibility(),
+                    ProtocolCommand::Quiesce => {
+                        self.gate.quiesce();
+                        self.pending_quiesce.push(request.id);
+                        continue;
+                    }
+                    ProtocolCommand::Resume => {
+                        // Cancel pending barriers before reopening admissions. Their
+                        // old acknowledgement must never satisfy a later request.
+                        let ids = std::mem::take(&mut self.pending_quiesce);
+                        for id in ids {
+                            if let Some(output) = &self.protocol_output {
+                                Self::protocol_write(
+                                    output,
+                                    &ProtocolResponse::error(
+                                        Some(id),
+                                        self.protocol_status(),
+                                        "Pause cancelled",
+                                    ),
+                                );
+                            }
+                        }
+                        self.gate.resume();
+                    }
+                    ProtocolCommand::ReloadAuth => {
+                        if self.gate.active != 0 {
+                            error = Some("Finish active work before changing accounts".into());
+                        } else if let Err(e) =
+                            self.runtime.block_on(selara_core::app_server::reset())
+                        {
+                            error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            if let Some(output) = &self.protocol_output {
+                let response = match error {
+                    Some(error) => {
+                        ProtocolResponse::error(Some(request.id), self.protocol_status(), error)
+                    }
+                    None => ProtocolResponse::ok(Some(request.id), self.protocol_status()),
+                };
+                Self::protocol_write(output, &response);
+            }
+        }
+    }
+
+    fn finish_protocol_frame(&mut self, ctx: &egui::Context) {
+        if self.protocol.is_none() {
+            return;
+        }
+        if !self.pending_quiesce.is_empty() && self.gate.pause_if_idle() {
+            // Job results have been drained on this same UI thread. Dismiss
+            // queued confirmations/popups and invalidate every late write.
+            self.hide(ctx);
+            let ids = std::mem::take(&mut self.pending_quiesce);
+            for id in ids {
+                if let Some(output) = &self.protocol_output {
+                    Self::protocol_write(
+                        output,
+                        &ProtocolResponse::ok(Some(id), self.protocol_status()),
+                    );
+                }
+            }
+        }
+        let status = self.protocol_status();
+        if self.last_protocol_status.as_ref() != Some(&status)
+            || self.last_protocol_emit.elapsed() >= Duration::from_secs(5)
+        {
+            if let Some(output) = &self.protocol_output {
+                Self::protocol_write(output, &ProtocolResponse::ok(None, status.clone()));
+            }
+            self.last_protocol_status = Some(status);
+            self.last_protocol_emit = Instant::now();
+        }
+        // Also catches permission changes while a popup is idle.
+        ctx.request_repaint_after(Duration::from_secs(1));
     }
 
     /// Show the window for a fresh hotkey press: moved next to the mouse cursor
@@ -1167,6 +1398,9 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
     }
 
     fn start_command(&mut self, cmd: WritingCommand, origin: CommandOrigin) {
+        if self.gate.quiescing {
+            return;
+        }
         // Picking a command by hand supersedes any shortcut-triggered one.
         self.pending_direct = None;
         self.last_command = Some(cmd.clone());
@@ -1216,6 +1450,9 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
             partial: String::new(),
         };
 
+        if !self.gate.admit() {
+            return;
+        }
         self.runtime.spawn(async move {
             let result = async {
                 let provider = cfg.build_provider_for(&cmd)?;
@@ -1359,6 +1596,9 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
     /// captured selection. Shared by Replace commands and the popup's
     /// "Replace selection" button.
     fn replace_selection_with(&mut self, ctx: &egui::Context, text: String) {
+        if self.gate.paused {
+            return;
+        }
         let pid = self.target_pid;
         // In clipboard mode nothing is selected, so there is no original text
         // to overwrite: an empty `original` with no range pastes at the caret,
@@ -1392,6 +1632,9 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
     /// captured selection (separated by a blank line). Recorded as a
     /// zero-length "replace" so Undo removes exactly what was inserted.
     fn insert_below_selection(&mut self, ctx: &egui::Context, body: &str) {
+        if self.gate.quiescing {
+            return;
+        }
         let pid = self.target_pid;
         let captured_range = self.captured_range;
         let text = insert_text(body);
@@ -1449,6 +1692,9 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
     /// write the result back. The caution disables the buttons until it is
     /// acknowledged, so only the hard max needs re-checking here.
     fn write_back_from_popup(&mut self, ctx: &egui::Context, body: String, how: WriteBack) {
+        if self.gate.quiescing {
+            return;
+        }
         if self.over_hard_max() {
             self.phase = self.hard_max_error();
             return;
@@ -1480,6 +1726,9 @@ impl ServeApp {
     /// Put the last replaced selection back. Works from the undo hotkey and the
     /// picker button; the source app is re-activated first, like a Replace.
     fn undo_last_replace(&mut self, ctx: &egui::Context) {
+        if self.gate.quiescing {
+            return;
+        }
         // Check permission before taking the record: an early return here used
         // to drop it, so re-granting Accessibility left nothing to undo.
         if !accessibility_trusted() {
@@ -1517,24 +1766,36 @@ impl ServeApp {
 
 impl eframe::App for ServeApp {
     fn on_exit(&mut self) {
+        let _ = self.runtime.block_on(selara_core::app_server::reset());
         remove_pidfile(&self.pidfile);
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // eframe 0.36 applies viewport output after `logic`; repeat this every
+        // hidden frame so post-rendering cannot resurrect the picker.
+        if matches!(self.phase, UiPhase::Hidden) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
         self.hotkey.poll();
         self.poll_config();
 
+        self.poll_protocol(ctx);
         if let Some(action) = self.hotkey.take_pending() {
-            match action {
-                HotkeyAction::Picker => self.on_hotkey(ctx),
-                HotkeyAction::Command(id) => self.on_command_hotkey(ctx, &id),
-                HotkeyAction::Undo => self.on_undo_hotkey(ctx),
+            if !self.gate.quiescing {
+                match action {
+                    HotkeyAction::Picker => self.on_hotkey(ctx),
+                    HotkeyAction::Command(id) => self.on_command_hotkey(ctx, &id),
+                    HotkeyAction::Undo => self.on_undo_hotkey(ctx),
+                }
             }
         }
 
         while let Ok(job) = self.job_rx.try_recv() {
+            if !matches!(&job, JobResult::Delta { .. }) {
+                self.gate.finish();
+            }
             let waiting = matches!(self.phase, UiPhase::Working { .. });
-            if should_apply_job(job.generation(), self.generation, waiting) {
+            if !self.gate.paused && should_apply_job(job.generation(), self.generation, waiting) {
                 self.apply_job(ctx, job);
             } else {
                 tracing::info!(
@@ -1545,6 +1806,8 @@ impl eframe::App for ServeApp {
                 );
             }
         }
+
+        self.finish_protocol_frame(ctx);
 
         if matches!(self.phase, UiPhase::Working { .. }) {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
@@ -1560,6 +1823,12 @@ impl eframe::App for ServeApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
+        if self.gate.quiescing {
+            if !self.gate.paused {
+                ui.label("Finishing the current request before updating…");
+            }
+            return;
+        }
         if matches!(self.phase, UiPhase::Hidden) {
             return;
         }
@@ -2297,12 +2566,16 @@ fn remove_pidfile(path: &Path) {
     }
 }
 
-pub fn run(config_path: PathBuf) -> Result<()> {
+pub fn run(config_path: PathBuf, desktop_protocol: bool) -> Result<()> {
     let config = AppConfig::load_or_init(&config_path)?;
     write_pidfile(&serve_pidfile(&config_path))?;
     selara_core::usage::set_store(Some(selara_core::usage::usage_path(&config_path)));
-    println!("config: {}", config_path.display());
-    println!("hotkey: {}", config.hotkey);
+    if !desktop_protocol {
+        println!("config: {}", config_path.display());
+    }
+    if !desktop_protocol {
+        println!("hotkey: {}", config.hotkey);
+    }
     let cmd_shortcuts: Vec<String> = config
         .commands
         .iter()
@@ -2314,30 +2587,35 @@ pub fn run(config_path: PathBuf) -> Result<()> {
                 .map(|h| format!("{} ({})", c.label, h))
         })
         .collect();
-    if cmd_shortcuts.is_empty() {
+    if desktop_protocol {
+    } else if cmd_shortcuts.is_empty() {
         println!("command shortcuts: (none)");
     } else {
         println!("command shortcuts: {}", cmd_shortcuts.join(", "));
     }
-    println!(
-        "limits: soft_warn={} hard_max={} replace_warn={} secret_guard={}",
-        config.limits.soft_warn_chars,
-        config.limits.hard_max_chars,
-        config.limits.replace_warn_chars,
-        if config.limits.secret_guard {
-            "on"
-        } else {
-            "off"
-        }
-    );
-    println!(
-        "accessibility: {}",
-        if accessibility_trusted() {
-            "granted"
-        } else {
-            "MISSING — grant under System Settings → Privacy & Security → Accessibility"
-        }
-    );
+    if !desktop_protocol {
+        println!(
+            "limits: soft_warn={} hard_max={} replace_warn={} secret_guard={}",
+            config.limits.soft_warn_chars,
+            config.limits.hard_max_chars,
+            config.limits.replace_warn_chars,
+            if config.limits.secret_guard {
+                "on"
+            } else {
+                "off"
+            }
+        );
+    }
+    if !desktop_protocol {
+        println!(
+            "accessibility: {}",
+            if accessibility_trusted() {
+                "granted"
+            } else {
+                "MISSING — grant under System Settings → Privacy & Security → Accessibility"
+            }
+        );
+    }
     if !accessibility_trusted() {
         prompt_accessibility();
     }
@@ -2345,7 +2623,7 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     let selection = Arc::new(MacosSelection::new()?);
     let config_path_for_app = config_path.clone();
 
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([PICKER_SIZE.0, PICKER_SIZE.1])
             .with_min_inner_size([320.0, 300.0])
@@ -2358,15 +2636,22 @@ pub fn run(config_path: PathBuf) -> Result<()> {
             .with_title("Selara"),
         ..Default::default()
     };
+    options.event_loop_builder = Some(Box::new(|builder| {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        builder.with_activation_policy(winit::platform::macos::ActivationPolicy::Accessory);
+    }));
 
     eframe::run_native(
         "Selara",
         options,
         Box::new(move |cc| {
-            Ok(
-                Box::new(ServeApp::new(cc, config, config_path_for_app, selection)?)
-                    as Box<dyn eframe::App>,
-            )
+            Ok(Box::new({
+                let mut app = ServeApp::new(cc, config, config_path_for_app, selection)?;
+                if desktop_protocol {
+                    app.start_protocol();
+                }
+                app
+            }) as Box<dyn eframe::App>)
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;
@@ -2911,5 +3196,27 @@ mod tests {
     #[test]
     fn replace_progress_counts_characters_not_bytes() {
         assert_eq!(replace_progress(&"é".repeat(1234)), "… 1,234 chars so far");
+    }
+}
+
+#[cfg(test)]
+mod work_gate_tests {
+    use super::WorkGate;
+    #[test]
+    fn pause_waits_for_every_worker_even_after_ui_dismissal() {
+        let mut gate = WorkGate::default();
+        assert!(gate.admit());
+        assert!(gate.admit());
+        gate.quiesce();
+        assert!(!gate.admit());
+        assert!(!gate.pause_if_idle());
+        gate.finish();
+        assert!(!gate.pause_if_idle());
+        gate.finish();
+        assert!(gate.pause_if_idle());
+        assert!(gate.paused);
+        assert!(!gate.admit());
+        gate.resume();
+        assert!(gate.admit());
     }
 }

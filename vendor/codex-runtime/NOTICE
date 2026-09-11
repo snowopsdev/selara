@@ -1,0 +1,3 @@
+Selara's Codex runtime incorporates OpenAI Codex source release rust-v0.153.4.
+See the generated distribution's upstream LICENSE and this repository's
+runtime.toml for the exact source and verification digest.

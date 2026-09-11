@@ -6,9 +6,6 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::chatgpt_auth::{
-    ChatGptAuth, CODEX_MODELS_URL, CODEX_ORIGINATOR, CODEX_RESPONSES_URL, CODEX_USER_AGENT,
-};
 use crate::error::CoreError;
 use crate::usage::{self, TokenUsage};
 
@@ -156,22 +153,6 @@ async fn json_or_raw(
             text.chars().take(200).collect::<String>()
         ))),
     }
-}
-
-/// Error for a Responses API response that ended incomplete.
-///
-/// Only `max_output_tokens` is a token limit; every other reason gets its own
-/// message naming what the API actually reported, so a `content_filter` stop is
-/// not dressed up as "pick a model with a larger output limit". Either way the
-/// partial text is discarded.
-fn incomplete_response_error(reason: &str) -> CoreError {
-    if reason == "max_output_tokens" {
-        return truncation_error("response incomplete: max_output_tokens");
-    }
-    CoreError::Provider(format!(
-        "the model stopped before finishing (incomplete_details.reason = {reason}); \
-         the partial result was discarded because it would have replaced your selection"
-    ))
 }
 
 /// Error returned when a provider stopped generating because it hit its output
@@ -748,12 +729,13 @@ impl LlmProvider for AnthropicProvider {
             let json_type = value.get("type").and_then(|v| v.as_str());
             let kind = event_name.as_deref().or(json_type).unwrap_or("");
             match kind {
-                "content_block_delta" => {
-                    if value.pointer("/delta/type").and_then(|v| v.as_str()) == Some("text_delta") {
-                        if let Some(text) = value.pointer("/delta/text").and_then(|v| v.as_str()) {
-                            out.push_str(text);
-                            on_delta(text);
-                        }
+                "content_block_delta"
+                    if value.pointer("/delta/type").and_then(|v| v.as_str())
+                        == Some("text_delta") =>
+                {
+                    if let Some(text) = value.pointer("/delta/text").and_then(|v| v.as_str()) {
+                        out.push_str(text);
+                        on_delta(text);
                     }
                 }
                 "message_start" => {
@@ -816,121 +798,31 @@ impl LlmProvider for AnthropicProvider {
     }
 }
 
-/// Experimental: ChatGPT subscription via Codex CLI auth (`~/.codex/auth.json`).
+/// ChatGPT subscription using the bundled, isolated Codex writing runtime.
 pub struct ChatGptCodexProvider {
     pub model: String,
-    pub auth: ChatGptAuth,
+    pub codex_home: std::path::PathBuf,
 }
-
 impl ChatGptCodexProvider {
-    pub fn new(model: String, auth: ChatGptAuth) -> Self {
-        Self { model, auth }
+    pub fn new(model: String, codex_home: std::path::PathBuf) -> Self {
+        Self { model, codex_home }
     }
 }
-
 #[async_trait]
 impl LlmProvider for ChatGptCodexProvider {
-    /// The Responses endpoint is always streamed; buffering is just a no-op sink.
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
-        self.complete_stream(req, &mut |_: &str| {}).await
-    }
-
-    async fn complete_stream(
-        &self,
-        req: CompletionRequest,
-        on_delta: &mut DeltaSink<'_>,
-    ) -> Result<String, CoreError> {
-        let mut auth = self.auth.clone();
-        auth.ensure_fresh().await?;
-
-        let client = http_client()?;
-        let body = json!({
-            "model": self.model,
-            "instructions": req.system,
-            "input": [{
-                "type": "message",
-                "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": req.user
-                }]
-            }],
-            "store": false,
-            "stream": true
-        });
-
-        let mut builder = client
-            .post(CODEX_RESPONSES_URL)
-            .header("Authorization", format!("Bearer {}", auth.access_token))
-            .header("originator", CODEX_ORIGINATOR)
-            .header("User-Agent", CODEX_USER_AGENT)
-            .header("OpenAI-Beta", "responses=experimental")
-            .header("Accept", "text/event-stream")
-            .json(&body);
-
-        if let Some(account_id) = auth.account_id_header() {
-            builder = builder.header("ChatGPT-Account-ID", account_id);
-        }
-
-        // Only the initial POST is retried; once the SSE stream is open a
-        // failure mid-stream surfaces to the caller as before.
-        let resp = send_with_retry(
-            builder,
-            "chatgpt codex responses",
-            Idempotency::NonIdempotent,
-        )
-        .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(CoreError::Provider(format!(
-                "ChatGPT Codex HTTP {status}: {text}"
-            )));
-        }
-
-        let mut out = String::new();
-        let mut incomplete: Option<String> = None;
-        let mut terminated = false;
-        let mut used: Option<TokenUsage> = None;
-        for_each_sse_event(resp, |event| {
-            if let Some(delta) = parse_sse_output_text_delta(event) {
-                out.push_str(&delta);
-                on_delta(&delta);
-            }
-            if incomplete.is_none() {
-                incomplete = sse_event_incomplete_reason(event);
-            }
-            terminated |= sse_event_is_terminal(event);
-            if let Some(u) = parse_sse_response_usage(event) {
-                used = Some(u);
-            }
-            Ok(())
-        })
-        .await?;
-        if let Some(u) = used {
+        let completed =
+            crate::app_server::complete_at(&self.codex_home, &self.model, &req.system, &req.user)
+                .await?;
+        if let Some(tokens) = completed.usage {
             usage::record(
                 usage::KIND_CHATGPT_CODEX,
                 &self.model,
-                CODEX_RESPONSES_URL,
-                u,
+                "https://chatgpt.com",
+                tokens,
             );
         }
-        // Drain the whole stream first so the connection closes cleanly, but
-        // never hand back partial text: the caller would write it over the selection.
-        if let Some(reason) = incomplete {
-            return Err(incomplete_response_error(&reason));
-        }
-        if !terminated {
-            return Err(incomplete_stream_error("no response.completed event"));
-        }
-
-        let trimmed = out.trim().to_string();
-        if trimmed.is_empty() {
-            return Err(CoreError::Provider(
-                "ChatGPT Codex returned no output_text deltas".into(),
-            ));
-        }
-        Ok(trimmed)
+        Ok(completed.text)
     }
 }
 
@@ -1078,55 +970,7 @@ pub fn parse_sse_output_text_delta(event_block: &str) -> Option<String> {
 
 /// List model slugs from the Codex models endpoint (requires ChatGPT auth).
 pub async fn list_chatgpt_models() -> Result<Vec<String>, CoreError> {
-    let mut auth = ChatGptAuth::load()?;
-    auth.ensure_fresh().await?;
-    let client = http_client()?;
-    let mut builder = client
-        .get(CODEX_MODELS_URL)
-        .header("Authorization", format!("Bearer {}", auth.access_token))
-        .header("originator", CODEX_ORIGINATOR)
-        .header("User-Agent", CODEX_USER_AGENT);
-    if let Some(account_id) = auth.account_id_header() {
-        builder = builder.header("ChatGPT-Account-ID", account_id);
-    }
-    let resp = send_with_retry(builder, "list models", Idempotency::Idempotent).await?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(CoreError::Provider(format!(
-            "list models HTTP {status}: {text}"
-        )));
-    }
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| CoreError::Provider(format!("list models: invalid JSON ({e})")))?;
-    let mut out = Vec::new();
-    // Accept a few shapes: { data: [ { id / slug } ] } or a bare array.
-    let items = value
-        .get("data")
-        .and_then(|v| v.as_array())
-        .or_else(|| value.get("models").and_then(|v| v.as_array()))
-        .or_else(|| value.as_array());
-    if let Some(arr) = items {
-        for item in arr {
-            // Skip Codex-internal hidden entries (e.g. gpt-reserve).
-            if item.get("visibility").and_then(|v| v.as_str()) == Some("hide") {
-                continue;
-            }
-            if let Some(id) = item
-                .get("slug")
-                .or_else(|| item.get("id"))
-                .and_then(|v| v.as_str())
-            {
-                out.push(id.to_string());
-            }
-        }
-    }
-    if out.is_empty() {
-        return Err(CoreError::Provider(format!(
-            "unexpected models response: {value}"
-        )));
-    }
-    Ok(out)
+    crate::app_server::models().await
 }
 
 pub fn provider_from_config(
@@ -2199,33 +2043,6 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n";
 
         assert!(sse_event_incomplete_reason("data: [DONE]\n").is_none());
         assert!(sse_event_incomplete_reason("event: ping\n").is_none());
-    }
-
-    /// The regression: every `response.incomplete` was reported as a token
-    /// limit, so a content-filter stop told the user to pick a model with a
-    /// larger output limit - advice that cannot help.
-    #[test]
-    fn non_token_limit_incomplete_reasons_are_reported_as_themselves() {
-        let filtered = "event: response.incomplete\n\
-data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"}}}\n";
-        assert_eq!(
-            sse_event_incomplete_reason(filtered).as_deref(),
-            Some("content_filter")
-        );
-
-        let msg = incomplete_response_error("content_filter").to_string();
-        assert!(
-            msg.contains("content_filter"),
-            "names the real reason: {msg}"
-        );
-        assert!(
-            !msg.contains("larger output limit"),
-            "does not give token-limit advice: {msg}"
-        );
-
-        // The token-limit case keeps its original wording and advice.
-        let token = incomplete_response_error("max_output_tokens").to_string();
-        assert!(token.contains("larger output limit"), "{token}");
     }
 
     #[tokio::test]

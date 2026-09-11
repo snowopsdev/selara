@@ -1,0 +1,3 @@
+Selara distributes the Codex runtime under the upstream license. The complete
+upstream license text is copied from the pinned source tree by build.sh into
+the generated distribution alongside the binary.

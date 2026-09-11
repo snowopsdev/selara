@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
+import { signingFixture } from "./signing-fixture.mjs";
 import { assetNames, checkSourceVersion, checkTapVersion, prepareRelease, publishRelease, readChecksum, resolveRelease, sha256, stageRelease, verifyRelease, versionFromTag } from "./desktop-release.mjs";
 
 const tag = "v0.4.0";
@@ -32,7 +33,8 @@ function fixture(t) {
   const client = {
     immutable: false,
     draft: false,
-    release: () => ({ tag_name: tag, draft: client.draft, prerelease: false, immutable: client.immutable, assets: [...remote.keys()].map((name) => ({ name, state: "uploaded" })) }),
+    repository: "owner/repo",
+    release: () => ({ tag_name: tag, published_at: "2026-09-10T12:00:00Z", body: "Release notes", draft: client.draft, prerelease: false, immutable: client.immutable, assets: [...remote.keys()].map((name) => ({ name, state: "uploaded" })) }),
     download(_tag, name, directory) {
       assert.equal(_tag, tag);
       if (!remote.has(name)) throw new Error(`Missing ${name}`);
@@ -53,14 +55,14 @@ function fixture(t) {
       throw new Error(`Unexpected API call ${path}`);
     },
   };
-  const stage = (notarized = false) => {
+  const stage = (notarized = false, options = {}) => {
     for (const path of ["scripts/release/render-homebrew.sh", "homebrew/Casks/selara.rb.tmpl", "homebrew/Formula/selara.rb.tmpl"]) {
       file(join(source, path), readFileSync(new URL(`../../${path}`, import.meta.url)));
     }
     stageRelease(tag, source, output, (binary, args) => {
       if (binary === "hdiutil") { assert.deepEqual(args, ["verify", join(output, names.dmg)]); return; }
       execFileSync(binary, args, { stdio: "pipe" });
-    }, () => notarized);
+    }, () => notarized, { prepareArchive: () => {}, teamId: "", ...options });
   };
   const builtDmg = () => file(join(source, "target/release/bundle/dmg/Selara.dmg"), "newly built DMG bytes");
   return { root, source, output, client, remote, uploads, file, stage, builtDmg };
@@ -187,4 +189,71 @@ test("older recovery cannot downgrade a newer tap even after a stale latest chec
   assert.equal(checkTapVersion(tag, tap, tag), true);
   f.file(join(tap, "Formula/selara.rb"), 'version "0.4.1"\n');
   assert.throws(() => checkTapVersion(tag, tap, tag), /Refusing to downgrade/);
+});
+
+function updaterFixture(t) {
+  const f = fixture(t);
+  const names = assetNames(tag, true);
+  const bytes = Buffer.from("exact published app archive");
+  const keys = signingFixture(bytes);
+  f.file(join(f.source, "apps/selara-desktop/src-tauri/tauri.conf.json"), JSON.stringify({version:"0.4.0",bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:keys.publicKey}}}));
+  f.remote.set(names.dmg, Buffer.from("verified published DMG"));
+  f.remote.set(names.archive, bytes);
+  f.remote.set(`${names.archive}.sig`, Buffer.from(keys.signature));
+  return {...f, names, bytes, keys, stage: (notarized, options = {}) => f.stage(notarized, {teamId: "SELARATEAM", ...options})};
+}
+
+test("updater recovery reuses signed payload, verifies nine assets, and publishes manifest last", t => {
+  const f = updaterFixture(t);
+  assert.equal(prepareRelease(tag, f.source, f.output, f.client).buildRequired, false);
+  f.stage(true);
+  publishRelease(tag, f.output, f.client);
+  assert.equal(f.uploads.at(-1), "latest.json");
+  assert.equal(f.remote.size, 9);
+  assert.equal(f.remote.get(f.names.archive).toString(), f.bytes.toString());
+  verifyRelease(tag, f.output, f.client);
+  assert.deepEqual(publishRelease(tag, f.output, f.client), []);
+  const manifest = JSON.parse(f.remote.get("latest.json"));
+  assert.equal(manifest.platforms["darwin-aarch64"].signature, f.keys.signature);
+  assert.match(manifest.platforms["darwin-aarch64"].url, /releases\/download\/v0\.4\.0/);
+});
+
+test("updater recovery rejects missing notarization, tampered payload, and conflicting feed", t => {
+  const f = updaterFixture(t);
+  prepareRelease(tag, f.source, f.output, f.client);
+  assert.throws(() => f.stage(), /verified notarized/);
+  f.stage(true);
+  f.remote.set("latest.json", Buffer.from("conflicting manifest"));
+  assert.throws(() => publishRelease(tag, f.output, f.client), /Conflicting published asset/);
+  assert.deepEqual(f.uploads, []);
+  f.remote.delete("latest.json");
+  f.file(join(f.output, f.names.archive), "tampered");
+  assert.throws(() => f.stage(true), /signature verification/);
+});
+
+test("an interrupted updater publication can resume before making its feed visible", t => {
+  const f = updaterFixture(t);
+  prepareRelease(tag, f.source, f.output, f.client); f.stage(true);
+  const download = f.client.download;
+  f.client.download = (tag, name, directory) => {
+    if (directory.endsWith("before-manifest")) throw new Error("network interrupted");
+    return download(tag, name, directory);
+  };
+  assert.throws(() => publishRelease(tag, f.output, f.client), /interrupted/);
+  assert.equal(f.remote.has("latest.json"), false);
+  f.client.download = download;
+  prepareRelease(tag, f.source, f.output, f.client); f.stage(true);
+  assert.deepEqual(publishRelease(tag, f.output, f.client), ["latest.json"]);
+  verifyRelease(tag, f.output, f.client);
+});
+
+test("an existing payload without a signature is checked against the DMG before signing", t => {
+  const f = updaterFixture(t); f.remote.delete(`${f.names.archive}.sig`);
+  prepareRelease(tag, f.source, f.output, f.client);
+  let signed = false;
+  assert.throws(() => f.stage(true, {
+    prepareArchive: () => { throw new Error("Updater archive does not match the verified published DMG"); },
+    sign: () => { signed = true; },
+  }), /does not match/);
+  assert.equal(signed, false); assert.deepEqual(f.uploads, []);
 });

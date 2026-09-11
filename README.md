@@ -5,7 +5,7 @@
 
 Select text in any app, press a hotkey, and rewrite it with the LLM of your choice.
 
-Selara is a writing assistant for macOS built on a Rust core. It reads your current selection, runs it through a prompt you control, and either **replaces** the text in place or shows the result in a **popup**. Bring your own key for OpenAI-compatible endpoints (OpenAI, Ollama, LM Studio, vLLM), Anthropic, or OpenRouter, or sign in with ChatGPT through the Codex CLI.
+Selara is a writing assistant for macOS built on a Rust core. It reads your current selection, runs it through a prompt you control, and either **replaces** the text in place or shows the result in a **popup**. Bring your own key for OpenAI-compatible endpoints (OpenAI, Ollama, LM Studio, vLLM), Anthropic, or OpenRouter, or reuse your ChatGPT login through the bundled native Codex writing runtime.
 
 <p align="center">
   <picture>
@@ -31,7 +31,7 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 - **History.** The last 50 transformations (original and result, which command, which app) are kept in `history.jsonl` next to the config, and the Settings app lists them with **Copy result** and **Copy original** buttons, so a result you overwrote or a popup you closed is not lost.
 - **Any provider.** OpenAI-compatible `/chat/completions` (OpenAI, Ollama, LM Studio, vLLM), the Anthropic Messages API, or OpenRouter. Leave the base URL blank for the provider default or point it at a local server.
 - **Model discovery.** Load the model list straight from the provider. A bad key or URL shows up right there, so it doubles as a connection test.
-- **ChatGPT via Codex (experimental).** Reuse an existing ChatGPT subscription by signing in with the Codex CLI. Tokens stay in Codex's own auth store, never in Selara's config.
+- **ChatGPT via Codex (experimental).** Reuse your existing ChatGPT login through a bundled native writing runtime. Credentials stay in Codex’s file or Keychain store; no separate Codex installation or Node is required.
 - **Size limits.** A soft warning, a replace caution, and a hard maximum, so a stray select-all never sends 100k characters to a metered API. They apply to picker and shortcut runs alike.
 - **Secret guard.** If the selection looks like it holds an API key, a private key block, a JWT, or a card number, the picker asks before sending it to a hosted provider; local servers are exempt.
 - **Live config.** Everything lives in one TOML file. The `serve` process watches the config directory for changes and re-registers hotkeys as soon as the Settings app saves (with a 5-second poll as a fallback), while staying idle otherwise.
@@ -68,7 +68,7 @@ brew install --cask selara      # menu-bar app
 brew install selara             # CLI
 ```
 
-Until the release is signed and notarized by Apple, macOS may report the app as damaged on first launch; clear the quarantine flag with `xattr -d com.apple.quarantine /Applications/Selara.app`. Building from source is described next.
+Until the release is signed and notarized by Apple, macOS may report the app as damaged on first launch; clear the quarantine flag with `xattr -d com.apple.quarantine /Applications/Selara.app`. Only verified notarized releases remove this caveat. The first upgrade from v0.4.1 must be installed manually; see [release and update recovery](docs/release-updater.md). Building from source is described next.
 
 ## Quick start (macOS)
 
@@ -140,7 +140,7 @@ With an **API key**, type a model id or press **Load models** to fetch the list 
 
 <img alt="Models tab with the OpenAI-compatible provider, an API key, a base URL pointing at a local Ollama server, and four models loaded from it" src="docs/screenshots/settings-models-api-key.png" width="820">
 
-With **ChatGPT via Codex** (experimental, OpenAI-compatible provider only), Selara signs in through the Codex CLI and lists the models available to your ChatGPT account. Your address is masked in the status chip by default.
+With **ChatGPT via Codex** (experimental, OpenAI-compatible provider only), Selara reuses your shared Codex account, provides browser sign-in, and lists the models available to that account. Account status remains visible while editing provider settings. Your address is masked in the status chip by default.
 
 <img alt="Models tab with the ChatGPT via Codex authentication mode selected, showing the Experimental badge, a Not signed in status, and a Sign in with ChatGPT button" src="docs/screenshots/settings-models-chatgpt.png" width="820">
 
@@ -225,7 +225,7 @@ Environment and paths:
 - `SELARA_API_KEY` overrides everything (falls back to the legacy `WRITING_TOOLS_API_KEY`); next comes the OS keychain entry (`selara key set|clear|status`, service `dev.snowops.selara`), then `provider.api_key`.
 - `selara --config <path>` overrides the file for a single CLI invocation.
 - **Migration:** on first load, if the Selara config is missing but `~/.config/writing-tools/config.toml` exists, it is copied into the Selara path (a one-time message is printed).
-- ChatGPT via Codex reads tokens from `~/.codex/auth.json` and needs `codex` on `PATH`.
+- ChatGPT via Codex uses the bundled native writing runtime. Set an absolute `provider.codex_home` in Settings if your shared login is outside `~/.codex`; it takes precedence over `CODEX_HOME`. Remove legacy `CODEX_BIN` and `CODEX_AUTH_JSON` overrides. Signing out affects that shared Codex home, including other Codex clients.
 
 ## The `serve` shell in detail
 
