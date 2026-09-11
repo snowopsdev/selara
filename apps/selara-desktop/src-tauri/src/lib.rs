@@ -560,17 +560,24 @@ struct TrayMenu {
 
 /// Re-sync the tray items and tell the Settings window something changed.
 fn notify(app: &AppHandle) {
-    if let Some(menu) = app.try_state::<TrayMenu>() {
-        let managed = app.state::<Supervisor>().managed_pid().is_some();
-        let external = !managed && serve_status().running;
-        let _ = menu.start.set_enabled(!managed && !external);
-        let _ = menu.stop.set_enabled(managed);
-        let _ = menu.restart.set_enabled(managed);
-        let _ = menu
-            .login
-            .set_checked(app.autolaunch().is_enabled().unwrap_or(false));
-    }
-    let _ = app.emit("serve-changed", ());
+    // Menu setters wait for the main thread. A worker must never wait here
+    // while holding a supervisor lock that the main thread needs during exit.
+    // Read the current state when the queued publication runs so an obsolete
+    // notification cannot restore an earlier process's tray state.
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(menu) = handle.try_state::<TrayMenu>() {
+            let managed = handle.state::<Supervisor>().managed_pid().is_some();
+            let external = !managed && serve_status().running;
+            let _ = menu.start.set_enabled(!managed && !external);
+            let _ = menu.stop.set_enabled(managed);
+            let _ = menu.restart.set_enabled(managed);
+            let _ = menu
+                .login
+                .set_checked(handle.autolaunch().is_enabled().unwrap_or(false));
+        }
+        let _ = handle.emit("serve-changed", ());
+    });
 }
 
 /// Spawn the `serve` sidecar unless one (ours or external) already runs.
@@ -856,7 +863,8 @@ fn stop_serve(app: &AppHandle) -> Result<(), String> {
 /// The body of `stop_serve`; the caller holds `Supervisor::transition`.
 fn stop_serve_locked(app: &AppHandle, sup: &Supervisor) -> Result<(), String> {
     sup.desired.store(false, Ordering::SeqCst);
-    let Some(child) = lock(&sup.child).take() else {
+    let child = lock(&sup.child).take();
+    let Some(child) = child else {
         notify(app);
         return Ok(());
     };
@@ -1240,8 +1248,6 @@ async fn install_pending_update(app: &AppHandle) -> Result<(), String> {
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let app_path = update_backup::running_app()?;
-        let backup =
-            update_backup::Backup::prepare(&app_path, &handle.package_info().version.to_string())?;
         let sup = handle.state::<Supervisor>();
         let _transition = lock(&sup.transition);
         let was_running = sup.managed_pid().is_some();
@@ -1251,6 +1257,10 @@ async fn install_pending_update(app: &AppHandle) -> Result<(), String> {
                     .into(),
             );
         }
+        // A blocked attempt must not leave a full app backup on every retry.
+        // Keep this check and preparation in the same supervisor transition.
+        let backup =
+            update_backup::Backup::prepare(&app_path, &handle.package_info().version.to_string())?;
         let desired = sup.desired.swap(false, Ordering::SeqCst);
         publish_update_status(
             &handle,
