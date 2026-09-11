@@ -71,11 +71,22 @@ input, textarea, select { user-select: text; -webkit-user-select: text; }
   border-right: 1px solid var(--hairline);
 }
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-weight: 600;
   font-size: 12px;
   color: var(--muted);
   padding: 0 10px 10px;
   letter-spacing: 0.01em;
+}
+.brand-mark {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  background-color: var(--text);
+  -webkit-mask: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAD+UlEQVR42u1ZW4hNURjelzMzYiYa18aDS80kyTUikxLlgdKUkjcelCglvMgLCcWDPHhRHpREk4gUJS+mEAkjtyHjknJJmDhzzj57+1fz/fW32mf2/cxRe9XXmdn7rL2+79//ba1TMP7zUcgF5AJyAbkAU0ANTyDzYSeYa2G+q5H2NONkKsSMOUcRd4QRphEmQdQ3whtCRQhx6kWABYurMYewjbAGAhpwXRF/R7hOOEno09xrxATYIKfmnCDs1O6zK0m3VP/vIxwV63kjEQNMfizhDqELhB2fYPbEPTVvNWEi3og1EgJMEFIu0kNYSBiEb1taBpJCbJAtE5YR3hMeYZ5bSxdi658hbAH5xghruHhGP6EdglJzJSsk+U6QdyKS5zUqCPSlIddNTQCP3QmzCLvMjATpO3IlNmG5KQjEpIVPjVLaadQKcW8xoRnuYyZMFr3aG8lUAJNtT+g+JaxzGwK4GJppxEKYZm5MAr9Xb60Jn9s14+h9UyWOkcJY4FcEso4gYoP8Z8JywgtRGxRaRVA7uFZIUwBb42VA5uA83wBwgVM90EFCB+E+rjP5DhS254SnhP2o8k5UEWbAPbXYeJAZJ3xXJ/+McJYwQPgOa/eKjlT2UWx9VdVniWd9JWwlXBHfT1yJuRXmKlwSXackvwAV1m++7tscxC2wvipwRcIo3N9LOB5WhBWyAB0SVdjV7nWD/GgQlj2S4xOYLsj+JpwTb4jj5xhhM/4upCFAPeQtYYeIDelK8/BZFIHsasRtjUwRnzO1TRKP07jnBHG0IzRjD0BqFR7K1p0Nv7/n0y7b4hn8xpqRmtV+Yhe+bwkhZbjpBMKloBbcjLEb20Q4haCWYyPhoogbuZVcS9hAWISk0AL4FUgWVEQR/ajtBGNv6jm3P8Er/gsrKWv+xLUPmk/PJVwj7CHMJ0wG8aZhWhNTFMCHCHS7mgAzZvWWO7GpEDAg2gMVgCsJt4RbGCK4g9Z24EZHsCWtejAQ51zI0U4mPmkJQZFvI1zF92TqjTpa09oP+LmTo1nVFc87ANcaTEDegJtmfjLnar6rssw6XGtI+OzXWb2B4eKpDacQaRw29ATtH9IUwKMcto+pMirgdZfwWLhn5gI4n/cDcTdBPOdwGI5pC+AznwsiY0UZHPTnkcUCGzrTSP+o0kNjp7rU6SHPkVwQbYTrdGrtt1GrGOBq/ccYOvT9gorqiW7TFYT5mg3ylwkrRBx4tcxCMgiVK70yhk6wu7EO79Zs0Z3ytT600F1IAnbYkwvTMDL98YT9V/VE6wlLcM6kBP3Aru0m4YaweqRjlywFyCpdidFj1YUAKcQSmyFDNH6ezwao7gQY+c+suYBcQDbjH6lWGN0+Ug9PAAAAAElFTkSuQmCC") center / contain no-repeat;
+  mask: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAD+UlEQVR42u1ZW4hNURjelzMzYiYa18aDS80kyTUikxLlgdKUkjcelCglvMgLCcWDPHhRHpREk4gUJS+mEAkjtyHjknJJmDhzzj57+1fz/fW32mf2/cxRe9XXmdn7rL2+79//ba1TMP7zUcgF5AJyAbkAU0ANTyDzYSeYa2G+q5H2NONkKsSMOUcRd4QRphEmQdQ3whtCRQhx6kWABYurMYewjbAGAhpwXRF/R7hOOEno09xrxATYIKfmnCDs1O6zK0m3VP/vIxwV63kjEQNMfizhDqELhB2fYPbEPTVvNWEi3og1EgJMEFIu0kNYSBiEb1taBpJCbJAtE5YR3hMeYZ5bSxdi658hbAH5xghruHhGP6EdglJzJSsk+U6QdyKS5zUqCPSlIddNTQCP3QmzCLvMjATpO3IlNmG5KQjEpIVPjVLaadQKcW8xoRnuYyZMFr3aG8lUAJNtT+g+JaxzGwK4GJppxEKYZm5MAr9Xb60Jn9s14+h9UyWOkcJY4FcEso4gYoP8Z8JywgtRGxRaRVA7uFZIUwBb42VA5uA83wBwgVM90EFCB+E+rjP5DhS254SnhP2o8k5UEWbAPbXYeJAZJ3xXJ/+McJYwQPgOa/eKjlT2UWx9VdVniWd9JWwlXBHfT1yJuRXmKlwSXackvwAV1m++7tscxC2wvipwRcIo3N9LOB5WhBWyAB0SVdjV7nWD/GgQlj2S4xOYLsj+JpwTb4jj5xhhM/4upCFAPeQtYYeIDelK8/BZFIHsasRtjUwRnzO1TRKP07jnBHG0IzRjD0BqFR7K1p0Nv7/n0y7b4hn8xpqRmtV+Yhe+bwkhZbjpBMKloBbcjLEb20Q4haCWYyPhoogbuZVcS9hAWISk0AL4FUgWVEQR/ajtBGNv6jm3P8Er/gsrKWv+xLUPmk/PJVwj7CHMJ0wG8aZhWhNTFMCHCHS7mgAzZvWWO7GpEDAg2gMVgCsJt4RbGCK4g9Z24EZHsCWtejAQ51zI0U4mPmkJQZFvI1zF92TqjTpa09oP+LmTo1nVFc87ANcaTEDegJtmfjLnar6rssw6XGtI+OzXWb2B4eKpDacQaRw29ATtH9IUwKMcto+pMirgdZfwWLhn5gI4n/cDcTdBPOdwGI5pC+AznwsiY0UZHPTnkcUCGzrTSP+o0kNjp7rU6SHPkVwQbYTrdGrtt1GrGOBq/ccYOvT9gorqiW7TFYT5mg3ylwkrRBx4tcxCMgiVK70yhk6wu7EO79Zs0Z3ytT600F1IAnbYkwvTMDL98YT9V/VE6wlLcM6kBP3Aru0m4YaweqRjlywFyCpdidFj1YUAKcQSmyFDNH6ezwao7gQY+c+suYBcQDbjH6lWGN0+Ug9PAAAAAElFTkSuQmCC") center / contain no-repeat;
 }
 .nav-item {
   display: flex; align-items: center; gap: 9px;
@@ -531,7 +542,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
 <body>
   <div id="app">
     <aside class="nav" data-tauri-drag-region>
-      <div class="brand" data-tauri-drag-region>Selara</div>
+      <div class="brand" data-tauri-drag-region>
+        <span class="brand-mark" aria-hidden="true" data-tauri-drag-region></span>
+        Selara
+      </div>
       <button class="nav-item active" data-section="status">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 8.5h2.6l1.6-4.2 2.6 8 1.8-5.6 1 1.8h3.4"/></svg>
         Status

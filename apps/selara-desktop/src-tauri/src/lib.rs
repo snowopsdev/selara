@@ -1483,7 +1483,13 @@ pub fn run() {
                 update: update_i,
             });
 
-            let mut tray = TrayIconBuilder::new()
+            // Keep the transparent menu-bar mark separate from the app-bundle icon.
+            let tray_icon = tauri::image::Image::from_bytes(include_bytes!(
+                "../../../../assets/branding/quotation-mono/template/36x36.png"
+            ))?;
+            let tray = TrayIconBuilder::new()
+                .icon(tray_icon)
+                .icon_as_template(true)
                 .menu(&menu)
                 .tooltip("Selara")
                 .on_menu_event(move |app, event| match event.id.as_ref() {
@@ -1547,10 +1553,6 @@ pub fn run() {
                     }
                 });
 
-            // Prefer bundled icon when present.
-            if let Some(icon) = app.default_window_icon().cloned() {
-                tray = tray.icon(icon);
-            }
             let _tray = tray.build(app)?;
 
             if let Some(win) = app.get_webview_window("settings") {
