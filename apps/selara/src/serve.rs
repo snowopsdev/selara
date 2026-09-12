@@ -1,5 +1,4 @@
-//! macOS desktop shell: global hotkey → command picker → replace / popup.
-
+//! macOS writing service: capture a selection, transform it, and paste once.
 use std::collections::VecDeque;
 use std::io::Read;
 use std::io::Write;
@@ -11,13 +10,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use eframe::egui;
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notify::Watcher;
 use selara_core::commands::{
-    command_applies_to, commands_for_app, run_command_stream, CommandKind, PromptVars,
-    WritingCommand,
+    command_applies_to, run_command_stream, CommandKind, PromptVars, WritingCommand,
 };
-use selara_core::config::{app_is_excluded, serve_pidfile, AppConfig, LimitsConfig, ProviderAuth};
+use selara_core::config::{app_is_excluded, serve_pidfile, AppConfig, ProviderAuth};
 use selara_core::desktop_protocol::{
     AxTrust, ProtocolCommand, ProtocolDecoder, ProtocolRequest, ProtocolResponse, ServeReadiness,
     ServeStatus, PROTOCOL_VERSION,
@@ -31,122 +28,33 @@ use selara_platform::macos::{
 };
 use selara_platform::SelectionService;
 
+const DIALOG_SIZE: (f32, f32) = (400.0, 280.0);
+const CURSOR_OFFSET: f64 = 12.0;
+
 #[derive(Debug)]
 enum JobResult {
-    /// One raw text fragment of a reply still in progress; appended to the
-    /// `Working` phase's `partial` for display only. The finished text always
-    /// arrives separately in `Success`, so a Replace never writes fragments.
-    Delta {
-        generation: u64,
-        text: String,
-    },
-    Success {
-        generation: u64,
-        kind: CommandKind,
-        label: String,
-        text: String,
-    },
-    Error {
-        generation: u64,
-        message: String,
-    },
+    Delta { generation: u64, text: String },
+    Success { generation: u64, text: String },
+    Error { generation: u64, message: String },
 }
-
 impl JobResult {
     fn generation(&self) -> u64 {
         match self {
-            JobResult::Delta { generation, .. }
-            | JobResult::Success { generation, .. }
-            | JobResult::Error { generation, .. } => *generation,
+            Self::Delta { generation, .. }
+            | Self::Success { generation, .. }
+            | Self::Error { generation, .. } => *generation,
         }
     }
 }
-
-/// A job result may only be applied when it belongs to the selection that is
-/// still current and the UI is still waiting for it. Escape, a new hotkey
-/// press, or a dismissed window all bump the generation, so a completion that
-/// arrives afterwards is dropped instead of pasted into whatever is focused.
-fn should_apply_job(job_generation: u64, current_generation: u64, waiting: bool) -> bool {
-    waiting && job_generation == current_generation
+fn should_apply_job(job: u64, current: u64, waiting: bool) -> bool {
+    waiting && job == current
 }
-
-/// What the last successful Replace (or Insert below) wrote, so it can be put back.
-#[derive(Debug, Clone)]
-struct LastReplace {
-    pid: Option<i32>,
-    original: String,
-    replacement: String,
-    range: Option<(i64, i64)>,
+fn can_cancel(run: u64, current: u64, active: bool) -> bool {
+    active && run == current
 }
-
-/// Which popup actions are clickable for the current selection.
-///
-/// The replace caution gates both write-back buttons until it is acknowledged;
-/// the hard max is never skippable, so the buttons stay enabled and the click
-/// explains the block instead (same as `start_command`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PopupActions {
-    replace_enabled: bool,
-    insert_enabled: bool,
-    show_caution: bool,
+fn selected_text(text: Option<String>) -> Option<String> {
+    text.filter(|s| !s.trim().is_empty())
 }
-
-fn popup_actions(over_hard_max: bool, needs_replace_warn: bool) -> PopupActions {
-    let blocked_by_caution = needs_replace_warn && !over_hard_max;
-    PopupActions {
-        replace_enabled: !blocked_by_caution,
-        insert_enabled: !blocked_by_caution,
-        show_caution: blocked_by_caution,
-    }
-}
-
-/// What the captured text came from. A hotkey press with nothing selected
-/// falls back to the clipboard so the command still has something to run on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CaptureSource {
-    Selection,
-    Clipboard,
-}
-
-/// Pick what a hotkey press runs on: the selection when there is one,
-/// otherwise the clipboard.
-///
-/// Whitespace-only text counts as nothing on either side. A selection is kept
-/// verbatim so the captured `AXSelectedTextRange` still spans exactly it;
-/// clipboard text is trimmed, because a copy commonly carries a stray trailing
-/// newline and there is no range it has to stay consistent with.
-fn capture_from(
-    selection: Option<String>,
-    clipboard: Option<String>,
-) -> Option<(String, CaptureSource)> {
-    if let Some(text) = selection.filter(|t| !t.trim().is_empty()) {
-        return Some((text, CaptureSource::Selection));
-    }
-    let text = clipboard?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some((trimmed.to_string(), CaptureSource::Clipboard))
-}
-
-/// Where "Insert below" writes: a zero-length range right after the selection.
-fn insert_range((loc, len): (i64, i64)) -> (i64, i64) {
-    (loc + len, 0)
-}
-
-/// What "Insert below" writes: the result separated from the selection by a blank line.
-fn insert_text(body: &str) -> String {
-    format!("\n\n{body}")
-}
-
-/// Default picker window size in points. Compact enough to sit next to the
-/// cursor without covering the text it was opened for.
-const PICKER_SIZE: (f32, f32) = (380.0, 440.0);
-
-/// Gap between the cursor and the picker's top-left corner, in points.
-const CURSOR_OFFSET: f64 = 12.0;
-
 /// Top-left corner for a window of `size` opened next to `cursor`: 12 pt right
 /// and below it, clamped so the whole window stays inside `visible`
 /// `(x, y, w, h)`. A window larger than the frame sits at the frame's origin so
@@ -165,42 +73,6 @@ fn place_near(cursor: (f64, f64), size: (f64, f64), visible: (f64, f64, f64, f64
         clamp_axis(cursor.0 + CURSOR_OFFSET, vx, vw, size.0),
         clamp_axis(cursor.1 + CURSOR_OFFSET, vy, vh, size.1),
     )
-}
-
-/// Commands whose label contains `query` (case-insensitive, whitespace
-/// trimmed). When no label matches, fall back to matching the prompt text so a
-/// query like "grammar" still finds Proofread. An empty query returns all.
-fn filter_commands<'a>(commands: &'a [WritingCommand], query: &str) -> Vec<&'a WritingCommand> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return commands.iter().collect();
-    }
-    let by_label: Vec<&WritingCommand> = commands
-        .iter()
-        .filter(|c| c.label.to_lowercase().contains(&query))
-        .collect();
-    if !by_label.is_empty() {
-        return by_label;
-    }
-    commands
-        .iter()
-        .filter(|c| c.prompt.to_lowercase().contains(&query))
-        .collect()
-}
-
-/// Move the highlighted row by `delta`, wrapping at both ends. `0` for an
-/// empty list.
-fn next_selection(current: usize, len: usize, delta: isize) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    let len = len as isize;
-    ((current as isize + delta).rem_euclid(len)) as usize
-}
-
-/// Keep the highlighted row inside the visible list after filtering.
-fn clamp_selection(current: usize, len: usize) -> usize {
-    current.min(len.saturating_sub(1))
 }
 
 /// Picker banner for a selection that looks like it holds secrets. Names each
@@ -223,21 +95,7 @@ fn secret_banner(hits: &[SecretHit]) -> String {
     format!("Looks like it contains {list}. This goes to a hosted provider. Send anyway?")
 }
 
-/// Whether a picker row may run right now. Mirrors the rails on the buttons:
-/// the hard max, an unacknowledged soft warn, and an unacknowledged secret
-/// warn block everything, and an unacknowledged replace caution blocks
-/// Replace commands only.
-fn picker_row_enabled(
-    is_replace: bool,
-    hard_blocked: bool,
-    soft_blocked: bool,
-    replace_caution: bool,
-) -> bool {
-    let blocked = hard_blocked || soft_blocked || (is_replace && replace_caution);
-    !blocked
-}
-
-/// Id of the command built from free-form text typed into the picker. It is
+/// Id of the command built from free-form text typed into the instruction dialog. It is
 /// never written to the config: "Save as command" derives a real id first.
 const ADHOC_ID: &str = "adhoc";
 
@@ -252,25 +110,21 @@ const ADHOC_ID: &str = "adhoc";
 enum CommandOrigin {
     /// A command that already exists in the config.
     Configured,
-    /// One-off text typed into the picker's filter box; in memory only.
+    /// One-off text typed into the instruction dialog; in memory only.
     Instruction,
 }
 
-/// How many instructions the picker remembers for ↑ recall.
+/// How many instructions the instruction dialog remembers for ↑ recall.
 const HISTORY_CAP: usize = 10;
 
-/// A one-off command from the text in the picker's filter box. It runs through
-/// the same pipeline as a configured command (rails, streaming, Retry) but
-/// only lives in memory unless the user saves it afterwards.
-fn adhoc_command(text: &str, popup: bool) -> WritingCommand {
+/// A one-off command from the text in the instruction dialog. It runs through
+/// the same guarded execution path as a configured command, but only lives in
+/// memory unless the user saves it from the instruction dialog.
+fn adhoc_command(text: &str) -> WritingCommand {
     WritingCommand {
         id: ADHOC_ID.into(),
         label: "Instruction".into(),
-        kind: if popup {
-            CommandKind::Popup
-        } else {
-            CommandKind::Replace
-        },
+        kind: CommandKind::Replace,
         prompt: text.trim().to_string(),
         hotkey: None,
         model: None,
@@ -333,9 +187,9 @@ fn unique_command_id(slug: &str, existing: &[String], mut seed: u64) -> String {
     }
 }
 
-/// Turn an instruction that was just run into a command worth keeping: label
+/// Turn an instruction into a saved command: label
 /// from its first words, id from their slug plus a tail unique among
-/// `existing`, the kind it was run as, and no shortcut or model override.
+/// `existing`, replacement behavior, and no shortcut or model override.
 fn command_from_instruction(text: &str, kind: CommandKind, existing: &[String]) -> WritingCommand {
     let prompt = text.trim().to_string();
     let label = instruction_label(&prompt);
@@ -383,76 +237,6 @@ fn history_step(current: Option<usize>, len: usize, delta: isize) -> Option<usiz
     }
 }
 
-/// One row of the picker list. The instruction row exists only while the
-/// filter box has text and always sits first, so ↑ from the first match
-/// reaches it.
-#[derive(Debug, Clone, Copy)]
-enum PickerRow<'a> {
-    Instruction,
-    Command(&'a WritingCommand),
-}
-
-fn picker_rows<'a>(commands: &'a [WritingCommand], filter: &str) -> Vec<PickerRow<'a>> {
-    let mut rows = Vec::new();
-    if !filter.trim().is_empty() {
-        rows.push(PickerRow::Instruction);
-    }
-    rows.extend(
-        filter_commands(commands, filter)
-            .into_iter()
-            .map(PickerRow::Command),
-    );
-    rows
-}
-
-/// Row to highlight after the filter text changes: the first matching command
-/// when there is one (so `proof` + ⏎ still runs Proofread), otherwise the
-/// instruction row.
-fn default_picker_row(rows: &[PickerRow<'_>]) -> usize {
-    rows.iter()
-        .position(|r| matches!(r, PickerRow::Command(_)))
-        .unwrap_or(0)
-}
-
-/// The first `max` characters of `text`, with an ellipsis when it was cut.
-fn ellipsize(text: &str, max: usize) -> String {
-    let short: String = text.chars().take(max).collect();
-    if text.chars().count() > max {
-        format!("{short}…")
-    } else {
-        short
-    }
-}
-
-const DIGIT_KEYS: [egui::Key; 9] = [
-    egui::Key::Num1,
-    egui::Key::Num2,
-    egui::Key::Num3,
-    egui::Key::Num4,
-    egui::Key::Num5,
-    egui::Key::Num6,
-    egui::Key::Num7,
-    egui::Key::Num8,
-    egui::Key::Num9,
-];
-
-/// A bare `1`–`9` press this frame as a zero-based row index. The key press and
-/// the character it would type are removed from the input so the filter box
-/// stays empty; the caller only asks while the filter is empty, so digits typed
-/// into a non-empty filter keep filtering.
-fn take_digit(input: &mut egui::InputState) -> Option<usize> {
-    if !input.modifiers.is_none() {
-        return None;
-    }
-    let idx = DIGIT_KEYS.iter().position(|k| input.key_pressed(*k))?;
-    let typed = char::from(b'1' + idx as u8).to_string();
-    input.events.retain(|e| {
-        !matches!(e, egui::Event::Key { key, .. } if *key == DIGIT_KEYS[idx])
-            && !matches!(e, egui::Event::Text(t) if *t == typed)
-    });
-    Some(idx)
-}
-
 /// `1234567` → `1,234,567`, for the streaming progress counter.
 fn format_thousands(n: usize) -> String {
     let digits = n.to_string();
@@ -475,34 +259,21 @@ fn replace_progress(partial: &str) -> String {
     )
 }
 
-/// The two ways a popup result can be written back into the source app.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WriteBack {
-    Replace,
-    InsertBelow,
-}
-
 enum UiPhase {
     Hidden,
-    Picker,
-    Settings,
-    /// A command is running. `partial` accumulates the streamed fragments so
-    /// far: rendered as markdown for a Popup, summarised as a character count
-    /// for a Replace (whose text is only written back once complete).
-    Working {
-        label: String,
-        kind: CommandKind,
-        partial: String,
-    },
-    Popup {
-        title: String,
-        body: String,
-    },
-    Error {
-        message: String,
-    },
+    Instruction,
+    Confirm,
+    Working { label: String, partial: String },
+    Error { message: String },
 }
-
+impl UiPhase {
+    fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Self::Instruction | Self::Confirm | Self::Working { .. }
+        )
+    }
+}
 #[derive(Default)]
 struct WorkGate {
     quiescing: bool,
@@ -544,72 +315,38 @@ enum ProtocolInput {
 
 struct ServeApp {
     config: AppConfig,
+    request_config: AppConfig,
     config_path: PathBuf,
-    /// `serve.pid` next to the config file; removed in `on_exit`.
     pidfile: PathBuf,
     selection: Arc<MacosSelection>,
     hotkey: MacosHotkey,
     config_mtime: Option<SystemTime>,
-    /// Set from the file-system watcher thread when the config directory
-    /// changes; drained once per frame. The watcher is kept alive here.
+    reload_error: Option<String>,
     config_dirty: Arc<AtomicBool>,
     _config_watcher: Option<notify::RecommendedWatcher>,
-    /// Fallback poll so a missed event (or no watcher) still reloads.
     last_config_poll: Instant,
     egui_ctx: egui::Context,
     phase: UiPhase,
-    /// Text captured at hotkey time (before our window steals focus).
+    progress: crate::progress::ProgressPanel,
     captured_text: String,
     captured_app: Option<String>,
-    /// Bundle id of the app the selection came from, e.g. `com.apple.mail`.
-    /// Matched against each command's `apps` alongside the name.
-    captured_bundle_id: Option<String>,
     captured_range: Option<(i64, i64)>,
-    /// Whether `captured_text` is a real selection or the clipboard's contents.
-    source: CaptureSource,
     target_pid: Option<i32>,
-    /// Soft-warn acknowledged for the current selection.
     soft_warn_acked: bool,
-    /// Secret-shaped values found in the captured text; cleared per capture.
     secret_hits: Vec<SecretHit>,
     secret_guard_acked: bool,
-    /// Replace-size warn acknowledged for the current selection.
     replace_warn_acked: bool,
-    /// Command fired by its own shortcut that is waiting on a picker confirmation.
-    pending_direct: Option<WritingCommand>,
-    settings_status: String,
-    /// Bumped whenever the captured selection changes or the window is
-    /// dismissed; results from an older generation are discarded.
+    pending_direct: Option<(WritingCommand, CommandOrigin)>,
     generation: u64,
-    last_replace: Option<LastReplace>,
-    /// The command most recently started, so a popup can Retry it.
     last_command: Option<WritingCommand>,
-    /// Origin of `last_command`; see `CommandOrigin`.
-    last_origin: CommandOrigin,
-    md_cache: CommonMarkCache,
     job_rx: Receiver<JobResult>,
     job_tx: Sender<JobResult>,
     runtime: tokio::runtime::Runtime,
-    status_line: String,
-    /// Live text of the picker's filter box; cleared on every capture.
-    picker_filter: String,
-    /// Index into the filtered command list that ↑/↓/Enter act on.
-    picker_selected: usize,
-    /// Give the filter box keyboard focus on the next picker frame.
-    focus_filter_next_frame: bool,
-    /// Instructions typed into the picker, newest first, for ↑ recall.
+    instruction: String,
+    focus_instruction: bool,
     instruction_history: VecDeque<String>,
-    /// Which history entry the filter box currently shows, if any; `None`
-    /// once the user edits the text or the box is empty again.
     history_cursor: Option<usize>,
-    /// Put the filter box's caret at the end on the next frame (after a
-    /// recalled instruction replaced its text).
-    filter_caret_to_end: bool,
-    /// The most recent ad-hoc instruction that finished, kept until it is
-    /// saved as a command or another one finishes.
-    last_adhoc: Option<WritingCommand>,
-    /// One-line feedback in the picker and popup (e.g. "Saved as …").
-    picker_notice: String,
+    notice: String,
     protocol: Option<Receiver<ProtocolInput>>,
     gate: WorkGate,
     pending_quiesce: Vec<String>,
@@ -627,7 +364,7 @@ impl ServeApp {
                 ServeReadiness::Quiesced
             } else if self.gate.quiescing {
                 ServeReadiness::Quiescing
-            } else if self.gate.active > 0 {
+            } else if self.gate.active > 0 || self.phase.is_active() {
                 ServeReadiness::Busy
             } else {
                 ServeReadiness::Ready
@@ -655,73 +392,59 @@ impl ServeApp {
     }
 
     fn new(
-        _cc: &eframe::CreationContext<'_>,
+        cc: &eframe::CreationContext<'_>,
         config: AppConfig,
         config_path: PathBuf,
         selection: Arc<MacosSelection>,
     ) -> Result<Self> {
         let hotkey = MacosHotkey::new();
-        // Wake egui when the hotkey fires so a hidden window still updates.
-        let egui_ctx = _cc.egui_ctx.clone();
-        let wake_ctx = egui_ctx.clone();
-        hotkey.set_wake(move || {
-            wake_ctx.request_repaint();
-        });
-        // Must register on the main thread (eframe creation runs there).
+        let egui_ctx = cc.egui_ctx.clone();
+        let wake = egui_ctx.clone();
+        hotkey.set_wake(move || wake.request_repaint());
         Self::register_hotkeys(&hotkey, &config)?;
         let config_mtime = std::fs::metadata(&config_path)
             .and_then(|m| m.modified())
             .ok();
         let config_dirty = Arc::new(AtomicBool::new(false));
-        let config_watcher = Self::watch_config(&config_path, &config_dirty, &egui_ctx);
-
+        let watcher = Self::watch_config(&config_path, &config_dirty, &egui_ctx);
         let (job_tx, job_rx) = mpsc::channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .build()
-            .context("tokio runtime")?;
-
+            .build()?;
         Ok(Self {
-            status_line: Self::status_for(&config),
+            request_config: config.clone(),
             config,
             pidfile: serve_pidfile(&config_path),
             config_path,
             selection,
             hotkey,
             config_mtime,
+            reload_error: None,
             config_dirty,
-            _config_watcher: config_watcher,
+            _config_watcher: watcher,
             last_config_poll: Instant::now(),
             egui_ctx,
             phase: UiPhase::Hidden,
+            progress: crate::progress::ProgressPanel::new(),
             captured_text: String::new(),
             captured_app: None,
-            captured_bundle_id: None,
             captured_range: None,
-            source: CaptureSource::Selection,
             target_pid: None,
             soft_warn_acked: false,
             secret_hits: Vec::new(),
             secret_guard_acked: false,
             replace_warn_acked: false,
             pending_direct: None,
-            settings_status: String::new(),
             generation: 0,
-            last_replace: None,
             last_command: None,
-            last_origin: CommandOrigin::Configured,
-            md_cache: CommonMarkCache::default(),
             job_rx,
             job_tx,
             runtime,
-            picker_filter: String::new(),
-            picker_selected: 0,
-            focus_filter_next_frame: false,
+            instruction: String::new(),
+            focus_instruction: false,
             instruction_history: VecDeque::new(),
             history_cursor: None,
-            filter_caret_to_end: false,
-            last_adhoc: None,
-            picker_notice: String::new(),
+            notice: String::new(),
             protocol: None,
             gate: WorkGate::default(),
             pending_quiesce: Vec::new(),
@@ -730,7 +453,6 @@ impl ServeApp {
             protocol_output: None,
         })
     }
-
     /// Watch the config's directory (not the file: atomic saves rename a new
     /// inode into place) and flag a reload plus a repaint on any change. Returns
     /// `None` when the watcher cannot be created; the periodic poll still runs.
@@ -765,16 +487,6 @@ impl ServeApp {
         }
         tracing::info!("selara: watching {} for config changes", dir.display());
         Some(watcher)
-    }
-
-    fn show_window(&self, ctx: &egui::Context, visible: bool) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(visible));
-        if visible {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
-                egui::WindowLevel::AlwaysOnTop,
-            ));
-        }
     }
 
     fn start_protocol(&mut self) {
@@ -837,10 +549,35 @@ impl ServeApp {
                 error = Some("Unsupported desktop protocol version".to_string());
             } else {
                 match request.command {
+                    ProtocolCommand::RunCommand {
+                        command_id,
+                        target_pid,
+                    } => {
+                        error = self
+                            .begin_run(ctx, Some(&command_id), Some(target_pid))
+                            .err();
+                        if let Some(message) = &error {
+                            self.fail(ctx, message.clone());
+                        }
+                    }
+                    ProtocolCommand::CustomInstruction { target_pid } => {
+                        error = self.begin_run(ctx, None, Some(target_pid)).err();
+                        if let Some(message) = &error {
+                            self.fail(ctx, message.clone());
+                        }
+                    }
+                    ProtocolCommand::Cancel { run_id } => {
+                        if can_cancel(run_id, self.generation, self.phase.is_active()) {
+                            self.hide(ctx);
+                        } else {
+                            error = Some("That command is no longer active".into());
+                        }
+                    }
                     ProtocolCommand::Status => {}
                     ProtocolCommand::RequestPermission => prompt_accessibility(),
                     ProtocolCommand::Quiesce => {
                         self.gate.quiesce();
+                        self.hide(ctx);
                         self.pending_quiesce.push(request.id);
                         continue;
                     }
@@ -891,7 +628,7 @@ impl ServeApp {
         }
         if !self.pending_quiesce.is_empty() && self.gate.pause_if_idle() {
             // Job results have been drained on this same UI thread. Dismiss
-            // queued confirmations/popups and invalidate every late write.
+            // queued confirmations and invalidate every late write.
             self.hide(ctx);
             let ids = std::mem::take(&mut self.pending_quiesce);
             for id in ids {
@@ -913,19 +650,8 @@ impl ServeApp {
             self.last_protocol_status = Some(status);
             self.last_protocol_emit = Instant::now();
         }
-        // Also catches permission changes while a popup is idle.
+        // Also catches permission changes while a dialog is idle.
         ctx.request_repaint_after(Duration::from_secs(1));
-    }
-
-    /// Show the window for a fresh hotkey press: moved next to the mouse cursor
-    /// first (on whichever display it is on, inside that display's visible
-    /// frame), then made visible. Falls back to the window's last position
-    /// when the cursor cannot be located.
-    fn show_window_near_cursor(&self, ctx: &egui::Context) {
-        if let Some(pos) = self.position_near_cursor(ctx) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
-        }
-        self.show_window(ctx, true);
     }
 
     fn position_near_cursor(&self, ctx: &egui::Context) -> Option<egui::Pos2> {
@@ -939,59 +665,9 @@ impl ServeApp {
                     .outer_rect
                     .map(|r| (f64::from(r.width()), f64::from(r.height())))
             })
-            .unwrap_or((f64::from(PICKER_SIZE.0), f64::from(PICKER_SIZE.1)));
+            .unwrap_or((f64::from(DIALOG_SIZE.0), f64::from(DIALOG_SIZE.1)));
         let (x, y) = place_near(cursor, size, visible);
         Some(egui::pos2(x as f32, y as f32))
-    }
-
-    fn status_for(config: &AppConfig) -> String {
-        let cmd_hk = config
-            .commands
-            .iter()
-            .filter(|c| {
-                c.hotkey
-                    .as_ref()
-                    .map(|h| !h.trim().is_empty())
-                    .unwrap_or(false)
-            })
-            .count();
-        let shortcut_hint = config
-            .commands
-            .iter()
-            .find_map(|c| {
-                c.hotkey
-                    .as_ref()
-                    .map(|h| h.trim())
-                    .filter(|h| !h.is_empty())
-                    .map(|h| format!("{}={}", c.label, h))
-            })
-            .unwrap_or_else(|| "no cmd shortcuts".into());
-        let undo = config
-            .undo_hotkey
-            .as_deref()
-            .map(str::trim)
-            .filter(|h| !h.is_empty())
-            .map(|h| format!(" · Undo: {h}"))
-            .unwrap_or_default();
-        let excluded = match config.excluded_apps.len() {
-            0 => String::new(),
-            n => format!(" · {n} excluded apps"),
-        };
-        format!(
-            "Picker: {} · {} cmds · {}{undo}{excluded} · Access: {}",
-            config.hotkey,
-            config.commands.len(),
-            if cmd_hk <= 1 {
-                shortcut_hint
-            } else {
-                format!("{cmd_hk} shortcuts incl. {shortcut_hint}")
-            },
-            if accessibility_trusted() {
-                "ok"
-            } else {
-                "MISSING"
-            }
-        )
     }
 
     fn register_hotkeys(hotkey: &MacosHotkey, config: &AppConfig) -> Result<()> {
@@ -1007,24 +683,14 @@ impl ServeApp {
             })
             .collect();
         tracing::info!(
-            "selara: registering picker `{}` + {} command shortcut(s)",
+            "selara: registering custom instruction `{}` + {} command shortcut(s)",
             config.hotkey,
             cmd_keys.len()
         );
         for (id, spec) in &cmd_keys {
             tracing::info!("selara:   command `{id}` → `{spec}`");
         }
-        let undo = config
-            .undo_hotkey
-            .as_deref()
-            .map(str::trim)
-            .filter(|h| !h.is_empty());
-        if let Some(undo) = undo {
-            tracing::info!("selara:   undo → `{undo}`");
-        }
-        hotkey
-            .reregister_all(&config.hotkey, &cmd_keys, undo)
-            .with_context(|| format!("register hotkeys (picker `{}`)", config.hotkey))?;
+        hotkey.reregister_all(&config.hotkey, &cmd_keys)?;
         Ok(())
     }
 
@@ -1048,79 +714,19 @@ impl ServeApp {
         if self.config_mtime == Some(mtime) {
             return;
         }
+        // Keep an admitted request and its frozen config intact when a live
+        // config edit is invalid. Report the reload error once the run ends.
+        self.config_mtime = Some(mtime);
         match AppConfig::load_or_init(&self.config_path) {
-            Ok(cfg) => {
-                if let Err(e) = Self::register_hotkeys(&self.hotkey, &cfg) {
-                    self.phase = UiPhase::Error {
-                        message: format!("Hotkey reload failed: {e}"),
-                    };
-                    // still keep new config for limits/commands UI in overlay settings
+            Ok(cfg) => match Self::register_hotkeys(&self.hotkey, &cfg) {
+                Ok(()) => {
+                    self.config = cfg;
+                    self.reload_error = None;
                 }
-                self.config = cfg;
-                self.config_mtime = Some(mtime);
-                self.status_line = Self::status_for(&self.config);
-            }
-            Err(e) => {
-                self.phase = UiPhase::Error {
-                    message: format!("Config reload failed: {e}"),
-                };
-            }
+                Err(e) => self.reload_error = Some(format!("Hotkey reload failed: {e}")),
+            },
+            Err(e) => self.reload_error = Some(format!("Config reload failed: {e}")),
         }
-    }
-
-    fn capture_selection(&mut self) -> Result<bool, String> {
-        // A new selection supersedes any job still running for the old one.
-        self.generation += 1;
-        self.target_pid = frontmost_pid();
-        self.soft_warn_acked = false;
-        self.secret_guard_acked = false;
-        self.secret_hits.clear();
-        self.replace_warn_acked = false;
-        self.pending_direct = None;
-        self.picker_filter.clear();
-        self.picker_selected = 0;
-        self.history_cursor = None;
-        self.picker_notice.clear();
-        self.focus_filter_next_frame = true;
-        let snap = match self.runtime.block_on(self.selection.read_selection()) {
-            Ok(snap) => snap,
-            Err(e) => return Err(format!("{e}")),
-        };
-        // Only reach for the pasteboard when there is nothing selected, so a
-        // normal run never touches it.
-        let clipboard = match snap {
-            Some(_) => None,
-            None => self.selection.clipboard_text().unwrap_or_else(|e| {
-                tracing::warn!("selara: could not read the clipboard ({e})");
-                None
-            }),
-        };
-        let selected = snap.as_ref().map(|s| s.text.clone());
-        let Some((text, source)) = capture_from(selected, clipboard) else {
-            return Err("No text selected and the clipboard is empty.\n\
-                 Select text in another app (or copy some), then press the hotkey again."
-                .into());
-        };
-        self.captured_text = text;
-        self.source = source;
-        match snap {
-            Some(snap) if source == CaptureSource::Selection => {
-                self.captured_app = snap.app_name;
-                self.captured_bundle_id = snap.bundle_id;
-                self.captured_range = snap.range;
-            }
-            // Clipboard mode: there is no selection to anchor to, so a Replace
-            // pastes at the caret of whatever app was in front.
-            _ => {
-                self.captured_app = frontmost_app_name();
-                self.captured_bundle_id = frontmost_bundle_id();
-                self.captured_range = None;
-            }
-        }
-        if self.config.limits.secret_guard {
-            self.secret_hits = scan_secrets(&self.captured_text);
-        }
-        Ok(true)
     }
 
     fn selection_chars(&self) -> u64 {
@@ -1128,544 +734,35 @@ impl ServeApp {
     }
 
     fn over_hard_max(&self) -> bool {
-        let max = self.config.limits.hard_max_chars;
+        let max = self.request_config.limits.hard_max_chars;
         max > 0 && self.selection_chars() > max
     }
 
     fn needs_soft_warn(&self) -> bool {
-        let soft = self.config.limits.soft_warn_chars;
+        let soft = self.request_config.limits.soft_warn_chars;
         soft > 0 && self.selection_chars() > soft && !self.soft_warn_acked
     }
 
     fn needs_replace_warn(&self) -> bool {
-        let warn = self.config.limits.replace_warn_chars;
+        let warn = self.request_config.limits.replace_warn_chars;
         warn > 0 && self.selection_chars() > warn && !self.replace_warn_acked
-    }
-
-    /// True when the frontmost app is on `excluded_apps`. Checked before any
-    /// window, selection, or clipboard access so excluded apps (password
-    /// managers, terminals) never see Selara react to the hotkey.
-    fn frontmost_is_excluded(&self, trigger: &str) -> bool {
-        if self.config.excluded_apps.is_empty() {
-            return false;
-        }
-        let name = frontmost_app_name();
-        let bundle = frontmost_bundle_id();
-        let excluded = app_is_excluded(
-            &self.config.excluded_apps,
-            name.as_deref(),
-            bundle.as_deref(),
-        );
-        if excluded {
-            tracing::info!(
-                "selara: {trigger} ignored, frontmost app is excluded (name={:?}, bundle={:?})",
-                name,
-                bundle
-            );
-        }
-        excluded
-    }
-
-    /// The undo shortcut, guarded like the other two.
-    ///
-    /// Undo is not a read of the current selection, but it is still one of
-    /// Selara's hotkeys, and an excluded app must see nothing from Selara at
-    /// all: unguarded it pops our error window over the excluded app when there
-    /// is nothing to undo, and otherwise reactivates the earlier target app and
-    /// rewrites text there.
-    fn on_undo_hotkey(&mut self, ctx: &egui::Context) {
-        if self.frontmost_is_excluded("undo hotkey") {
-            return;
-        }
-        self.undo_last_replace(ctx);
-    }
-
-    /// The commands offered for the app the current selection came from.
-    /// A command with an empty `apps` list is offered everywhere; one that
-    /// names apps only shows up in those. The free-form instruction row is
-    /// never filtered — it is not a configured command.
-    fn commands_for_captured_app(&self) -> Vec<WritingCommand> {
-        commands_for_app(
-            &self.config.commands,
-            self.captured_app.as_deref(),
-            self.captured_bundle_id.as_deref(),
-        )
-        .into_iter()
-        .cloned()
-        .collect()
-    }
-
-    /// Name to show for the app a selection came from: its app name, its
-    /// bundle id when the name is unavailable, else a neutral placeholder.
-    fn captured_app_label(&self) -> String {
-        self.captured_app
-            .as_deref()
-            .or(self.captured_bundle_id.as_deref())
-            .map(str::trim)
-            .filter(|a| !a.is_empty())
-            .unwrap_or("this app")
-            .to_string()
     }
 
     /// Requests leave the machine: the ChatGPT/Codex path always does, and a
     /// BYOK provider does unless its base URL points at a local server.
     fn provider_hosted(&self) -> bool {
-        let p = &self.config.provider;
+        let p = &self.request_config.provider;
         matches!(p.auth, ProviderAuth::ChatGpt) || provider_is_hosted(p.kind, &p.base_url)
     }
 
     fn needs_secret_warn(&self) -> bool {
-        self.config.limits.secret_guard
+        self.request_config.limits.secret_guard
             && !self.secret_hits.is_empty()
             && !self.secret_guard_acked
             && self.provider_hosted()
     }
 
-    fn on_hotkey(&mut self, ctx: &egui::Context) {
-        if self.frontmost_is_excluded("picker hotkey") {
-            return;
-        }
-        if !accessibility_trusted() {
-            prompt_accessibility();
-            self.phase = UiPhase::Error {
-                message: "Accessibility permission missing.\n\n\
-System Settings → Privacy & Security → Accessibility\n\
-Enable Selara (or Terminal / the binary you launched),\n\
-then restart `selara serve`."
-                    .into(),
-            };
-            self.show_window_near_cursor(ctx);
-            return;
-        }
-
-        match self.capture_selection() {
-            Ok(true) => {
-                self.phase = UiPhase::Picker;
-                self.show_window_near_cursor(ctx);
-            }
-            Ok(false) => {}
-            Err(message) => {
-                self.phase = UiPhase::Error { message };
-                self.show_window_near_cursor(ctx);
-            }
-        }
-    }
-
-    fn on_command_hotkey(&mut self, ctx: &egui::Context, command_id: &str) {
-        if self.frontmost_is_excluded(&format!("command hotkey `{command_id}`")) {
-            return;
-        }
-        if !accessibility_trusted() {
-            self.on_hotkey(ctx);
-            return;
-        }
-        let cmd = self
-            .config
-            .commands
-            .iter()
-            .find(|c| c.id == command_id)
-            .cloned();
-        let Some(cmd) = cmd else {
-            self.phase = UiPhase::Error {
-                message: format!("Unknown command id `{command_id}` for hotkey."),
-            };
-            self.show_window_near_cursor(ctx);
-            return;
-        };
-        // A shortcut must respect the command's own Apps list: pressing it in
-        // an app the command is not enabled for says so instead of running.
-        let front_name = frontmost_app_name();
-        let front_bundle = frontmost_bundle_id();
-        if !command_applies_to(&cmd, front_name.as_deref(), front_bundle.as_deref()) {
-            let app = front_name
-                .as_deref()
-                .or(front_bundle.as_deref())
-                .map(str::trim)
-                .filter(|a| !a.is_empty())
-                .unwrap_or("this app")
-                .to_string();
-            tracing::info!(
-                "selara: command hotkey `{}` ignored, not enabled for {app}",
-                cmd.id
-            );
-            self.phase = UiPhase::Error {
-                message: format!(
-                    "`{}` is not enabled for {app}.\n\nEdit the command's Apps field in Settings to add {app}, or clear it to enable the command everywhere.",
-                    cmd.label
-                ),
-            };
-            self.show_window_near_cursor(ctx);
-            return;
-        }
-        match self.capture_selection() {
-            Ok(true) => {
-                self.show_window_near_cursor(ctx);
-                if self.needs_confirmation(&cmd) {
-                    // Same rails as the picker: show it with the banner and run
-                    // the command once the user confirms.
-                    tracing::info!(
-                        "selara: command hotkey `{}` → waiting for confirmation",
-                        cmd.id
-                    );
-                    self.pending_direct = Some(cmd);
-                    self.phase = UiPhase::Picker;
-                } else {
-                    tracing::info!("selara: command hotkey `{}` → running", cmd.id);
-                    self.start_command(cmd, CommandOrigin::Configured);
-                }
-            }
-            Ok(false) => {
-                self.phase = UiPhase::Error {
-                    message: format!(
-                        "No text selection for `{}`.
-
-Select text in another app, then press its shortcut again.",
-                        cmd.label
-                    ),
-                };
-                self.show_window_near_cursor(ctx);
-            }
-            Err(message) => {
-                self.phase = UiPhase::Error { message };
-                self.show_window_near_cursor(ctx);
-            }
-        }
-    }
-
-    /// True when the picker would show a soft-warn or replace-caution banner
-    /// for this command on the current selection. The hard max is checked by
-    /// `start_command` and is never skippable.
-    fn needs_confirmation(&self, cmd: &WritingCommand) -> bool {
-        self.needs_soft_warn()
-            || self.needs_secret_warn()
-            || (matches!(cmd.kind, CommandKind::Replace) && self.needs_replace_warn())
-    }
-
-    /// Run a shortcut-triggered command once nothing blocks it any more. Checked
-    /// every frame the picker is shown, so it fires after an acknowledgement
-    /// click and also after a limit is raised or disabled in Settings or the
-    /// config file. A hard-max block keeps the picker (and its red banner) up.
-    fn run_pending_if_ready(&mut self) {
-        let ready = self
-            .pending_direct
-            .as_ref()
-            .is_some_and(|cmd| !self.over_hard_max() && !self.needs_confirmation(cmd));
-        if ready {
-            if let Some(cmd) = self.pending_direct.take() {
-                // A shortcut always names a command that is in the config.
-                self.start_command(cmd, CommandOrigin::Configured);
-            }
-        }
-    }
-
-    fn hide(&mut self, ctx: &egui::Context) {
-        // Dismissing the window (Escape, Close) cancels whatever is in flight:
-        // the request keeps running but its result is dropped on arrival.
-        self.generation += 1;
-        self.pending_direct = None;
-        self.phase = UiPhase::Hidden;
-        self.show_window(ctx, false);
-    }
-
-    fn save_settings(&mut self) {
-        match self.config.save(&self.config_path) {
-            Ok(()) => {
-                if let Err(e) = Self::register_hotkeys(&self.hotkey, &self.config) {
-                    self.settings_status = format!("Saved, but hotkey reload failed: {e}");
-                } else {
-                    self.settings_status = format!("Saved · {}", self.config_path.display());
-                }
-                self.config_mtime = std::fs::metadata(&self.config_path)
-                    .and_then(|m| m.modified())
-                    .ok();
-                self.status_line = Self::status_for(&self.config);
-            }
-            Err(e) => {
-                self.settings_status = format!("Save failed: {e}");
-            }
-        }
-    }
-
-    fn hard_max_error(&self) -> UiPhase {
-        let max = self.config.limits.hard_max_chars;
-        UiPhase::Error {
-            message: format!(
-                "Selection is {} characters — over your hard limit of {max}.\n\n\
-Shrink the selection, or raise / disable the limit in Settings (0 = unlimited).",
-                self.selection_chars()
-            ),
-        }
-    }
-
-    fn start_command(&mut self, cmd: WritingCommand, origin: CommandOrigin) {
-        if self.gate.quiescing {
-            return;
-        }
-        // Picking a command by hand supersedes any shortcut-triggered one.
-        self.pending_direct = None;
-        self.last_command = Some(cmd.clone());
-        self.last_origin = origin;
-        if self.over_hard_max() {
-            self.phase = self.hard_max_error();
-            return;
-        }
-        if self.needs_soft_warn() {
-            self.phase = UiPhase::Error {
-                message: format!(
-                    "Large selection ({} chars) — confirm via the picker, or raise soft warn in Settings.",
-                    self.selection_chars()
-                ),
-            };
-            return;
-        }
-        if self.needs_secret_warn() {
-            self.phase = UiPhase::Error {
-                message: format!(
-                    "{} Confirm via the picker, or turn the secret guard off in Settings.",
-                    secret_banner(&self.secret_hits)
-                ),
-            };
-            return;
-        }
-        if matches!(cmd.kind, CommandKind::Replace) && self.needs_replace_warn() {
-            self.phase = UiPhase::Error {
-                message: format!(
-                    "Large replace ({} chars) — confirm via the picker, or raise replace warn in Settings.",
-                    self.selection_chars()
-                ),
-            };
-            return;
-        }
-
-        let input = self.captured_text.clone();
-        let cfg = self.config.clone();
-        let tx = self.job_tx.clone();
-        let label = cmd.label.clone();
-        let generation = self.generation;
-        let wake = self.egui_ctx.clone();
-        let app_name = self.captured_app.clone();
-        self.phase = UiPhase::Working {
-            label: label.clone(),
-            kind: cmd.kind,
-            partial: String::new(),
-        };
-
-        if !self.gate.admit() {
-            return;
-        }
-        self.runtime.spawn(async move {
-            let result = async {
-                let provider = cfg.build_provider_for(&cmd)?;
-                let vars = PromptVars {
-                    language: Some(&cfg.language),
-                    app: app_name.as_deref(),
-                };
-                // Every fragment goes straight to the UI thread; the channel
-                // is unbounded and the UI drains it once per frame, so no
-                // coalescing is needed. Fragments carry the generation so a
-                // stale stream (Escape, new hotkey) is dropped like a result.
-                let delta_tx = tx.clone();
-                let delta_wake = wake.clone();
-                let mut on_delta = move |text: &str| {
-                    let _ = delta_tx.send(JobResult::Delta {
-                        generation,
-                        text: text.to_string(),
-                    });
-                    delta_wake.request_repaint();
-                };
-                let out =
-                    run_command_stream(provider.as_ref(), &cmd, &input, None, vars, &mut on_delta)
-                        .await?;
-                Ok::<_, anyhow::Error>((cmd.kind, cmd.label, out))
-            }
-            .await;
-
-            let msg = match result {
-                Ok((kind, label, text)) => JobResult::Success {
-                    generation,
-                    kind,
-                    label,
-                    text,
-                },
-                Err(e) => JobResult::Error {
-                    generation,
-                    message: e.to_string(),
-                },
-            };
-            let _ = tx.send(msg);
-            // The UI may be idling at a slow tick; make it pick the result up now.
-            wake.request_repaint();
-        });
-    }
-
-    fn apply_job(&mut self, ctx: &egui::Context, job: JobResult) {
-        match job {
-            JobResult::Delta { text, .. } => {
-                // `should_apply_job` already checked the phase is Working for
-                // this generation; anything else means the fragment is stale.
-                if let UiPhase::Working { partial, .. } = &mut self.phase {
-                    partial.push_str(&text);
-                }
-            }
-            JobResult::Error { message, .. } => {
-                self.phase = UiPhase::Error { message };
-            }
-            JobResult::Success {
-                kind, label, text, ..
-            } => {
-                // A finished instruction is offered for saving: from the
-                // popup right away, or from the picker's banner next time.
-                if self.last_origin == CommandOrigin::Instruction {
-                    self.last_adhoc = self.last_command.clone();
-                }
-                match kind {
-                    CommandKind::Popup => {
-                        self.record_history(CommandKind::Popup, self.captured_text.clone(), &text);
-                        self.phase = UiPhase::Popup {
-                            title: label,
-                            body: text,
-                        };
-                    }
-                    CommandKind::Replace => self.replace_selection_with(ctx, text),
-                }
-            }
-        }
-    }
-
-    /// Run a command picked in the picker. An ad-hoc instruction is also
-    /// remembered for ↑ recall.
-    fn run_picked(&mut self, cmd: WritingCommand, origin: CommandOrigin) {
-        if origin == CommandOrigin::Instruction {
-            push_history(&mut self.instruction_history, &cmd.prompt);
-            tracing::info!(
-                "selara: running instruction ({} chars) as {:?}",
-                cmd.prompt.chars().count(),
-                cmd.kind
-            );
-        }
-        self.start_command(cmd, origin);
-    }
-
-    /// Append the last finished instruction to the config as a real command
-    /// and save the file. On failure the command is dropped again and the
-    /// instruction stays offered.
-    fn save_last_adhoc(&mut self) {
-        let Some(adhoc) = self.last_adhoc.take() else {
-            return;
-        };
-        // Re-read the file first. The Settings app is a separate process and
-        // saves a section by reloading and merging for exactly this reason;
-        // writing our whole in-memory `config` would silently drop anything it
-        // saved since this frame's config poll. Only the new command is added
-        // to whatever is on disk now, and the merged result becomes our copy.
-        let mut latest = match AppConfig::load_or_init(&self.config_path) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                self.last_adhoc = Some(adhoc);
-                self.picker_notice = format!("Save failed: could not re-read the config: {e}");
-                return;
-            }
-        };
-        let existing: Vec<String> = latest.commands.iter().map(|c| c.id.clone()).collect();
-        let cmd = command_from_instruction(&adhoc.prompt, adhoc.kind, &existing);
-        let (id, label) = (cmd.id.clone(), cmd.label.clone());
-        latest.commands.push(cmd);
-        match latest.save(&self.config_path) {
-            Ok(()) => {
-                self.config = latest;
-                // The merged config can carry hotkey changes the Settings app
-                // made while this instruction was running, so re-register.
-                if let Err(e) = Self::register_hotkeys(&self.hotkey, &self.config) {
-                    tracing::warn!("selara: hotkey reload after saving `{id}` failed: {e}");
-                }
-                self.config_mtime = std::fs::metadata(&self.config_path)
-                    .and_then(|m| m.modified())
-                    .ok();
-                self.status_line = Self::status_for(&self.config);
-                self.picker_notice = format!("Saved as “{label}” · edit it in Settings → Commands");
-                tracing::info!("selara: saved instruction as command `{id}`");
-            }
-            Err(e) => {
-                self.last_adhoc = Some(adhoc);
-                self.picker_notice = format!("Save failed: {e}");
-            }
-        }
-    }
-
-    /// Hide, hand focus back to the source app, and write `text` over the
-    /// captured selection. Shared by Replace commands and the popup's
-    /// "Replace selection" button.
-    fn replace_selection_with(&mut self, ctx: &egui::Context, text: String) {
-        if self.gate.paused {
-            return;
-        }
-        let pid = self.target_pid;
-        // In clipboard mode nothing is selected, so there is no original text
-        // to overwrite: an empty `original` with no range pastes at the caret,
-        // and Undo takes exactly that back out again.
-        let original = match self.source {
-            CaptureSource::Selection => self.captured_text.clone(),
-            CaptureSource::Clipboard => String::new(),
-        };
-        let range = self.captured_range;
-        self.refocus_target(ctx);
-        match self.selection.replace_in_app(pid, &text, &original, range) {
-            Ok(()) => {
-                self.record_history(CommandKind::Replace, original.clone(), &text);
-                self.last_replace = Some(LastReplace {
-                    pid,
-                    original,
-                    replacement: text,
-                    range,
-                });
-            }
-            Err(e) => {
-                self.phase = UiPhase::Error {
-                    message: format!("Replace failed: {e}"),
-                };
-                self.show_window(ctx, true);
-            }
-        }
-    }
-
-    /// Hide, hand focus back to the source app, and insert `body` after the
-    /// captured selection (separated by a blank line). Recorded as a
-    /// zero-length "replace" so Undo removes exactly what was inserted.
-    fn insert_below_selection(&mut self, ctx: &egui::Context, body: &str) {
-        if self.gate.quiescing {
-            return;
-        }
-        let pid = self.target_pid;
-        let captured_range = self.captured_range;
-        let text = insert_text(body);
-        self.refocus_target(ctx);
-        match self
-            .selection
-            .insert_after_selection(pid, &text, captured_range)
-        {
-            Ok(()) => {
-                self.record_history(CommandKind::Replace, String::new(), body);
-                self.last_replace = Some(LastReplace {
-                    pid,
-                    original: String::new(),
-                    replacement: text,
-                    range: captured_range.map(insert_range),
-                });
-            }
-            Err(e) => {
-                self.phase = UiPhase::Error {
-                    message: format!("Insert failed: {e}"),
-                };
-                self.show_window(ctx, true);
-            }
-        }
-    }
-
-    /// Best-effort append to `history.jsonl` next to the config. Covers every
-    /// successful outcome: a Replace written back, a popup shown, and a popup
-    /// result written back (Replace selection / Insert below, whose `original`
-    /// is empty). Failures are logged and never block the command.
-    fn record_history(&self, kind: CommandKind, original: String, result: &str) {
+    fn record_history(&self, result: &str) {
         let Some(cmd) = self.last_command.as_ref() else {
             return;
         };
@@ -1677,9 +774,9 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
             ts,
             command_id: cmd.id.clone(),
             label: cmd.label.clone(),
-            kind,
+            kind: CommandKind::Replace,
             app: self.captured_app.clone(),
-            original,
+            original: self.captured_text.clone(),
             result: result.to_string(),
         };
         let path = history::history_path(&self.config_path);
@@ -1688,802 +785,488 @@ Shrink the selection, or raise / disable the limit in Settings (0 = unlimited)."
         }
     }
 
-    /// Popup button handler: same rails as `start_command` for a Replace, then
-    /// write the result back. The caution disables the buttons until it is
-    /// acknowledged, so only the hard max needs re-checking here.
-    fn write_back_from_popup(&mut self, ctx: &egui::Context, body: String, how: WriteBack) {
-        if self.gate.quiescing {
-            return;
+    fn show_window(&self, ctx: &egui::Context, focus: bool) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        if focus {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
-        if self.over_hard_max() {
-            self.phase = self.hard_max_error();
-            return;
-        }
-        if self.needs_replace_warn() {
-            return;
-        }
-        match how {
-            WriteBack::Replace => self.replace_selection_with(ctx, body),
-            WriteBack::InsertBelow => self.insert_below_selection(ctx, &body),
-        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::WindowLevel::AlwaysOnTop,
+        ));
     }
 
-    /// Hide first so macOS can restore focus to the source app, then activate
-    /// it. Pasting while we are still frontmost fails.
-    fn refocus_target(&mut self, ctx: &egui::Context) {
-        let pid = self.target_pid;
-        self.hide(ctx);
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        if let Some(pid) = pid {
-            let _ = activate_pid(pid);
-        } else {
-            std::thread::sleep(std::time::Duration::from_millis(180));
+    fn show_dialog(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            DIALOG_SIZE.0,
+            DIALOG_SIZE.1,
+        )));
+        if let Some(pos) = self.position_near_cursor(ctx) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
+        self.show_window(ctx, true);
     }
-}
 
-impl ServeApp {
-    /// Put the last replaced selection back. Works from the undo hotkey and the
-    /// picker button; the source app is re-activated first, like a Replace.
-    fn undo_last_replace(&mut self, ctx: &egui::Context) {
+    fn fail(&mut self, ctx: &egui::Context, message: String) {
+        let _ = self.hotkey.set_cancel_enabled(false);
+        self.progress.hide();
+        self.pending_direct = None;
+        self.phase = UiPhase::Error { message };
+        self.show_dialog(ctx);
+    }
+
+    fn hide(&mut self, ctx: &egui::Context) {
+        self.generation += 1;
+        self.progress.hide();
+        self.pending_direct = None;
+        self.phase = UiPhase::Hidden;
+        let _ = self.hotkey.set_cancel_enabled(false);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    /// Capture before any Selara window becomes key. A tray request must still
+    /// refer to the foreground source app; a stale PID is never reactivated here.
+    fn begin_run(
+        &mut self,
+        ctx: &egui::Context,
+        command_id: Option<&str>,
+        target: Option<i32>,
+    ) -> Result<(), String> {
         if self.gate.quiescing {
-            return;
+            return Err("The writing service is paused".into());
         }
-        // Check permission before taking the record: an early return here used
-        // to drop it, so re-granting Accessibility left nothing to undo.
+        let target = target
+            .or_else(frontmost_pid)
+            .ok_or("Select text first in another app")?;
+        if target == std::process::id() as i32 || frontmost_pid() != Some(target) {
+            tracing::warn!(requested_pid = target, frontmost_pid = ?frontmost_pid(), "ignoring command for a stale source app");
+            return Err("Select text first in the source app, then run the command again".into());
+        }
+        let name = frontmost_app_name();
+        let bundle = frontmost_bundle_id();
+        if app_is_excluded(
+            &self.config.excluded_apps,
+            name.as_deref(),
+            bundle.as_deref(),
+        ) {
+            // Excluded apps must not cause a selection read or show a window.
+            return Ok(());
+        }
+        let command = command_id
+            .map(|id| {
+                self.config
+                    .commands
+                    .iter()
+                    .find(|c| c.id == id)
+                    .cloned()
+                    .ok_or_else(|| format!("Unknown command `{id}`. Refresh the command menu."))
+            })
+            .transpose()?;
+        if let Some(cmd) = &command {
+            if !command_applies_to(cmd, name.as_deref(), bundle.as_deref()) {
+                return Err(format!(
+                    "{} is not enabled for this app. Edit its Apps setting to change that.",
+                    cmd.label
+                ));
+            }
+        }
         if !accessibility_trusted() {
-            self.on_hotkey(ctx);
-            return;
+            prompt_accessibility();
+            return Err("Enable Accessibility for Selara in System Settings → Privacy & Security → Accessibility.".into());
         }
-        let Some(last) = self.last_replace.take() else {
-            self.phase = UiPhase::Error {
-                message: "Nothing to undo: no Replace has run since Selara started.".into(),
-            };
-            self.show_window(ctx, true);
-            return;
-        };
         self.hide(ctx);
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        if let Some(pid) = last.pid {
-            let _ = activate_pid(pid);
+        self.target_pid = Some(target);
+        self.request_config = self.config.clone();
+        self.soft_warn_acked = false;
+        self.secret_guard_acked = false;
+        self.replace_warn_acked = false;
+        self.instruction.clear();
+        self.notice.clear();
+        self.history_cursor = None;
+        let snapshot = self
+            .runtime
+            .block_on(self.selection.read_selection())
+            .map_err(|e| e.to_string())?;
+        let snapshot = snapshot.ok_or("Select text first, then run the command again")?;
+        self.captured_text = selected_text(Some(snapshot.text))
+            .ok_or("Select text first, then run the command again")?;
+        self.captured_app = snapshot.app_name;
+        self.captured_range = snapshot.range;
+        self.secret_hits = if self.request_config.limits.secret_guard {
+            scan_secrets(&self.captured_text)
         } else {
-            std::thread::sleep(std::time::Duration::from_millis(180));
+            Vec::new()
+        };
+        if self.over_hard_max() {
+            return Err(format!("Selection is {} characters, over your hard limit of {}. Select less text or change Limits in Settings.", self.selection_chars(), self.request_config.limits.hard_max_chars));
         }
-        tracing::info!("selara: undo last replace ({} chars)", last.original.len());
-        if let Err(e) =
-            self.selection
-                .undo_replace(last.pid, &last.original, &last.replacement, last.range)
-        {
-            // Keep it so the user can retry after fixing focus.
-            self.last_replace = Some(last);
-            self.phase = UiPhase::Error {
-                message: format!("Undo failed: {e}"),
-            };
-            self.show_window(ctx, true);
+        match command {
+            Some(cmd) => self.prepare_command(ctx, cmd, CommandOrigin::Configured),
+            None => {
+                self.phase = UiPhase::Instruction;
+                self.focus_instruction = true;
+                self.show_dialog(ctx);
+                Ok(())
+            }
         }
     }
-}
 
+    fn prepare_command(
+        &mut self,
+        ctx: &egui::Context,
+        mut command: WritingCommand,
+        origin: CommandOrigin,
+    ) -> Result<(), String> {
+        command.kind = CommandKind::Replace;
+        if self.needs_soft_warn() || self.needs_replace_warn() || self.needs_secret_warn() {
+            self.pending_direct = Some((command, origin));
+            self.phase = UiPhase::Confirm;
+            self.show_dialog(ctx);
+            Ok(())
+        } else {
+            self.start_command(ctx, command, origin)
+        }
+    }
+
+    /// Only return from our own dialog to the captured app. Do not steal focus
+    /// back from an app the user switched to while an instruction was open.
+    fn return_to_source(&self, ctx: &egui::Context) -> Result<(), String> {
+        let pid = self
+            .target_pid
+            .ok_or("The source app is no longer available")?;
+        match frontmost_pid() {
+            Some(current) if current == pid => Ok(()),
+            Some(current) if current == std::process::id() as i32 => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                activate_pid(pid)
+                    .map_err(|e| format!("Could not return to the source app: {e}"))?;
+                if frontmost_pid() != Some(pid) {
+                    return Err("The source app could not receive focus".into());
+                }
+                Ok(())
+            }
+            _ => Err("The focused app changed. Select text and run the command again.".into()),
+        }
+    }
+
+    fn start_command(
+        &mut self,
+        ctx: &egui::Context,
+        command: WritingCommand,
+        origin: CommandOrigin,
+    ) -> Result<(), String> {
+        if self.gate.quiescing {
+            return Err("The writing service is paused".into());
+        }
+        self.return_to_source(ctx)?;
+        // Revalidate before transmitting too: dismissing a dialog must not
+        // turn a stale selection into an expensive request.
+        self.selection
+            .validate_captured_selection(self.target_pid, &self.captured_text, self.captured_range)
+            .map_err(|e| e.to_string())?;
+        if !self.gate.admit() {
+            return Err("The writing service is paused".into());
+        }
+        self.pending_direct = None;
+        if origin == CommandOrigin::Instruction {
+            push_history(&mut self.instruction_history, &command.prompt);
+        }
+        self.last_command = Some(command.clone());
+        self.phase = UiPhase::Working {
+            label: command.label.clone(),
+            partial: String::new(),
+        };
+        if let Err(e) = self.hotkey.set_cancel_enabled(true) {
+            tracing::warn!("Escape could not be registered; use Cancel: {e}");
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        self.progress.show(&command.label);
+        let cfg = self.request_config.clone();
+        let input = self.captured_text.clone();
+        let app_name = self.captured_app.clone();
+        let generation = self.generation;
+        let tx = self.job_tx.clone();
+        let wake = ctx.clone();
+        self.runtime.spawn(async move {
+            let result = async {
+                let provider = cfg.build_provider_for(&command)?;
+                let delta_tx = tx.clone();
+                let delta_wake = wake.clone();
+                let mut on_delta = move |text: &str| {
+                    let _ = delta_tx.send(JobResult::Delta {
+                        generation,
+                        text: text.into(),
+                    });
+                    delta_wake.request_repaint();
+                };
+                run_command_stream(
+                    provider.as_ref(),
+                    &command,
+                    &input,
+                    None,
+                    PromptVars {
+                        language: Some(&cfg.language),
+                        app: app_name.as_deref(),
+                    },
+                    &mut on_delta,
+                )
+                .await
+            }
+            .await;
+            let job = match result {
+                Ok(text) => JobResult::Success { generation, text },
+                Err(e) => JobResult::Error {
+                    generation,
+                    message: e.to_string(),
+                },
+            };
+            let _ = tx.send(job);
+            wake.request_repaint();
+        });
+        Ok(())
+    }
+
+    fn apply_job(&mut self, ctx: &egui::Context, job: JobResult) {
+        match job {
+            JobResult::Delta { text, .. } => {
+                if let UiPhase::Working { label, partial } = &mut self.phase {
+                    partial.push_str(&text);
+                    self.progress.update(label, partial.chars().count());
+                }
+            }
+            JobResult::Error { message, .. } => self.fail(ctx, message),
+            JobResult::Success { text, .. } => {
+                let result = if text.trim().is_empty() {
+                    Err(anyhow::anyhow!(
+                        "The provider returned no text. Your selection was not changed."
+                    ))
+                } else {
+                    self.selection.replace_in_app(
+                        self.target_pid,
+                        &text,
+                        &self.captured_text,
+                        self.captured_range,
+                    )
+                };
+                match result {
+                    Ok(()) => { self.record_history(&text); self.hide(ctx); }
+                    Err(e) => self.fail(ctx, format!("Replacement could not be verified: {e}\nNo automatic retry was attempted.")),
+                }
+            }
+        }
+    }
+
+    fn save_instruction(&mut self) {
+        let prompt = self.instruction.trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        let mut label = String::new();
+        let result = AppConfig::update(&self.config_path, |latest| {
+            let ids = latest
+                .commands
+                .iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>();
+            let command = command_from_instruction(&prompt, CommandKind::Replace, &ids);
+            label = command.label.clone();
+            latest.commands.push(command);
+            Ok(())
+        });
+        self.notice = match result {
+            Ok(_) => format!("Saved as “{label}”. Edit it in Settings → Commands."),
+            Err(e) => format!("Could not save command: {e}"),
+        };
+    }
+}
 impl eframe::App for ServeApp {
     fn on_exit(&mut self) {
+        let _ = self.hotkey.set_cancel_enabled(false);
         let _ = self.runtime.block_on(selara_core::app_server::reset());
         remove_pidfile(&self.pidfile);
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // eframe 0.36 applies viewport output after `logic`; repeat this every
-        // hidden frame so post-rendering cannot resurrect the picker.
-        if matches!(self.phase, UiPhase::Hidden) {
+        if matches!(self.phase, UiPhase::Hidden | UiPhase::Working { .. }) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        if self.progress.take_cancelled() {
+            self.hide(ctx);
         }
         self.hotkey.poll();
         self.poll_config();
-
         self.poll_protocol(ctx);
         if let Some(action) = self.hotkey.take_pending() {
             if !self.gate.quiescing {
-                match action {
-                    HotkeyAction::Picker => self.on_hotkey(ctx),
-                    HotkeyAction::Command(id) => self.on_command_hotkey(ctx, &id),
-                    HotkeyAction::Undo => self.on_undo_hotkey(ctx),
+                let result = match action {
+                    HotkeyAction::CustomInstruction => self.begin_run(ctx, None, None),
+                    HotkeyAction::Command(id) => self.begin_run(ctx, Some(&id), None),
+                    HotkeyAction::Cancel => {
+                        self.hide(ctx);
+                        Ok(())
+                    }
+                };
+                if let Err(message) = result {
+                    self.fail(ctx, message);
                 }
             }
         }
-
         while let Ok(job) = self.job_rx.try_recv() {
             if !matches!(&job, JobResult::Delta { .. }) {
                 self.gate.finish();
             }
             let waiting = matches!(self.phase, UiPhase::Working { .. });
-            if !self.gate.paused && should_apply_job(job.generation(), self.generation, waiting) {
+            if !self.gate.quiescing && should_apply_job(job.generation(), self.generation, waiting)
+            {
                 self.apply_job(ctx, job);
-            } else {
-                tracing::info!(
-                    job = job.generation(),
-                    current = self.generation,
-                    waiting,
-                    "selara: dropping stale job result"
-                );
             }
         }
-
+        if !self.gate.quiescing && matches!(self.phase, UiPhase::Hidden) {
+            if let Some(message) = self.reload_error.take() {
+                self.fail(ctx, message);
+            }
+        }
         self.finish_protocol_frame(ctx);
-
-        if matches!(self.phase, UiPhase::Working { .. }) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
-
-        if matches!(self.phase, UiPhase::Hidden) {
-            // Hotkeys, config changes, and job results all wake the loop
-            // explicitly; this slow tick only backs up `hotkey.poll()` and the
-            // 5 s config poll, so an idle `serve` stays near zero CPU.
-            ctx.request_repaint_after(Duration::from_secs(1));
-        }
+        ctx.request_repaint_after(if matches!(self.phase, UiPhase::Working { .. }) {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_secs(1)
+        });
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = &ui.ctx().clone();
-        if self.gate.quiescing {
-            if !self.gate.paused {
-                ui.label("Finishing the current request before updating…");
-            }
+        if self.gate.quiescing || matches!(self.phase, UiPhase::Hidden) {
             return;
         }
-        if matches!(self.phase, UiPhase::Hidden) {
-            return;
-        }
-
+        let ctx = ui.ctx().clone();
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if matches!(self.phase, UiPhase::Settings) {
-                self.phase = UiPhase::Picker;
-                self.focus_filter_next_frame = true;
-            } else {
-                self.hide(ctx);
-            }
+            self.hide(&ctx);
             return;
         }
-
-        // Keyboard-first picker: ↑/↓ move the highlight, Enter runs it, and a
-        // bare 1–9 runs that row while the filter box is empty. Text that is
-        // typed is also an instruction: ⌘⏎ always runs it (⇧⏎ as a popup), and
-        // so does ⏎ on the "Run instruction" row or when nothing matches. ↑ in
-        // an empty box recalls the previous instruction. The keys are consumed
-        // here, before the panel renders, so the filter box never sees them
-        // (Enter would otherwise drop its focus).
-        let mut key_run: Option<(WritingCommand, CommandOrigin)> = None;
-        let mut selection_moved = false;
-        if matches!(self.phase, UiPhase::Picker) {
-            let filter_empty = self.picker_filter.trim().is_empty();
-            let (up, down, cmd_enter, shift_enter, enter, digit) = ctx.input_mut(|i| {
-                let up = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
-                let down = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
-                // Most specific first: `consume_key` ignores an extra Shift,
-                // so the bare-Enter check would otherwise swallow ⇧⏎ too.
-                let cmd_enter = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter);
-                let shift_enter = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter);
-                let enter = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
-                let digit = if filter_empty { take_digit(i) } else { None };
-                (up, down, cmd_enter, shift_enter, enter, digit)
-            });
-            // While the box is empty, or still shows a recalled instruction,
-            // ↑/↓ walk the history instead of the rows.
-            let walking_history = (up || down)
-                && (filter_empty || self.history_cursor.is_some())
-                && !self.instruction_history.is_empty();
-            if walking_history {
-                let delta = if up { 1 } else { -1 };
-                self.history_cursor =
-                    history_step(self.history_cursor, self.instruction_history.len(), delta);
-                self.picker_filter = self
-                    .history_cursor
-                    .and_then(|i| self.instruction_history.get(i).cloned())
-                    .unwrap_or_default();
-                self.filter_caret_to_end = true;
-                // A recalled instruction is meant to run as one.
-                self.picker_selected = 0;
-            }
-            let key_commands = self.commands_for_captured_app();
-            let rows = picker_rows(&key_commands, &self.picker_filter);
-            let len = rows.len();
-            let mut selected = clamp_selection(self.picker_selected, len);
-            if !walking_history {
-                if up {
-                    selected = next_selection(selected, len, -1);
-                    selection_moved = true;
-                }
-                if down {
-                    selected = next_selection(selected, len, 1);
-                    selection_moved = true;
-                }
-            }
-            let has_instruction = !self.picker_filter.trim().is_empty();
-            let target: Option<(PickerRow<'_>, bool)> = if cmd_enter && has_instruction {
-                Some((PickerRow::Instruction, false))
-            } else if shift_enter && has_instruction {
-                Some((PickerRow::Instruction, true))
-            } else if enter {
-                rows.get(selected).map(|r| (*r, false))
-            } else {
-                digit.and_then(|d| rows.get(d)).map(|r| (*r, false))
-            };
-            if let Some((row, popup)) = target {
-                let (cmd, origin) = match row {
-                    PickerRow::Instruction => (
-                        adhoc_command(&self.picker_filter, popup),
-                        CommandOrigin::Instruction,
-                    ),
-                    PickerRow::Command(cmd) => (cmd.clone(), CommandOrigin::Configured),
-                };
-                let enabled = picker_row_enabled(
-                    matches!(cmd.kind, CommandKind::Replace),
-                    self.over_hard_max(),
-                    self.needs_soft_warn() || self.needs_secret_warn(),
-                    self.needs_replace_warn(),
-                );
-                if enabled {
-                    key_run = Some((cmd, origin));
-                }
-            }
-            self.picker_selected = selected;
-        }
-        let focus_filter = matches!(self.phase, UiPhase::Picker)
-            && std::mem::take(&mut self.focus_filter_next_frame);
-
-        // Collect click target without holding a borrow across mutation.
-        let mut clicked: Option<(WritingCommand, CommandOrigin)> = key_run;
+        let mut run = false;
+        let mut save = false;
+        let mut confirm = false;
         let mut dismiss = false;
-        let mut open_settings = false;
-        let mut back_to_picker = false;
-        let mut save_settings = false;
-        let mut reset_limits = false;
-        let mut ack_soft = false;
-        let mut ack_secret = false;
-        let mut ack_replace = false;
-        let mut undo = false;
-        let mut write_back: Option<(WriteBack, String)> = None;
-        let mut retry = false;
-        let mut save_adhoc = false;
-
-        let soft_blocked = matches!(self.phase, UiPhase::Picker) && self.needs_soft_warn();
-        let secret_blocked = matches!(self.phase, UiPhase::Picker) && self.needs_secret_warn();
-        let hard_blocked = matches!(self.phase, UiPhase::Picker) && self.over_hard_max();
-        let replace_caution = matches!(self.phase, UiPhase::Picker) && self.needs_replace_warn();
-        let popup_actions = popup_actions(self.over_hard_max(), self.needs_replace_warn());
-        let can_retry = self.last_command.is_some();
-        // The popup shows "Save as command…" only for the instruction it
-        // displays, not for a configured command run after an instruction.
-        let popup_from_adhoc =
-            self.last_adhoc.is_some() && self.last_origin == CommandOrigin::Instruction;
-        let filter_caret_to_end = std::mem::take(&mut self.filter_caret_to_end);
-
-        egui::CentralPanel::default().show(ui, |ui| {
-            // The window has no OS title bar; the header row is the drag
-            // handle. Registered before the buttons so they stay on top.
-            let header_rect = {
-                let mut r = ui.max_rect();
-                r.max.y = r.min.y + 28.0;
-                r
-            };
-            let drag = ui.interact(
-                header_rect,
-                ui.id().with("header_drag"),
-                egui::Sense::click_and_drag(),
-            );
-            if drag.drag_started_by(egui::PointerButton::Primary) {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
-            ui.horizontal(|ui| {
-                ui.heading("Selara").on_hover_text("Drag to move");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Close").clicked() {
-                        dismiss = true;
-                    }
-                    if !matches!(self.phase, UiPhase::Settings | UiPhase::Working { .. })
-                        && ui.button("Settings").clicked()
+        match &self.phase {
+            UiPhase::Instruction => {
+                ui.heading("Custom instruction");
+                ui.label(format!(
+                    "Transform the selection in {}.",
+                    self.captured_app.as_deref().unwrap_or("the source app")
+                ));
+                let recall = ctx.input(|i| {
+                    if i.key_pressed(egui::Key::ArrowUp)
+                        && (self.instruction.is_empty() || self.history_cursor.is_some())
                     {
-                        open_settings = true;
-                    }
-                    if matches!(self.phase, UiPhase::Settings) && ui.button("Back").clicked() {
-                        back_to_picker = true;
-                    }
-                    if self.last_replace.is_some()
-                        && matches!(
-                            self.phase,
-                            UiPhase::Picker | UiPhase::Error { .. } | UiPhase::Popup { .. }
-                        )
-                        && ui
-                            .button("Undo last replace")
-                            .on_hover_text("Put back the text the previous Replace overwrote")
-                            .clicked()
-                    {
-                        undo = true;
+                        1
+                    } else if i.key_pressed(egui::Key::ArrowDown) && self.history_cursor.is_some() {
+                        -1
+                    } else {
+                        0
                     }
                 });
-            });
-            ui.label(&self.status_line);
-            if let Some(app) = &self.captured_app {
-                if !matches!(self.phase, UiPhase::Settings) {
-                    ui.label(format!("From: {app}"));
+                if recall != 0 {
+                    self.history_cursor =
+                        history_step(self.history_cursor, self.instruction_history.len(), recall);
+                    self.instruction = self
+                        .history_cursor
+                        .and_then(|i| self.instruction_history.get(i))
+                        .cloned()
+                        .unwrap_or_default();
                 }
+                let edit = ui.add(
+                    egui::TextEdit::multiline(&mut self.instruction)
+                        .hint_text("What should change?")
+                        .desired_rows(4),
+                );
+                if self.focus_instruction {
+                    edit.request_focus();
+                    self.focus_instruction = false;
+                }
+                if edit.changed() {
+                    self.history_cursor = None;
+                }
+                if !self.notice.is_empty() {
+                    ui.small(&self.notice);
+                }
+                let has_text = !self.instruction.trim().is_empty();
+                ui.horizontal(|ui| {
+                    run = ui
+                        .add_enabled(has_text, egui::Button::new("Replace selection"))
+                        .clicked();
+                    save = ui
+                        .add_enabled(has_text, egui::Button::new("Save as command…"))
+                        .clicked();
+                    dismiss = ui.button("Cancel").clicked();
+                });
+                run |= has_text
+                    && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+                ui.small("⌘Enter to run · ↑ recalls recent instructions");
             }
-            ui.separator();
-
-            match &self.phase {
-                UiPhase::Picker => {
-                    let chars = self.selection_chars();
-                    match self.source {
-                        CaptureSource::Selection => {
-                            ui.label(format!("Selection ({chars} chars)"));
-                        }
-                        CaptureSource::Clipboard => {
-                            ui.label(format!("From clipboard ({chars} chars)"));
-                            ui.small(
-                                "Nothing was selected, so Replace commands paste at the caret of the app in front.",
-                            );
-                        }
-                    }
-                    if let Some(pending) = &self.pending_direct {
-                        ui.small(format!(
-                            "{} was triggered by its shortcut and will run once you confirm below.",
-                            pending.label
-                        ));
-                    }
-                    ui.small(ellipsize(&self.captured_text, 220));
-                    if let Some(adhoc) = &self.last_adhoc {
-                        ui.add_space(4.0);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.small(format!(
-                                "Last instruction: {}",
-                                ellipsize(&adhoc.prompt, 60)
-                            ));
-                            if ui
-                                .small_button("Save as command…")
-                                .on_hover_text(
-                                    "Add it to your commands, named after its first words",
-                                )
-                                .clicked()
-                            {
-                                save_adhoc = true;
-                            }
-                        });
-                    }
-                    if !self.picker_notice.is_empty() {
-                        ui.small(&self.picker_notice);
-                    }
-
-                    if hard_blocked {
-                        ui.add_space(6.0);
-                        ui.colored_label(
-                            egui::Color32::from_rgb(200, 80, 80),
-                            format!(
-                                "Over hard limit ({}). Shrink selection or raise the limit in Settings (0 = unlimited).",
-                                self.config.limits.hard_max_chars
-                            ),
-                        );
-                    } else if secret_blocked {
-                        ui.add_space(6.0);
-                        ui.colored_label(
-                            egui::Color32::from_rgb(200, 80, 80),
-                            secret_banner(&self.secret_hits),
-                        );
-                        if ui.button("Send anyway").clicked() {
-                            ack_secret = true;
-                        }
-                    } else if soft_blocked {
-                        ui.add_space(6.0);
-                        ui.colored_label(
-                            egui::Color32::from_rgb(200, 150, 40),
-                            format!(
-                                "Large selection (soft warn at {} chars). May be slower / cost more on your API key.",
-                                self.config.limits.soft_warn_chars
-                            ),
-                        );
-                        if ui.button("Continue anyway").clicked() {
-                            ack_soft = true;
-                        }
-                    } else if replace_caution {
-                        ui.add_space(6.0);
-                        ui.colored_label(
-                            egui::Color32::from_rgb(200, 150, 40),
-                            format!(
-                                "Replace caution ({}+ chars): paste-back can be flaky in some apps. Popup commands are safer.",
-                                self.config.limits.replace_warn_chars
-                            ),
-                        );
-                        if ui.button("I understand — allow Replace").clicked() {
-                            ack_replace = true;
-                        }
-                    }
-
-                    ui.add_space(8.0);
-                    let filter = egui::TextEdit::singleline(&mut self.picker_filter)
-                        .hint_text("Filter, or type an instruction · ↑ recalls the last one")
-                        .desired_width(f32::INFINITY)
-                        .show(ui);
-                    if focus_filter {
-                        filter.response.request_focus();
-                    }
-                    if filter_caret_to_end {
-                        let mut state = filter.state;
-                        let end = egui::text::CCursor::new(self.picker_filter.chars().count());
-                        state
-                            .cursor
-                            .set_char_range(Some(egui::text::CCursorRange::one(end)));
-                        state.store(ui.ctx(), filter.response.id);
-                    }
-                    let filter_changed = filter.response.changed();
-                    ui.add_space(4.0);
-
-                    let commands = self.commands_for_captured_app();
-                    let filter_text = self.picker_filter.clone();
-                    let rows = picker_rows(&commands, &filter_text);
-                    if commands.is_empty() {
-                        ui.small(format!(
-                            "No commands enabled for {}.",
-                            self.captured_app_label()
-                        ));
-                        ui.small(
-                            "Type an instruction to run it anyway, or add this app to a command's Apps field in Settings (empty = every app).",
-                        );
-                        ui.add_space(4.0);
-                    }
-                    if filter_changed {
-                        // Typing over a recalled instruction ends the walk.
-                        self.history_cursor = None;
-                        self.picker_selected = default_picker_row(&rows);
-                    }
-                    let selected_idx = clamp_selection(self.picker_selected, rows.len());
-                    self.picker_selected = selected_idx;
-                    let quick_pick = filter_text.trim().is_empty();
-                    let no_command_matches =
-                        !rows.iter().any(|r| matches!(r, PickerRow::Command(_)));
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            for (idx, row) in rows.iter().enumerate() {
-                                let selected = idx == selected_idx;
-                                let cmd = match row {
-                                    PickerRow::Command(cmd) => *cmd,
-                                    PickerRow::Instruction => {
-                                        let run_enabled = picker_row_enabled(
-                                            true,
-                                            hard_blocked,
-                                            soft_blocked,
-                                            replace_caution,
-                                        );
-                                        let popup_enabled = picker_row_enabled(
-                                            false,
-                                            hard_blocked,
-                                            soft_blocked,
-                                            replace_caution,
-                                        );
-                                        let resp = ui.add_enabled(
-                                            run_enabled,
-                                            egui::Button::selectable(
-                                                selected,
-                                                (
-                                                    egui::RichText::new("⏎").weak().monospace(),
-                                                    egui::RichText::new("Run instruction")
-                                                        .strong(),
-                                                ),
-                                            )
-                                            .right_text(
-                                                egui::RichText::new("replace").weak().small(),
-                                            )
-                                            .min_size(egui::vec2(ui.available_width(), 28.0)),
-                                        );
-                                        if selected && selection_moved {
-                                            resp.scroll_to_me(None);
-                                        }
-                                        if resp.clicked() {
-                                            clicked =
-                                                Some((adhoc_command(&filter_text, false), CommandOrigin::Instruction));
-                                        }
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.small(
-                                                "⏎ run as Replace · ⇧⏎ run as Popup · ⌘⏎ always runs the instruction",
-                                            );
-                                            if ui
-                                                .add_enabled(
-                                                    popup_enabled,
-                                                    egui::Button::new(
-                                                        egui::RichText::new("Run as Popup")
-                                                            .small(),
-                                                    ),
-                                                )
-                                                .clicked()
-                                            {
-                                                clicked = Some((
-                                                    adhoc_command(&filter_text, true),
-                                                    CommandOrigin::Instruction,
-                                                ));
-                                            }
-                                        });
-                                        if no_command_matches {
-                                            ui.small("No command matches; ⏎ runs the text as an instruction.");
-                                        }
-                                        ui.add_space(4.0);
-                                        continue;
-                                    }
-                                };
-                                let kind_tag = match cmd.kind {
-                                    CommandKind::Replace => "replace",
-                                    CommandKind::Popup => "popup",
-                                };
-                                let enabled = picker_row_enabled(
-                                    matches!(cmd.kind, CommandKind::Replace),
-                                    hard_blocked,
-                                    soft_blocked || secret_blocked,
-                                    replace_caution,
-                                );
-                                // 1–9 only work while the box is empty, so the
-                                // badges are shown only then.
-                                let badge = if quick_pick && idx < 9 {
-                                    format!("{}", idx + 1)
-                                } else {
-                                    " ".to_string()
-                                };
-                                let resp = ui.add_enabled(
-                                    enabled,
-                                    egui::Button::selectable(
-                                        selected,
-                                        (
-                                            egui::RichText::new(badge).weak().monospace(),
-                                            egui::RichText::new(cmd.label.as_str()),
-                                        ),
-                                    )
-                                    .right_text(egui::RichText::new(kind_tag).weak().small())
-                                    .min_size(egui::vec2(ui.available_width(), 28.0)),
-                                );
-                                if selected && selection_moved {
-                                    resp.scroll_to_me(None);
-                                }
-                                if resp.clicked() {
-                                    clicked = Some((cmd.clone(), CommandOrigin::Configured));
-                                }
-                            }
-                        });
+            UiPhase::Confirm => {
+                ui.heading("Confirm replacement");
+                if self.needs_secret_warn() {
+                    ui.label(secret_banner(&self.secret_hits));
                 }
-                UiPhase::Settings => {
-                    ui.label("Limits");
-                    ui.small("Defaults protect against huge accidental pastes. Set any value to 0 to disable that rail. Saved to your config — no TOML editing required.");
-                    ui.add_space(8.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label("Soft warn (chars)");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.limits.soft_warn_chars)
-                                .speed(100)
-                                .range(0..=2_000_000),
-                        );
-                    });
-                    ui.small("Show a confirm step above this size.");
-
-                    ui.horizontal(|ui| {
-                        ui.label("Hard max (chars)");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.limits.hard_max_chars)
-                                .speed(500)
-                                .range(0..=5_000_000),
-                        );
-                    });
-                    ui.small("Refuse to send above this size. 0 = unlimited.");
-
-                    ui.horizontal(|ui| {
-                        ui.label("Replace caution (chars)");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.limits.replace_warn_chars)
-                                .speed(100)
-                                .range(0..=2_000_000),
-                        );
-                    });
-                    ui.small("Extra confirm before Replace on large selections.");
-
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
-                            save_settings = true;
-                        }
-                        if ui.button("Reset defaults").clicked() {
-                            reset_limits = true;
-                        }
-                    });
-                    if !self.settings_status.is_empty() {
-                        ui.small(&self.settings_status);
-                    }
-                    ui.add_space(8.0);
-                    ui.small(format!("Config file: {}", self.config_path.display()));
+                if self.needs_soft_warn() {
+                    ui.label(format!(
+                        "This sends {} characters to your provider.",
+                        self.selection_chars()
+                    ));
                 }
-                UiPhase::Working {
-                    label,
-                    kind,
-                    partial,
-                } => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(format!("Running {label}…"));
-                    });
-                    if !partial.is_empty() {
-                        ui.add_space(6.0);
-                        match kind {
-                            // Same viewer as the finished popup, so the text
-                            // does not re-flow when Success replaces it.
-                            CommandKind::Popup => {
-                                egui::ScrollArea::vertical()
-                                    .max_height(360.0)
-                                    .stick_to_bottom(true)
-                                    .show(ui, |ui| {
-                                        CommonMarkViewer::new().show(
-                                            ui,
-                                            &mut self.md_cache,
-                                            partial,
-                                        );
-                                    });
-                            }
-                            CommandKind::Replace => {
-                                ui.small(replace_progress(partial));
-                            }
-                        }
-                    }
+                if self.needs_replace_warn() {
+                    ui.label(format!(
+                        "This replaces {} selected characters. Use the source app’s ⌘Z to undo.",
+                        self.selection_chars()
+                    ));
                 }
-                UiPhase::Popup { title, body } => {
-                    ui.heading(title);
-                    ui.add_space(6.0);
-                    // Lay the action row out from the bottom edge up, then give
-                    // the result scroller only what is left. With a fixed
-                    // max_height a long result pushed Copy / Replace selection /
-                    // Insert below / Retry past the bottom of the borderless
-                    // window, where they could be neither clicked nor scrolled
-                    // to without resizing the window by hand.
-                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                        if popup_actions.show_caution {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(200, 150, 40),
-                                    format!(
-                                        "Replace caution ({}+ chars): paste-back can be flaky in some apps.",
-                                        self.config.limits.replace_warn_chars
-                                    ),
-                                );
-                                if ui.button("Allow replace").clicked() {
-                                    ack_replace = true;
-                                }
-                            });
-                            ui.add_space(4.0);
-                        }
-                        ui.horizontal_wrapped(|ui| {
-                            if ui
-                                .button("Copy")
-                                .on_hover_text("Copy the result as markdown")
-                                .clicked()
-                            {
-                                ui.ctx().copy_text(body.clone());
-                            }
-                            if ui
-                                .add_enabled(
-                                    popup_actions.replace_enabled,
-                                    egui::Button::new("Replace selection"),
-                                )
-                                .on_hover_text("Write the result over the original selection")
-                                .clicked()
-                            {
-                                write_back = Some((WriteBack::Replace, body.clone()));
-                            }
-                            if ui
-                                .add_enabled(
-                                    popup_actions.insert_enabled,
-                                    egui::Button::new("Insert below"),
-                                )
-                                .on_hover_text(if self.captured_range.is_some() {
-                                    "Insert the result after the selection"
-                                } else {
-                                    "Insert the result after the selection (moves the caret with →, then pastes)"
-                                })
-                                .clicked()
-                            {
-                                write_back = Some((WriteBack::InsertBelow, body.clone()));
-                            }
-                            if ui
-                                .add_enabled(can_retry, egui::Button::new("Retry"))
-                                .on_hover_text("Run the same command again on the same selection")
-                                .clicked()
-                            {
-                                retry = true;
-                            }
-                            if popup_from_adhoc
-                                && ui
-                                    .button("Save as command…")
-                                    .on_hover_text(
-                                        "Add this instruction to your commands, named after its first words",
-                                    )
-                                    .clicked()
-                            {
-                                save_adhoc = true;
-                            }
-                        });
-                        if !self.picker_notice.is_empty() {
-                            ui.small(&self.picker_notice);
-                        }
-                        ui.add_space(6.0);
-                        // Whatever is left above the footer, top-down again so
-                        // the result reads normally.
-                        let remaining = ui.available_height().max(60.0);
-                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                            egui::ScrollArea::vertical().max_height(remaining).show(
-                                ui,
-                                |ui| {
-                                    CommonMarkViewer::new().show(ui, &mut self.md_cache, body);
-                                },
-                            );
-                        });
-                    });
-                }
-                UiPhase::Error { message } => {
-                    ui.colored_label(egui::Color32::from_rgb(200, 80, 80), "Error");
-                    ui.label(message);
-                    ui.horizontal(|ui| {
-                        if ui.button("Dismiss").clicked() {
-                            dismiss = true;
-                        }
-                        if ui.button("Settings").clicked() {
-                            open_settings = true;
-                        }
-                    });
-                }
-                UiPhase::Hidden => {}
+                ui.horizontal(|ui| {
+                    confirm = ui.button("Continue").clicked();
+                    dismiss = ui.button("Cancel").clicked();
+                });
             }
-        });
-
-        if ack_soft {
-            self.soft_warn_acked = true;
-        }
-        if ack_secret {
-            self.secret_guard_acked = true;
-        }
-        if ack_replace {
-            self.replace_warn_acked = true;
-        }
-        if open_settings {
-            self.settings_status.clear();
-            self.phase = UiPhase::Settings;
-        }
-        if back_to_picker {
-            self.phase = UiPhase::Picker;
-            self.focus_filter_next_frame = true;
-        }
-        if reset_limits {
-            self.config.limits = LimitsConfig::default();
-            self.settings_status = "Defaults restored (not saved yet)".into();
-        }
-        if save_settings {
-            self.save_settings();
-        }
-        if save_adhoc {
-            self.save_last_adhoc();
+            UiPhase::Working { label, partial } => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.heading(label);
+                });
+                ui.label(replace_progress(partial));
+                ui.small("Your selection will be replaced when ready.");
+                dismiss = ui.button("Cancel (Esc)").clicked();
+            }
+            UiPhase::Error { message } => {
+                ui.heading("Selara");
+                ui.label(message);
+                dismiss = ui.button("Close").clicked();
+            }
+            UiPhase::Hidden => {}
         }
         if dismiss {
-            self.hide(ctx);
-        }
-        if undo {
-            self.undo_last_replace(ctx);
+            self.hide(&ctx);
             return;
         }
-        if let Some((how, body)) = write_back {
-            self.write_back_from_popup(ctx, body, how);
-            return;
+        if save {
+            self.save_instruction();
         }
-        if retry {
-            if let Some(cmd) = self.last_command.clone() {
-                // Retry re-runs the same command, so it keeps its origin.
-                self.start_command(cmd, self.last_origin);
+        let result = if run {
+            self.prepare_command(
+                &ctx,
+                adhoc_command(&self.instruction),
+                CommandOrigin::Instruction,
+            )
+        } else if confirm {
+            self.soft_warn_acked = true;
+            self.secret_guard_acked = true;
+            self.replace_warn_acked = true;
+            if let Some((command, origin)) = self.pending_direct.take() {
+                self.start_command(&ctx, command, origin)
+            } else {
+                Ok(())
             }
-            return;
-        }
-        if let Some((cmd, origin)) = clicked {
-            self.run_picked(cmd, origin);
-        }
-        if matches!(self.phase, UiPhase::Picker) {
-            self.run_pending_if_ready();
+        } else {
+            Ok(())
+        };
+        if let Err(message) = result {
+            self.fail(&ctx, message);
         }
     }
 }
@@ -2625,14 +1408,15 @@ pub fn run(config_path: PathBuf, desktop_protocol: bool) -> Result<()> {
 
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([PICKER_SIZE.0, PICKER_SIZE.1])
-            .with_min_inner_size([320.0, 300.0])
+            .with_inner_size([DIALOG_SIZE.0, DIALOG_SIZE.1])
+            .with_min_inner_size([320.0, 120.0])
             .with_resizable(true)
             // Borderless: the header row inside the panel is the drag handle
             // (`ViewportCommand::StartDrag`), and Esc / Close dismiss it.
             .with_decorations(false)
             .with_always_on_top()
             .with_visible(false)
+            .with_active(false)
             .with_title("Selara"),
         ..Default::default()
     };
@@ -2664,12 +1448,10 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::{
-        adhoc_command, capture_from, clamp_selection, command_from_instruction, default_picker_row,
-        ellipsize, filter_commands, format_thousands, history_step, insert_range, insert_text,
-        instruction_label, next_selection, picker_row_enabled, picker_rows, place_near,
-        popup_actions, push_history, remove_pidfile, replace_progress, secret_banner,
-        should_apply_job, slugify, unique_command_id, write_pidfile, CaptureSource, PickerRow,
-        PopupActions, ADHOC_ID, HISTORY_CAP,
+        adhoc_command, can_cancel, command_from_instruction, format_thousands, history_step,
+        instruction_label, place_near, push_history, remove_pidfile, replace_progress,
+        secret_banner, selected_text, should_apply_job, slugify, unique_command_id, write_pidfile,
+        HISTORY_CAP,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -2690,66 +1472,12 @@ mod tests {
     /// valid target for `kill(pid, 0)` in `pid_alive`.
     const DEAD_PID: i32 = 0;
 
-    use selara_core::commands::{commands_for_app, CommandKind, WritingCommand};
+    use selara_core::commands::CommandKind;
     use selara_core::guard::{SecretHit, SecretKind};
 
     const SIZE: (f64, f64) = (380.0, 440.0);
     /// 1920×1080 display with a 25 pt menu bar and a 70 pt Dock, top-left origin.
     const VISIBLE: (f64, f64, f64, f64) = (0.0, 25.0, 1920.0, 985.0);
-
-    #[test]
-    fn capture_from_prefers_the_selection_over_the_clipboard() {
-        assert_eq!(
-            capture_from(Some("selected".into()), Some("copied".into())),
-            Some(("selected".to_string(), CaptureSource::Selection))
-        );
-    }
-
-    #[test]
-    fn capture_from_keeps_the_selection_verbatim() {
-        // The captured AX range spans the untrimmed text, so trimming here
-        // would make a Replace overwrite the wrong span.
-        assert_eq!(
-            capture_from(Some("  padded  ".into()), None),
-            Some(("  padded  ".to_string(), CaptureSource::Selection))
-        );
-    }
-
-    #[test]
-    fn capture_from_falls_back_to_the_clipboard_when_nothing_is_selected() {
-        assert_eq!(
-            capture_from(None, Some("copied".into())),
-            Some(("copied".to_string(), CaptureSource::Clipboard))
-        );
-    }
-
-    #[test]
-    fn capture_from_trims_the_clipboard_text() {
-        // A copy usually drags a trailing newline along with it.
-        assert_eq!(
-            capture_from(None, Some("  copied\n".into())),
-            Some(("copied".to_string(), CaptureSource::Clipboard))
-        );
-    }
-
-    #[test]
-    fn capture_from_treats_a_whitespace_only_selection_as_nothing_selected() {
-        assert_eq!(
-            capture_from(Some("   \n".into()), Some("copied".into())),
-            Some(("copied".to_string(), CaptureSource::Clipboard))
-        );
-        assert_eq!(capture_from(Some(String::new()), None), None);
-    }
-
-    #[test]
-    fn capture_from_ignores_a_whitespace_only_clipboard() {
-        assert_eq!(capture_from(None, Some("  \t\n".into())), None);
-    }
-
-    #[test]
-    fn capture_from_is_none_when_both_are_empty() {
-        assert_eq!(capture_from(None, None), None);
-    }
 
     #[test]
     fn place_near_offsets_from_the_cursor_when_there_is_room() {
@@ -2778,82 +1506,6 @@ mod tests {
     fn place_near_falls_back_to_the_frame_origin_when_the_window_is_larger() {
         let tiny = (100.0, 50.0, 300.0, 200.0);
         assert_eq!(place_near((150.0, 100.0), SIZE, tiny), (100.0, 50.0));
-    }
-
-    fn cmd(label: &str, prompt: &str) -> WritingCommand {
-        WritingCommand {
-            id: label.to_lowercase(),
-            label: label.into(),
-            kind: CommandKind::Replace,
-            prompt: prompt.into(),
-            hotkey: None,
-            model: None,
-            apps: Vec::new(),
-        }
-    }
-
-    fn sample() -> Vec<WritingCommand> {
-        vec![
-            cmd("Proofread", "Fix grammar and spelling."),
-            cmd("Summary", "Summarize the text."),
-            cmd("Professional", "Rewrite the text in a professional tone."),
-        ]
-    }
-
-    fn labels<'a>(list: &[&'a WritingCommand]) -> Vec<&'a str> {
-        list.iter().map(|c| c.label.as_str()).collect()
-    }
-
-    #[test]
-    fn empty_or_blank_query_returns_every_command() {
-        let all = sample();
-        assert_eq!(filter_commands(&all, "").len(), 3);
-        assert_eq!(filter_commands(&all, "   ").len(), 3);
-    }
-
-    #[test]
-    fn filter_matches_labels_case_insensitively() {
-        let all = sample();
-        assert_eq!(
-            labels(&filter_commands(&all, "PRO")),
-            vec!["Proofread", "Professional"]
-        );
-        assert_eq!(labels(&filter_commands(&all, " summ ")), vec!["Summary"]);
-    }
-
-    #[test]
-    fn filter_falls_back_to_prompts_only_when_no_label_matches() {
-        let all = sample();
-        // "grammar" is in Proofread's prompt only.
-        assert_eq!(labels(&filter_commands(&all, "grammar")), vec!["Proofread"]);
-        // "text" is in two prompts but also in no label.
-        assert_eq!(
-            labels(&filter_commands(&all, "text")),
-            vec!["Summary", "Professional"]
-        );
-        // A label match wins even though "pro" also appears in a prompt.
-        assert_eq!(
-            labels(&filter_commands(&all, "professional")),
-            vec!["Professional"]
-        );
-        assert!(filter_commands(&all, "zzz").is_empty());
-    }
-
-    #[test]
-    fn next_selection_wraps_around_in_both_directions() {
-        assert_eq!(next_selection(0, 3, 1), 1);
-        assert_eq!(next_selection(2, 3, 1), 0);
-        assert_eq!(next_selection(0, 3, -1), 2);
-        assert_eq!(next_selection(1, 3, -1), 0);
-        assert_eq!(next_selection(0, 0, 1), 0);
-        assert_eq!(next_selection(5, 0, -1), 0);
-    }
-
-    #[test]
-    fn clamp_selection_keeps_the_highlight_inside_the_filtered_list() {
-        assert_eq!(clamp_selection(7, 3), 2);
-        assert_eq!(clamp_selection(1, 3), 1);
-        assert_eq!(clamp_selection(4, 0), 0);
     }
 
     #[test]
@@ -2889,19 +1541,6 @@ mod tests {
     }
 
     #[test]
-    fn picker_rows_follow_the_same_rails_as_the_buttons() {
-        // Nothing blocked: everything runs.
-        assert!(picker_row_enabled(true, false, false, false));
-        assert!(picker_row_enabled(false, false, false, false));
-        // Hard max or soft warn block every row.
-        assert!(!picker_row_enabled(false, true, false, false));
-        assert!(!picker_row_enabled(false, false, true, false));
-        // Replace caution blocks Replace rows only.
-        assert!(!picker_row_enabled(true, false, false, true));
-        assert!(picker_row_enabled(false, false, false, true));
-    }
-
-    #[test]
     fn current_generation_while_waiting_is_applied() {
         assert!(should_apply_job(3, 3, true));
     }
@@ -2918,57 +1557,6 @@ mod tests {
         // generation was bumped; either condition alone must be enough.
         assert!(!should_apply_job(3, 3, false));
         assert!(!should_apply_job(3, 4, false));
-    }
-
-    #[test]
-    fn popup_actions_are_all_enabled_within_limits() {
-        assert_eq!(
-            popup_actions(false, false),
-            PopupActions {
-                replace_enabled: true,
-                insert_enabled: true,
-                show_caution: false,
-            }
-        );
-    }
-
-    #[test]
-    fn popup_actions_lock_write_back_until_caution_is_acknowledged() {
-        assert_eq!(
-            popup_actions(false, true),
-            PopupActions {
-                replace_enabled: false,
-                insert_enabled: false,
-                show_caution: true,
-            }
-        );
-    }
-
-    #[test]
-    fn popup_actions_over_hard_max_stay_clickable_so_the_click_can_explain() {
-        // The hard max cannot be acknowledged away, so no caution button is
-        // offered; the click path shows the hard-max error instead.
-        for needs_replace_warn in [false, true] {
-            assert_eq!(
-                popup_actions(true, needs_replace_warn),
-                PopupActions {
-                    replace_enabled: true,
-                    insert_enabled: true,
-                    show_caution: false,
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn insert_range_is_a_caret_at_the_end_of_the_selection() {
-        assert_eq!(insert_range((10, 5)), (15, 0));
-        assert_eq!(insert_range((0, 0)), (0, 0));
-    }
-
-    #[test]
-    fn insert_text_separates_the_result_with_a_blank_line() {
-        assert_eq!(insert_text("- a\n- b"), "\n\n- a\n- b");
     }
 
     /// The regression: a second `serve` used to overwrite a live pidfile, so if
@@ -3041,18 +1629,6 @@ mod tests {
     }
 
     #[test]
-    fn adhoc_command_runs_the_typed_text_as_replace_or_popup() {
-        let replace = adhoc_command("  make it shorter ", false);
-        assert_eq!(replace.id, ADHOC_ID);
-        assert_eq!(replace.label, "Instruction");
-        assert_eq!(replace.prompt, "make it shorter");
-        assert!(matches!(replace.kind, CommandKind::Replace));
-        assert!(replace.hotkey.is_none() && replace.model.is_none());
-        let popup = adhoc_command("explain this", true);
-        assert!(matches!(popup.kind, CommandKind::Popup));
-    }
-
-    #[test]
     fn instruction_label_is_the_first_four_words() {
         assert_eq!(
             instruction_label("Rewrite this as a limerick about cats"),
@@ -3094,14 +1670,14 @@ mod tests {
         let existing = vec!["proofread".to_string(), "make-it-shorter-1a2b3".to_string()];
         let cmd = command_from_instruction(
             " Make it shorter and punchier ",
-            CommandKind::Popup,
+            CommandKind::Replace,
             &existing,
         );
         assert_eq!(cmd.label, "Make it shorter and");
         assert_eq!(cmd.prompt, "Make it shorter and punchier");
         assert!(cmd.id.starts_with("make-it-shorter-and-"), "{}", cmd.id);
         assert!(!existing.contains(&cmd.id));
-        assert!(matches!(cmd.kind, CommandKind::Popup));
+        assert!(matches!(cmd.kind, CommandKind::Replace));
         assert!(cmd.hotkey.is_none() && cmd.model.is_none());
     }
 
@@ -3134,58 +1710,6 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_lists_only_the_commands_enabled_for_the_captured_app() {
-        let mut all = sample();
-        all[1].apps = vec!["Mail".into()];
-        let for_slack: Vec<WritingCommand> =
-            commands_for_app(&all, Some("Slack"), Some("com.tinyspeck.slackmacgap"))
-                .into_iter()
-                .cloned()
-                .collect();
-        assert_eq!(
-            labels(&for_slack.iter().collect::<Vec<_>>()),
-            vec!["Proofread", "Professional"]
-        );
-        assert_eq!(picker_rows(&for_slack, "").len(), 2);
-    }
-
-    #[test]
-    fn the_instruction_row_survives_an_app_with_no_enabled_commands() {
-        let none: Vec<WritingCommand> = Vec::new();
-        assert!(picker_rows(&none, "  ").is_empty());
-        let rows = picker_rows(&none, "make it rhyme");
-        assert_eq!(rows.len(), 1);
-        assert!(matches!(rows[0], PickerRow::Instruction));
-    }
-
-    #[test]
-    fn picker_rows_put_the_instruction_first_only_while_there_is_text() {
-        let all = sample();
-        let empty = picker_rows(&all, "  ");
-        assert_eq!(empty.len(), 3);
-        assert!(matches!(empty[0], PickerRow::Command(_)));
-        assert_eq!(default_picker_row(&empty), 0);
-
-        let matching = picker_rows(&all, "pro");
-        assert_eq!(matching.len(), 3);
-        assert!(matches!(matching[0], PickerRow::Instruction));
-        assert!(matches!(matching[1], PickerRow::Command(c) if c.label == "Proofread"));
-        // ⏎ still runs the first matching command; ↑ reaches the instruction.
-        assert_eq!(default_picker_row(&matching), 1);
-
-        let none = picker_rows(&all, "make it rhyme");
-        assert_eq!(none.len(), 1);
-        assert!(matches!(none[0], PickerRow::Instruction));
-        assert_eq!(default_picker_row(&none), 0);
-    }
-
-    #[test]
-    fn ellipsize_cuts_on_characters() {
-        assert_eq!(ellipsize("abc", 5), "abc");
-        assert_eq!(ellipsize("ééééé", 3), "ééé…");
-    }
-
-    #[test]
     fn thousands_separator_groups_digits() {
         assert_eq!(format_thousands(0), "0");
         assert_eq!(format_thousands(999), "999");
@@ -3197,8 +1721,24 @@ mod tests {
     fn replace_progress_counts_characters_not_bytes() {
         assert_eq!(replace_progress(&"é".repeat(1234)), "… 1,234 chars so far");
     }
-}
 
+    #[test]
+    fn selection_is_required_and_kept_verbatim() {
+        assert_eq!(selected_text(None), None);
+        assert_eq!(selected_text(Some("  ".into())), None);
+        assert_eq!(
+            selected_text(Some("  café\n".into())),
+            Some("  café\n".into())
+        );
+        assert_eq!(adhoc_command(" Summarize ").kind, CommandKind::Replace);
+    }
+    #[test]
+    fn cancellation_only_matches_the_active_run() {
+        assert!(can_cancel(7, 7, true));
+        assert!(!can_cancel(6, 7, true));
+        assert!(!can_cancel(7, 7, false));
+    }
+}
 #[cfg(test)]
 mod work_gate_tests {
     use super::WorkGate;

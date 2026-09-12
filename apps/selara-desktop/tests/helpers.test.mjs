@@ -76,8 +76,8 @@ test("slug lowercases, dashes non-alphanumerics, trims dashes, and falls back to
   assert.equal(H.slug(""), "command");
 });
 
-test("kindLabel maps popup to Popup and everything else to Replace", () => {
-  assert.equal(H.kindLabel("popup"), "Popup");
+test("kindLabel always describes the replacement command behavior", () => {
+  assert.equal(H.kindLabel("popup"), "Replace");
   assert.equal(H.kindLabel("replace"), "Replace");
   assert.equal(H.kindLabel(undefined), "Replace");
   assert.equal(H.kindLabel("Popup"), "Replace");
@@ -121,14 +121,14 @@ test("prettyHotkey handles empty and nullish chords", () => {
   assert.equal(H.prettyHotkey(undefined), "");
 });
 
-const CMD = { label: "Make Formal", prompt: "Rewrite the Text formally", hotkey: "ctrl+shift+f", kind: "popup" };
+const CMD = { label: "Make Formal", prompt: "Rewrite the Text formally", hotkey: "ctrl+shift+f", kind: "replace" };
 
 test("commandMatches matches on label, prompt, hotkey, and kind label", () => {
   assert.equal(H.commandMatches(CMD, "formal"), true);
   assert.equal(H.commandMatches(CMD, "rewrite"), true);
   assert.equal(H.commandMatches(CMD, "shift+f"), true);
-  assert.equal(H.commandMatches(CMD, "popup"), true);
-  assert.equal(H.commandMatches({ ...CMD, kind: "replace" }, "replace"), true);
+  assert.equal(H.commandMatches(CMD, "replace"), true);
+  assert.equal(H.commandMatches({ ...CMD, kind: "popup" }, "popup"), false);
   assert.equal(H.commandMatches(CMD, "nomatch"), false);
 });
 

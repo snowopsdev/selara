@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, RunEvent, Runtime, WindowEvent, Wry,
 };
@@ -25,20 +25,6 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent, TerminatedPayload}
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-/// Serializes every read-modify-write of config.toml in this process.
-///
-/// `save_config_section` re-reads the file, edits one section, and writes the
-/// whole config back. Without a lock two of those transactions interleave —
-/// both read the same starting file, and the second write lands on top of the
-/// first, silently dropping the section it saved. Holding this for the whole
-/// read → edit → write turns each save into one transaction. Every command that
-/// writes the file takes it, including whole-config saves, so a section save
-/// cannot interleave with one of those either.
-///
-/// Cross-process writers (`selara serve` editing Limits) are outside its reach;
-/// the re-read narrows that window to the write itself, and closing it fully
-/// would need file locking.
-static CONFIG_WRITE: Mutex<()> = Mutex::new(());
 static APP_OPERATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static MAINTENANCE: AtomicBool = AtomicBool::new(false);
 struct LoginState {
@@ -68,12 +54,6 @@ impl Drop for Maintenance {
     }
 }
 
-/// A poisoned lock only means a panic elsewhere; the file is still consistent
-/// because a panicking save leaves the previous contents in place.
-fn config_write_lock() -> MutexGuard<'static, ()> {
-    CONFIG_WRITE.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 #[tauri::command]
 fn get_config() -> Result<AppConfig, String> {
     let path = AppConfig::default_path();
@@ -81,10 +61,15 @@ fn get_config() -> Result<AppConfig, String> {
 }
 
 #[tauri::command]
-fn save_config(config: AppConfig) -> Result<(), String> {
-    let _tx = config_write_lock();
+fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     let path = AppConfig::default_path();
-    config.save(&path).map_err(|e| e.to_string())
+    AppConfig::update(&path, move |current| {
+        *current = config;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+    refresh_command_menu(&app);
+    Ok(())
 }
 
 /// Save one Settings tab without touching the others. The file is re-read
@@ -92,14 +77,15 @@ fn save_config(config: AppConfig) -> Result<(), String> {
 /// `selara serve`) survives, and the merged config is returned so the UI can
 /// refresh its copy.
 #[tauri::command]
-fn save_config_section(section: String, value: serde_json::Value) -> Result<AppConfig, String> {
-    // Held across the read, the edit and the write: this is one transaction.
-    let _tx = config_write_lock();
+fn save_config_section(
+    app: AppHandle,
+    section: String,
+    value: serde_json::Value,
+) -> Result<AppConfig, String> {
     let path = AppConfig::default_path();
-    let mut cfg = AppConfig::load_or_init(&path).map_err(|e| e.to_string())?;
-    cfg.apply_section(&section, value)
+    let cfg = AppConfig::update(&path, move |cfg| cfg.apply_section(&section, value))
         .map_err(|e| e.to_string())?;
-    cfg.save(&path).map_err(|e| e.to_string())?;
+    refresh_command_menu(&app);
     Ok(cfg)
 }
 
@@ -113,14 +99,21 @@ fn api_key_source() -> Result<ApiKeySource, String> {
 /// Store a key in the OS keychain for `kind` and drop any plaintext copy from
 /// config.toml so the keychain entry is what `serve` and the CLI use.
 #[tauri::command]
-fn store_api_key(kind: ProviderKind, api_key: String) -> Result<ApiKeySource, String> {
+fn store_api_key(
+    app: AppHandle,
+    kind: ProviderKind,
+    api_key: String,
+) -> Result<ApiKeySource, String> {
     secrets::keychain_set(kind, &api_key).map_err(|e| e.to_string())?;
     let path = AppConfig::default_path();
-    let mut cfg = AppConfig::load_or_init(&path).map_err(|e| e.to_string())?;
-    if cfg.provider.kind == kind && cfg.provider.api_key.is_some() {
-        cfg.provider.api_key = None;
-        cfg.save(&path).map_err(|e| e.to_string())?;
-    }
+    let cfg = AppConfig::update(&path, move |cfg| {
+        if cfg.provider.kind == kind && cfg.provider.api_key.is_some() {
+            cfg.provider.api_key = None;
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+    refresh_command_menu(&app);
     Ok(cfg.api_key_source())
 }
 
@@ -147,7 +140,7 @@ async fn export_commands(app: tauri::AppHandle) -> Result<Option<String>, String
             .add_filter("Command pack", &["toml", "json"])
             .blocking_save_file()
         else {
-            return Ok(None);
+            return Ok::<Option<String>, String>(None);
         };
         let path = picked.into_path().map_err(|e| e.to_string())?;
         std::fs::write(&path, text).map_err(|e| e.to_string())?;
@@ -164,7 +157,8 @@ async fn import_commands(
     app: tauri::AppHandle,
     mode: MergeMode,
 ) -> Result<Option<MergeReport>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let refresh_handle = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let Some(picked) = app
             .dialog()
             .file()
@@ -172,28 +166,33 @@ async fn import_commands(
             .add_filter("Command pack", &["toml", "json"])
             .blocking_pick_file()
         else {
-            return Ok(None);
+            return Ok::<Option<MergeReport>, String>(None);
         };
         let path = picked.into_path().map_err(|e| e.to_string())?;
         let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let incoming = parse_command_pack(&text).map_err(|e| e.to_string())?;
         let cfg_path = AppConfig::default_path();
-        let mut cfg = AppConfig::load_or_init(&cfg_path).map_err(|e| e.to_string())?;
-        // The picker and undo hotkeys are registered before any command
-        // hotkey, so an import that claims one of them would make the next
-        // `serve` config reload fail instead of activating.
-        let picker = cfg.hotkey.clone();
-        let undo = cfg.undo_hotkey.clone().unwrap_or_default();
-        let mut reserved: Vec<&str> = vec![picker.as_str()];
-        if !undo.trim().is_empty() {
-            reserved.push(undo.as_str());
-        }
-        let report = merge_commands(&mut cfg.commands, incoming, mode, &reserved);
-        cfg.save(&cfg_path).map_err(|e| e.to_string())?;
-        Ok(Some(report))
+        let report = std::sync::Arc::new(Mutex::new(None));
+        let report_out = report.clone();
+        AppConfig::update(&cfg_path, move |cfg| {
+            // The custom-instruction shortcut is registered before command
+            // shortcuts, so an import that claims it would make the next
+            // `serve` config reload fail instead of activating.
+            let reserved = [cfg.hotkey.as_str()];
+            *report_out.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(merge_commands(&mut cfg.commands, incoming, mode, &reserved));
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+        let report = report.lock().unwrap_or_else(|e| e.into_inner()).take();
+        Ok::<Option<MergeReport>, String>(report)
     })
     .await
-    .map_err(|e| format!("import task failed: {e}"))?
+    .map_err(|e| format!("import task failed: {e}"))??;
+    if result.is_some() {
+        refresh_command_menu(&refresh_handle);
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -522,6 +521,16 @@ struct Supervisor {
     protocol_waiters: Mutex<
         HashMap<String, std::sync::mpsc::Sender<selara_core::desktop_protocol::ProtocolResponse>>,
     >,
+    /// The service generation and run id for the command currently admitted
+    /// through the tray. The service generation prevents a Cancel sent after
+    /// a restart from reaching an unrelated run that reused the same id.
+    active_run: Mutex<Option<ActiveRun>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActiveRun {
+    service_generation: u64,
+    run_id: u64,
 }
 
 /// A poisoned lock only means a panic elsewhere; the data is still usable.
@@ -546,6 +555,10 @@ impl Supervisor {
     fn managed_pid(&self) -> Option<u32> {
         lock(&self.child).as_ref().map(|c| c.pid())
     }
+
+    fn active_run(&self) -> Option<ActiveRun> {
+        *lock(&self.active_run)
+    }
 }
 
 /// Tray items whose enabled/checked state follows the supervisor.
@@ -556,6 +569,134 @@ struct TrayMenu {
     login: CheckMenuItem<Wry>,
     /// "Update to vX.Y.Z…"; disabled with a status text until a check finds one.
     update: MenuItem<Wry>,
+    commands: Submenu<Wry>,
+    custom_instruction: MenuItem<Wry>,
+    cancel_command: MenuItem<Wry>,
+    command_status: MenuItem<Wry>,
+    command_items: Mutex<Vec<MenuItem<Wry>>>,
+}
+
+fn menu_command_id(menu_id: &str) -> Option<&str> {
+    menu_id.strip_prefix("command:")
+}
+
+fn configured_menu_accelerator(hotkey: Option<&str>) -> Option<String> {
+    let hotkey = hotkey?.trim();
+    if hotkey.is_empty() {
+        return None;
+    }
+    // Tauri's native menu parser accepts the same modifier/key vocabulary as
+    // the global hotkey parser. It drops an accelerator it cannot parse, so
+    // keep malformed values out of the native item while still leaving the
+    // configured global shortcut to the service (which reports conflicts).
+    let mut parts = hotkey.split('+').map(str::trim);
+    let key = parts.next_back().unwrap_or_default();
+    if key.is_empty() || parts.any(|part| part.is_empty()) {
+        return None;
+    }
+    let normalized_key = key.to_ascii_lowercase();
+    let modifiers: Vec<_> = hotkey
+        .split('+')
+        .take_while(|part| !part.trim().eq_ignore_ascii_case(key))
+        .map(|part| part.trim().to_ascii_lowercase())
+        .collect();
+    #[cfg(target_os = "macos")]
+    let native_primary = modifiers
+        .iter()
+        .any(|modifier| matches!(modifier.as_str(), "command" | "cmd" | "super"));
+    #[cfg(not(target_os = "macos"))]
+    let native_primary = modifiers
+        .iter()
+        .any(|modifier| matches!(modifier.as_str(), "control" | "ctrl"));
+    if native_primary && matches!(normalized_key.as_str(), "z" | "c" | "x" | "v") {
+        return None;
+    }
+    Some(hotkey.to_string())
+}
+
+fn menu_command_enabled(app: &AppHandle) -> bool {
+    let sup = app.state::<Supervisor>();
+    let managed = sup.managed_pid().is_some();
+    let external = !managed && serve_status().running;
+    managed && !external && !MAINTENANCE.load(Ordering::SeqCst)
+}
+
+/// Rebuild only the user command portion of the tray menu. This runs on the
+/// Tauri main thread because native menu APIs are main-thread-bound. The
+/// service status gate is applied to every item so an externally-started
+/// `serve` cannot receive requests from this app.
+fn refresh_command_menu_main(app: &AppHandle) {
+    let Some(menu) = app.try_state::<TrayMenu>() else {
+        return;
+    };
+    let enabled = menu_command_enabled(app);
+    let active = app.state::<Supervisor>().active_run().is_some();
+    let service_running = serve_status().running;
+    let _ = menu
+        .commands
+        .set_enabled(enabled || active || service_running);
+    let _ = menu.custom_instruction.set_enabled(enabled);
+    let _ = menu.cancel_command.set_enabled(active);
+    let _ = menu.command_status.set_enabled(false);
+    let _ = menu.command_status.set_text(if enabled {
+        "Commands replace the selected text"
+    } else if service_running {
+        "Stop the external serve to enable commands"
+    } else if MAINTENANCE.load(Ordering::SeqCst) {
+        "Commands paused during maintenance"
+    } else {
+        "Start serve to enable commands"
+    });
+
+    let old = std::mem::take(&mut *lock(&menu.command_items));
+    for item in &old {
+        let _ = menu.commands.remove(item);
+    }
+
+    let cfg = match AppConfig::load_or_init(&AppConfig::default_path()) {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            let _ = menu
+                .command_status
+                .set_text(format!("Could not load commands: {error}"));
+            return;
+        }
+    };
+    let mut items = Vec::with_capacity(cfg.commands.len());
+    for command in cfg.commands {
+        let id = format!("command:{}", command.id);
+        let accelerator = configured_menu_accelerator(command.hotkey.as_deref());
+        let item = match MenuItem::with_id(app, id, command.label, enabled, accelerator.as_deref())
+        {
+            Ok(item) => item,
+            Err(error) => {
+                app.state::<Supervisor>()
+                    .push_log(format!("[menu] could not add command: {error}"));
+                continue;
+            }
+        };
+        if let Err(error) = menu.commands.append(&item) {
+            app.state::<Supervisor>()
+                .push_log(format!("[menu] could not append command: {error}"));
+            continue;
+        }
+        items.push(item);
+    }
+    *lock(&menu.command_items) = items;
+}
+
+fn refresh_command_menu(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || refresh_command_menu_main(&handle));
+}
+
+/// Config can also be edited by `selara` or another Settings process. Keep the
+/// tray's command list current even when no protocol status frame arrives.
+fn spawn_command_menu_refreshes(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(2));
+        refresh_command_menu(&app);
+    });
 }
 
 /// Re-sync the tray items and tell the Settings window something changed.
@@ -576,6 +717,29 @@ fn notify(app: &AppHandle) {
                 .login
                 .set_checked(handle.autolaunch().is_enabled().unwrap_or(false));
         }
+        let sup = handle.state::<Supervisor>();
+        if let Some(active) = sup.active_run() {
+            let current_generation = sup.generation.load(Ordering::SeqCst);
+            let managed = sup.managed_pid().is_some();
+            let status = lock(&sup.protocol_status).clone();
+            let finished = !managed
+                || active.service_generation != current_generation
+                || status.as_ref().is_some_and(|status| {
+                    status.generation >= active.run_id
+                        && !(status.generation == active.run_id
+                            && status.readiness
+                                == selara_core::desktop_protocol::ServeReadiness::Busy)
+                });
+            if finished {
+                // A new admission may have published its token after the
+                // snapshot above. Preserve that newer cancellation target.
+                let mut current = lock(&sup.active_run);
+                if *current == Some(active) {
+                    *current = None;
+                }
+            }
+        }
+        refresh_command_menu_main(&handle);
         let _ = handle.emit("serve-changed", ());
     });
 }
@@ -701,7 +865,7 @@ fn protocol_request_locked(
     let sequence = sup.request_sequence.fetch_add(1, Ordering::SeqCst);
     let id = format!("desktop-{generation}-{sequence}");
     let request = selara_core::desktop_protocol::ProtocolRequest {
-        version: 1,
+        version: selara_core::desktop_protocol::PROTOCOL_VERSION,
         id: id.clone(),
         command,
     };
@@ -737,6 +901,150 @@ fn protocol_request_locked(
     })();
     lock(&sup.protocol_waiters).remove(&id);
     result
+}
+
+#[cfg(target_os = "macos")]
+fn frontmost_source_pid() -> Option<i32> {
+    selara_platform::macos::frontmost_pid()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn frontmost_source_pid() -> Option<i32> {
+    None
+}
+
+/// Admit one menu-triggered run. The source pid is intentionally captured by
+/// the menu callback before any Settings/custom-instruction UI can become
+/// frontmost. Only the short protocol admission is serialized with service
+/// transitions; the run itself continues in `serve` after this function
+/// returns.
+fn dispatch_menu_command(
+    app: &AppHandle,
+    target_pid: i32,
+    command: selara_core::desktop_protocol::ProtocolCommand,
+) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let sup = app.state::<Supervisor>();
+        let response = {
+            let _transition = lock(&sup.transition);
+            if MAINTENANCE.load(Ordering::SeqCst) {
+                return;
+            }
+            if sup.managed_pid().is_none() {
+                let message = if serve_status().running {
+                    "Stop the externally started background service before using tray commands"
+                } else {
+                    "Start the Selara background service before using tray commands"
+                };
+                report_command_error(&app, message);
+                return;
+            }
+            let response = protocol_request_locked(
+                &app,
+                &sup,
+                match command {
+                    selara_core::desktop_protocol::ProtocolCommand::RunCommand {
+                        command_id,
+                        ..
+                    } => selara_core::desktop_protocol::ProtocolCommand::RunCommand {
+                        command_id,
+                        target_pid,
+                    },
+                    selara_core::desktop_protocol::ProtocolCommand::CustomInstruction {
+                        ..
+                    } => selara_core::desktop_protocol::ProtocolCommand::CustomInstruction {
+                        target_pid,
+                    },
+                    other => other,
+                },
+            );
+            if let Ok(response) = &response {
+                // Keep the service generation paired with the admission while
+                // the transition lock is held. A restart cannot race between
+                // the ACK and publication of the active run token.
+                *lock(&sup.active_run) = Some(ActiveRun {
+                    service_generation: sup.generation.load(Ordering::SeqCst),
+                    run_id: response.status.generation,
+                });
+            }
+            response
+        };
+        match response {
+            Ok(_) => {
+                notify(&app);
+            }
+            Err(error) => {
+                if is_transport_error(&error) {
+                    report_command_error(&app, &error);
+                } else {
+                    // `serve` has already shown its selection/limit/app-filter
+                    // refusal in its own progress window. Keep the tray log in
+                    // sync without opening a duplicate native dialog.
+                    record_command_error(&app, &error);
+                }
+            }
+        }
+    });
+}
+
+fn cancel_active_command(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let sup = app.state::<Supervisor>();
+        let Some(active) = sup.active_run() else {
+            return;
+        };
+        let result = {
+            let _transition = lock(&sup.transition);
+            let result = if sup.generation.load(Ordering::SeqCst) != active.service_generation {
+                Err("The background service changed; the command is already cancelled".into())
+            } else if sup.managed_pid().is_none() {
+                Err("The background service is not managed by this app".into())
+            } else {
+                protocol_request_locked(
+                    &app,
+                    &sup,
+                    selara_core::desktop_protocol::ProtocolCommand::Cancel {
+                        run_id: active.run_id,
+                    },
+                )
+                .map(|_| ())
+            };
+            // A concurrent command may have replaced the tray's active token
+            // while this request waited. Only clear the token observed at the
+            // start of this cancellation; never hide a newer run.
+            let mut current = lock(&sup.active_run);
+            if *current == Some(active) {
+                *current = None;
+            }
+            result
+        };
+        if let Err(error) = result {
+            report_command_error(&app, &format!("cancel failed: {error}"));
+        }
+        notify(&app);
+    });
+}
+
+fn report_command_error(app: &AppHandle, message: &str) {
+    record_command_error(app, message);
+    app.dialog().message(message).title("Selara").show(|_| {});
+}
+
+fn record_command_error(app: &AppHandle, message: &str) {
+    app.state::<Supervisor>()
+        .push_log(format!("[command] {message}"));
+    let _ = app.emit("command-error", message.to_string());
+    notify(app);
+}
+
+fn is_transport_error(message: &str) -> bool {
+    message.contains("did not acknowledge")
+        || message.contains("changed during the request")
+        || message.contains("not managed by this app")
+        || message.contains("Broken pipe")
+        || (message.contains("background service") && message.contains("failed"))
 }
 
 fn quiesce_serve_locked(
@@ -1430,6 +1738,27 @@ pub fn run() {
 
             let handle = app.handle().clone();
             let show_i = MenuItem::with_id(app, "show", "Open Settings", true, None::<&str>)?;
+            let commands_menu = Submenu::with_id(app, "commands", "Commands", true)?;
+            let custom_instruction_i = MenuItem::with_id(
+                app,
+                "custom-instruction",
+                "Custom instruction…",
+                false,
+                None::<&str>,
+            )?;
+            let cancel_command_i =
+                MenuItem::with_id(app, "cancel-command", "Cancel command", false, None::<&str>)?;
+            let command_status_i = MenuItem::with_id(
+                app,
+                "command-status",
+                "Loading commands…",
+                false,
+                None::<&str>,
+            )?;
+            commands_menu.append(&custom_instruction_i)?;
+            commands_menu.append(&cancel_command_i)?;
+            commands_menu.append(&PredefinedMenuItem::separator(app)?)?;
+            commands_menu.append(&command_status_i)?;
             let start_i = MenuItem::with_id(app, "serve-start", "Start serve", true, None::<&str>)?;
             let stop_i = MenuItem::with_id(app, "serve-stop", "Stop serve", false, None::<&str>)?;
             let restart_i =
@@ -1462,6 +1791,7 @@ pub fn run() {
                 app,
                 &[
                     &show_i,
+                    &commands_menu,
                     &PredefinedMenuItem::separator(app)?,
                     &start_i,
                     &stop_i,
@@ -1481,7 +1811,14 @@ pub fn run() {
                 restart: restart_i,
                 login: login_i,
                 update: update_i,
+                commands: commands_menu,
+                custom_instruction: custom_instruction_i,
+                cancel_command: cancel_command_i,
+                command_status: command_status_i,
+                command_items: Mutex::new(Vec::new()),
             });
+
+            refresh_command_menu_main(app.handle());
 
             // Keep the transparent menu-bar mark separate from the app-bundle icon.
             let tray_icon = tauri::image::Image::from_bytes(include_bytes!(
@@ -1492,55 +1829,98 @@ pub fn run() {
                 .icon_as_template(true)
                 .menu(&menu)
                 .tooltip("Selara")
-                .on_menu_event(move |app, event| match event.id.as_ref() {
-                    "show" => show_settings(app),
-                    "serve-start" | "serve-stop" | "serve-restart" => {
-                        // Off the main thread: stopping waits for the child.
-                        let action: fn(&AppHandle) -> Result<(), String> = match event.id.as_ref() {
-                            "serve-start" => start_serve,
-                            "serve-stop" => stop_serve,
-                            _ => restart_serve,
-                        };
-                        let app = app.clone();
-                        std::thread::spawn(move || {
-                            if let Err(e) = action(&app) {
-                                app.state::<Supervisor>().set_error(Some(e));
-                                notify(&app);
+                .on_menu_event(move |app, event| {
+                    // Read this before dispatching any action that could show
+                    // Settings or a custom-instruction window. The service
+                    // uses it to capture the target app's selection.
+                    let source_pid = frontmost_source_pid();
+                    match event.id.as_ref() {
+                        "show" => show_settings(app),
+                        "custom-instruction" => {
+                            if let Some(target_pid) = source_pid {
+                                dispatch_menu_command(
+                                app,
+                                target_pid,
+                                selara_core::desktop_protocol::ProtocolCommand::CustomInstruction {
+                                    target_pid,
+                                },
+                            );
+                            } else {
+                                report_command_error(
+                                    app,
+                                    "Could not identify the source application",
+                                );
                             }
-                        });
-                    }
-                    "login" => {
-                        let al = app.autolaunch();
-                        let result = if al.is_enabled().unwrap_or(false) {
-                            al.disable()
-                        } else {
-                            al.enable()
-                        };
-                        if let Err(e) = result {
-                            app.state::<Supervisor>()
-                                .push_log(format!("[supervisor] start at login: {e}"));
                         }
-                        notify(app);
-                    }
-                    "update-check" => {
-                        let app = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            perform_update_check(&app).await;
-                        });
-                    }
-                    "update" => {
-                        let app = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            if let Err(e) = perform_update_install(&app).await {
-                                app.state::<Supervisor>().push_log(format!("[updater] {e}"));
-                                let status = UpdateStatus::Error { message: e };
-                                *lock(&app.state::<UpdateState>().last) = Some(status.clone());
-                                apply_update_status(&app, &status);
+                        "cancel-command" => cancel_active_command(app),
+                        id if id.starts_with("command:") => {
+                            if let (Some(target_pid), Some(command_id)) =
+                                (source_pid, menu_command_id(id))
+                            {
+                                dispatch_menu_command(
+                                    app,
+                                    target_pid,
+                                    selara_core::desktop_protocol::ProtocolCommand::RunCommand {
+                                        command_id: command_id.to_string(),
+                                        target_pid,
+                                    },
+                                );
+                            } else {
+                                report_command_error(
+                                    app,
+                                    "Could not identify the source application",
+                                );
                             }
-                        });
+                        }
+                        "serve-start" | "serve-stop" | "serve-restart" => {
+                            // Off the main thread: stopping waits for the child.
+                            let action: fn(&AppHandle) -> Result<(), String> =
+                                match event.id.as_ref() {
+                                    "serve-start" => start_serve,
+                                    "serve-stop" => stop_serve,
+                                    _ => restart_serve,
+                                };
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                if let Err(e) = action(&app) {
+                                    app.state::<Supervisor>().set_error(Some(e));
+                                    notify(&app);
+                                }
+                            });
+                        }
+                        "login" => {
+                            let al = app.autolaunch();
+                            let result = if al.is_enabled().unwrap_or(false) {
+                                al.disable()
+                            } else {
+                                al.enable()
+                            };
+                            if let Err(e) = result {
+                                app.state::<Supervisor>()
+                                    .push_log(format!("[supervisor] start at login: {e}"));
+                            }
+                            notify(app);
+                        }
+                        "update-check" => {
+                            let app = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                perform_update_check(&app).await;
+                            });
+                        }
+                        "update" => {
+                            let app = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Err(e) = perform_update_install(&app).await {
+                                    app.state::<Supervisor>().push_log(format!("[updater] {e}"));
+                                    let status = UpdateStatus::Error { message: e };
+                                    *lock(&app.state::<UpdateState>().last) = Some(status.clone());
+                                    apply_update_status(&app, &status);
+                                }
+                            });
+                        }
+                        "quit" => app.exit(0),
+                        _ => {}
                     }
-                    "quit" => app.exit(0),
-                    _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
@@ -1588,12 +1968,13 @@ pub fn run() {
             // The event loop is up: start `serve` unless one already runs.
             RunEvent::Ready => {
                 // Explicit app launches should expose Settings immediately;
-                // login-item launches keep both Settings and the picker hidden.
+                // login-item launches keep Settings hidden.
                 if !std::env::args_os().any(|arg| arg == "--background") {
                     show_settings(app);
                 }
                 let app = app.clone();
                 spawn_update_checks(app.clone());
+                spawn_command_menu_refreshes(app.clone());
                 std::thread::spawn(move || {
                     let _ = start_serve(&app);
                 });
@@ -1608,7 +1989,69 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{updater_configured, UPDATER_PUBKEY_PLACEHOLDER};
+    use super::{
+        configured_menu_accelerator, is_transport_error, menu_command_id, updater_configured,
+        UPDATER_PUBKEY_PLACEHOLDER,
+    };
+
+    #[test]
+    fn menu_command_ids_preserve_the_configured_id() {
+        for command_id in [
+            "proofread",
+            "command:proofread",
+            "command:command:proofread",
+            "custom:résumé",
+        ] {
+            let menu_id = format!("command:{command_id}");
+            assert_eq!(menu_command_id(&menu_id), Some(command_id));
+        }
+        assert_eq!(menu_command_id("custom-instruction"), None);
+    }
+
+    #[test]
+    fn menu_accelerator_omits_empty_and_malformed_specs() {
+        assert_eq!(configured_menu_accelerator(None), None);
+        assert_eq!(configured_menu_accelerator(Some("  ")), None);
+        assert_eq!(configured_menu_accelerator(Some("command++p")), None);
+        assert_eq!(
+            configured_menu_accelerator(Some("command+shift+p")),
+            Some("command+shift+p".to_string())
+        );
+    }
+
+    #[test]
+    fn command_transport_errors_are_distinguished_from_service_refusals() {
+        assert!(is_transport_error(
+            "The background service did not acknowledge the request; try restarting it"
+        ));
+        assert!(is_transport_error(
+            "The background service changed during the request"
+        ));
+        assert!(!is_transport_error(
+            "Select text first, then run the command again"
+        ));
+        assert!(!is_transport_error(
+            "This command is not enabled for this app"
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menu_accelerator_does_not_claim_native_edit_shortcuts() {
+        for hotkey in [
+            "command+z",
+            "command+shift+z",
+            "command+c",
+            "command+x",
+            "command+v",
+        ] {
+            assert_eq!(configured_menu_accelerator(Some(hotkey)), None, "{hotkey}");
+        }
+        assert_eq!(
+            configured_menu_accelerator(Some("command+shift+p")),
+            Some("command+shift+p".to_string())
+        );
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

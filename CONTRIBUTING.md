@@ -44,7 +44,7 @@ Dependency upkeep is automated: Dependabot opens weekly PRs for Cargo, npm (`app
 | `selara-platform` traits | Tested | Built + clippy | Covered |
 | macOS Accessibility / hotkey / clipboard backends | cfg-gated out | Compiled only; no AX at runtime | Needs local testing |
 | `selara` CLI | Tested | Built | Covered |
-| `selara` `serve` (egui picker) | cfg-gated out | Compiled only | Needs local macOS testing |
+| `selara` `serve` (menu commands and replacement) | cfg-gated out | Compiled only | Needs local macOS testing |
 | `selara-desktop` (Tauri) | `dist/index.html` freshness only | App/DMG built and verified; release helper tests | GUI behavior needs local testing |
 
 If you change hotkeys, selection replace, Accessibility behavior, or the Settings UI, please verify on macOS locally and attach screenshots when UI changes.
@@ -53,7 +53,7 @@ If you change hotkeys, selection replace, Accessibility behavior, or the Setting
 
 1. Branch from `main` (`git checkout -b your-topic`)
 2. Make focused commits; keep secrets out of the diff
-3. Open a PR against `main`. The title must be a conventional commit subject such as `feat(desktop): Add model picker`, because the repo squash-merges and the title becomes the commit on `main` that decides the next version. The description must use the five sections from `.github/PULL_REQUEST_TEMPLATE.md` (What Problem This Solves, Why This Change Was Made, User Impact, Developer Impact, Evidence). A CI check fails the PR if any section is missing or empty, and this applies whether the PR is written by hand, by an IDE, or by a coding agent.
+3. Open a PR against `main`. The title must be a conventional commit subject such as `feat(desktop): Add command shortcut`, because the repo squash-merges and the title becomes the commit on `main` that decides the next version. The description must use the five sections from `.github/PULL_REQUEST_TEMPLATE.md` (What Problem This Solves, Why This Change Was Made, User Impact, Developer Impact, Evidence). A CI check fails the PR if any section is missing or empty, and this applies whether the PR is written by hand, by an IDE, or by a coding agent.
 4. Wait for CI to go green
 5. **Codex review** — maintainers request this on PRs (GitHub Codex connector). External contributors do **not** need to run Codex themselves; it is not a blocker on your side.
 6. Address feedback, then merge when approved
@@ -80,7 +80,7 @@ The app and CLI carry a native writing-only build of Codex 0.153.4. Build it wit
 
 Settings account state is independent of unsaved provider settings. `provider.codex_home` selects an absolute shared Codex home before `CODEX_HOME`, then `~/.codex`. No separate Codex installation or Node runtime is needed. Remove legacy `CODEX_BIN` and `CODEX_AUTH_JSON` overrides; select the existing store directory rather than copying tokens. Selara's BYOK credentials are separate. Shared Codex sign-out removes credentials for the selected home across its supported official stores; other Codex processes can also observe that sign-out.
 
-The managed CLI uses `selara serve --desktop-protocol`: bounded, versioned JSON lines on stdin/stdout, with logs on stderr. Status includes actual selection-process Accessibility trust and readiness. Quiesce acknowledges only after all workers finish and pending picker actions are cleared. External or incompatible processes have unknown trust and must be restarted under app management. Ordinary `selara serve` retains its existing logging behavior.
+The managed CLI uses `selara serve --desktop-protocol`: bounded, versioned JSON lines on stdin/stdout, with logs on stderr. Status includes actual selection-process Accessibility trust and readiness. Quiesce acknowledges only after all workers finish and pending command executions are cleared. External or incompatible processes have unknown trust and must be restarted under app management. Ordinary `selara serve` retains its existing logging behavior. Desktop commands require a verified nonempty selection and replace it only after a complete response; users restore a replacement with the target app's native undo command.
 
 ## No secrets
 
