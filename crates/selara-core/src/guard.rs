@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::providers::ProviderKind;
 
-/// What a hit looked like. The user sees this name in the picker banner.
+/// What a hit looked like. The user sees this name in the confirmation dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretKind {

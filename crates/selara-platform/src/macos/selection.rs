@@ -1,9 +1,9 @@
 //! Selection read/replace via Accessibility, with Cmd+C / Cmd+V clipboard fallback.
 //!
-//! Tradeoff: AX `AXSelectedText` set is preferred when the focused element supports
-//! it. Many apps ignore setValue; the fallback snapshots the whole pasteboard
-//! (every item and every type, not just text), pastes the result with Cmd+V,
-//! then restores the snapshot after a short delay.
+//! AX `AXSelectedText` is used to read and verify the target. Replacement always
+//! uses the target app's normal Cmd+V path; the fallback snapshots the whole
+//! pasteboard (every item and every type, not just text) and restores it only
+//! after ownership and replacement verification succeed.
 //!
 //! Replace must run **after** our UI hides and the source app is frontmost again.
 //! The delayed restore compares `NSPasteboard.changeCount` against the value
@@ -18,7 +18,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use arboard::Clipboard;
 use async_trait::async_trait;
 use cocoa::foundation::{NSPoint, NSRect};
-use core_foundation::base::{CFRange, TCFType};
+use core_foundation::base::{CFRange, CFTypeRef, TCFType};
 use core_foundation::string::CFString;
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, KeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -73,6 +73,12 @@ fn focused_element_for_pid(pid: i32) -> Result<AXUIElement> {
         .map_err(|e| anyhow!("AXFocusedUIElement for pid {pid}: {e}"))
 }
 
+fn focused_window_for_pid(pid: i32) -> Result<AXUIElement> {
+    let app = AXUIElement::application(pid);
+    app.attribute(&attr_typed::<AXUIElement>("AXFocusedWindow"))
+        .map_err(|e| anyhow!("AXFocusedWindow for pid {pid}: {e}"))
+}
+
 fn read_ax_selected_text(element: &AXUIElement) -> Result<String> {
     let text: CFString = element
         .attribute(&attr_typed::<CFString>("AXSelectedText"))
@@ -80,13 +86,26 @@ fn read_ax_selected_text(element: &AXUIElement) -> Result<String> {
     Ok(text.to_string())
 }
 
-fn set_ax_selected_text(element: &AXUIElement, text: &str) -> Result<()> {
-    element
-        .set_attribute(
-            &attr_typed::<CFString>("AXSelectedText"),
-            CFString::new(text),
-        )
-        .map_err(|e| anyhow!("set AXSelectedText: {e}"))
+fn read_ax_value_text(element: &AXUIElement) -> Result<String> {
+    let text: CFString = element
+        .attribute(&attr_typed::<CFString>("AXValue"))
+        .map_err(|e| anyhow!("AXValue: {e}"))?;
+    Ok(text.to_string())
+}
+
+fn replace_utf16_range(value: &str, range: (i64, i64), replacement: &str) -> Option<String> {
+    let (location, length) = range;
+    if location < 0 || length < 0 {
+        return None;
+    }
+    let mut units: Vec<u16> = value.encode_utf16().collect();
+    let start = location as usize;
+    let end = start.checked_add(length as usize)?;
+    if end > units.len() {
+        return None;
+    }
+    units.splice(start..end, replacement.encode_utf16());
+    String::from_utf16(&units).ok()
 }
 
 fn read_ax_selected_range(element: &AXUIElement) -> Option<(i64, i64)> {
@@ -116,59 +135,6 @@ fn read_ax_selected_range(element: &AXUIElement) -> Option<(i64, i64)> {
             return None;
         }
         Some((range.location as i64, range.length as i64))
-    }
-}
-
-/// Did an AX insertion of `text` at `caret` actually land?
-///
-/// An insert cannot use the Replace heuristic ("the selection no longer holds
-/// the original text"), because the text it replaces is the empty string: a
-/// field that collapses its selection after an edit reports an empty selection
-/// both when the write succeeded and when it silently did nothing. So look at
-/// where the caret ended up instead. After a real insertion the field either
-/// leaves the inserted run selected, or collapses the caret to the end of it;
-/// an app that reported success and wrote nothing leaves the caret at `caret`.
-///
-/// `selected_range` and `caret` are AX ranges, i.e. UTF-16 code units.
-fn insertion_landed(
-    selected_text: Option<&str>,
-    selected_range: Option<(i64, i64)>,
-    text: &str,
-    caret: i64,
-) -> bool {
-    if selected_text == Some(text) && !text.is_empty() {
-        return true;
-    }
-    let inserted = text.encode_utf16().count() as i64;
-    match selected_range {
-        // Caret collapsed to the end of what we wrote.
-        Some((loc, 0)) => loc == caret + inserted,
-        // The inserted run is still selected.
-        Some((loc, len)) => loc == caret && len == inserted,
-        None => false,
-    }
-}
-
-fn set_ax_selected_range(element: &AXUIElement, location: i64, length: i64) -> Result<()> {
-    let mut range = CFRange {
-        location: location as isize,
-        length: length as isize,
-    };
-    unsafe {
-        let ax_ref = accessibility_sys::AXValueCreate(
-            accessibility_sys::kAXValueTypeCFRange,
-            &mut range as *mut _ as *const _,
-        );
-        if ax_ref.is_null() {
-            bail!("AXValueCreate CFRange failed");
-        }
-        let cf = core_foundation::base::CFType::wrap_under_create_rule(ax_ref as _);
-        element
-            .set_attribute(
-                &attr_typed::<core_foundation::base::CFType>("AXSelectedTextRange"),
-                cf,
-            )
-            .map_err(|e| anyhow!("set AXSelectedTextRange: {e}"))
     }
 }
 
@@ -236,7 +202,7 @@ pub fn frontmost_pid() -> Option<i32> {
     }
 }
 
-/// Re-activate another app so selection/paste targets it, not our picker.
+/// Re-activate another app so selection/paste targets it, not Selara's UI.
 pub fn activate_pid(pid: i32) -> Result<()> {
     unsafe {
         let app: cocoa::base::id =
@@ -373,16 +339,6 @@ fn clipboard_copy() -> Result<()> {
     cmd_keystroke(KeyCode::ANSI_C)
 }
 
-/// Collapse the selection to its end the way a user would: a plain → press.
-fn collapse_selection_right() -> Result<()> {
-    let flags = CGEventFlags::empty();
-    post_key(KeyCode::RIGHT_ARROW, flags, true)?;
-    thread::sleep(Duration::from_millis(20));
-    post_key(KeyCode::RIGHT_ARROW, flags, false)?;
-    thread::sleep(Duration::from_millis(60));
-    Ok(())
-}
-
 fn clipboard_paste() -> Result<()> {
     cmd_keystroke(KeyCode::ANSI_V)
 }
@@ -472,6 +428,18 @@ mod pasteboard {
             encoding: 4u64]
     }
 
+    /// Read the plain text while the caller owns `PASTEBOARD_LOCK`.
+    unsafe fn pasteboard_text_locked(pb: id) -> Option<String> {
+        let ty = nsstring_new(TEXT_TYPE);
+        if ty.is_null() {
+            return None;
+        }
+        let s: id = msg_send![pb, stringForType: ty];
+        let out = nsstring_to_string(s);
+        let _: () = msg_send![ty, release];
+        out
+    }
+
     /// Replace the pasteboard with `text` and return the `changeCount` that
     /// *this* write produced.
     ///
@@ -513,26 +481,47 @@ mod pasteboard {
     }
 
     /// The plain text currently on the general pasteboard, if any.
+    #[cfg(test)]
     pub(super) fn pasteboard_text() -> Option<String> {
         let _guard = lock();
         autoreleasepool(|| {
-            // SAFETY: `ty` is +1 and released here; `stringForType:` returns an
-            // autoreleased NSString that `nsstring_to_string` copies out.
+            // SAFETY: `pasteboard_text_locked` only uses the live pasteboard and
+            // copies the autoreleased NSString into an owned Rust String.
             unsafe {
                 let pb = general_pasteboard().ok()?;
-                let ty = nsstring_new(TEXT_TYPE);
-                if ty.is_null() {
-                    return None;
-                }
-                let s: id = msg_send![pb, stringForType: ty];
-                let out = nsstring_to_string(s);
-                let _: () = msg_send![ty, release];
-                out
+                pasteboard_text_locked(pb)
             }
         })
     }
 
+    /// Return the text and change count from one locked pasteboard observation.
+    /// This is used after a synthetic copy so a user's intervening clipboard
+    /// write cannot be mistaken for the copied selection.
+    pub(super) fn text_and_change_count() -> (i64, Option<String>) {
+        let _guard = lock();
+        autoreleasepool(|| unsafe {
+            let Ok(pb) = general_pasteboard() else {
+                return (-1, None);
+            };
+            let count: i64 = msg_send![pb, changeCount];
+            (count, pasteboard_text_locked(pb))
+        })
+    }
+
+    /// Check ownership immediately before a synthetic paste or restore.
+    pub(super) fn owns_text(change_count: i64, expected: &str) -> bool {
+        let _guard = lock();
+        autoreleasepool(|| unsafe {
+            let Ok(pb) = general_pasteboard() else {
+                return false;
+            };
+            let now: i64 = msg_send![pb, changeCount];
+            now == change_count && pasteboard_text_locked(pb).as_deref() == Some(expected)
+        })
+    }
+
     /// Current `NSPasteboard.changeCount`; bumps on every write by any process.
+    #[cfg(test)]
     pub(super) fn pasteboard_change_count() -> i64 {
         let _guard = lock();
         // SAFETY: generalPasteboard is a live singleton; changeCount returns a plain NSInteger.
@@ -603,56 +592,255 @@ mod pasteboard {
 
     /// Clear the general pasteboard and write the snapshot back, one
     /// `NSPasteboardItem` per saved item. An empty snapshot leaves it cleared.
+    unsafe fn restore_pasteboard_locked(pb: id, snap: &PasteboardSnapshot) -> Result<()> {
+        let _: i64 = msg_send![pb, clearContents];
+        if snap.items.is_empty() {
+            return Ok(());
+        }
+        let array: id = msg_send![class!(NSMutableArray), arrayWithCapacity: snap.items.len()];
+        for item in &snap.items {
+            // `new` returns +1; the array retains it in addObject:, so we release ours.
+            let pb_item: id = msg_send![class!(NSPasteboardItem), new];
+            if pb_item.is_null() {
+                bail!("NSPasteboardItem new returned nil");
+            }
+            for (ty, bytes) in item {
+                let ty_str: id = msg_send![class!(NSString), alloc];
+                // initWithBytes:length:encoding: copies the UTF-8 (NSUTF8StringEncoding = 4).
+                let ty_str: id = msg_send![ty_str,
+                    initWithBytes: ty.as_ptr() as *const c_void
+                    length: ty.len()
+                    encoding: 4u64];
+                if ty_str.is_null() {
+                    continue;
+                }
+                let data: id = msg_send![class!(NSData),
+                    dataWithBytes: bytes.as_ptr() as *const c_void
+                    length: bytes.len()];
+                let _: bool = msg_send![pb_item, setData: data forType: ty_str];
+                // setData:forType: copies the type key; drop our +1 on the NSString.
+                let _: () = msg_send![ty_str, release];
+            }
+            let _: () = msg_send![array, addObject: pb_item];
+            let _: () = msg_send![pb_item, release];
+        }
+        let ok: bool = msg_send![pb, writeObjects: array];
+        if !ok {
+            bail!("NSPasteboard writeObjects: returned NO");
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(super) fn restore_pasteboard(snap: &PasteboardSnapshot) -> Result<()> {
         let _guard = lock();
-        autoreleasepool(|| {
-            // SAFETY: every object we create is either autoreleased or released right
-            // after the pasteboard/array retains it; NSData copies our bytes on creation.
-            unsafe {
-                let pb = general_pasteboard()?;
-                let _: i64 = msg_send![pb, clearContents];
-                if snap.items.is_empty() {
-                    return Ok(());
-                }
-                let array: id =
-                    msg_send![class!(NSMutableArray), arrayWithCapacity: snap.items.len()];
-                for item in &snap.items {
-                    // `new` returns +1; the array retains it in addObject:, so we release ours.
-                    let pb_item: id = msg_send![class!(NSPasteboardItem), new];
-                    if pb_item.is_null() {
-                        bail!("NSPasteboardItem new returned nil");
-                    }
-                    for (ty, bytes) in item {
-                        let ty_str: id = msg_send![class!(NSString), alloc];
-                        // initWithBytes:length:encoding: copies the UTF-8 (NSUTF8StringEncoding = 4).
-                        let ty_str: id = msg_send![ty_str,
-                            initWithBytes: ty.as_ptr() as *const c_void
-                            length: ty.len()
-                            encoding: 4u64];
-                        if ty_str.is_null() {
-                            continue;
-                        }
-                        let data: id = msg_send![class!(NSData),
-                            dataWithBytes: bytes.as_ptr() as *const c_void
-                            length: bytes.len()];
-                        let _: bool = msg_send![pb_item, setData: data forType: ty_str];
-                        // setData:forType: copies the type key; drop our +1 on the NSString.
-                        let _: () = msg_send![ty_str, release];
-                    }
-                    let _: () = msg_send![array, addObject: pb_item];
-                    let _: () = msg_send![pb_item, release];
-                }
-                let ok: bool = msg_send![pb, writeObjects: array];
-                if !ok {
-                    bail!("NSPasteboard writeObjects: returned NO");
-                }
-                Ok(())
+        autoreleasepool(|| unsafe {
+            let pb = general_pasteboard()?;
+            restore_pasteboard_locked(pb, snap)
+        })
+    }
+
+    /// Restore only while the pasteboard is still ours. The ownership check and
+    /// restore share one lock, closing the race between two separate calls.
+    pub(super) fn restore_if_owned(
+        snap: &PasteboardSnapshot,
+        expected_change_count: i64,
+        expected_text: Option<&str>,
+    ) -> Result<bool> {
+        let _guard = lock();
+        autoreleasepool(|| unsafe {
+            let pb = general_pasteboard()?;
+            let now: i64 = msg_send![pb, changeCount];
+            if now != expected_change_count {
+                return Ok(false);
             }
+            if let Some(expected) = expected_text {
+                if pasteboard_text_locked(pb).as_deref() != Some(expected) {
+                    return Ok(false);
+                }
+            }
+            restore_pasteboard_locked(pb, snap)?;
+            Ok(true)
         })
     }
 }
 
-use pasteboard::{pasteboard_change_count, restore_pasteboard, snapshot_pasteboard};
+use pasteboard::{restore_if_owned, snapshot_pasteboard};
+
+/// An Accessibility element identity retained independently of the AX wrapper.
+///
+/// `AXUIElement` is a Core Foundation wrapper and is intentionally kept out of
+/// [`SelectionSnapshot`], which crosses async task boundaries.  We retain the
+/// underlying object while a captured selection is live and compare it to the
+/// target element immediately before a paste.
+#[derive(Debug)]
+struct CapturedElement {
+    raw: usize,
+}
+
+impl CapturedElement {
+    fn new(element: &AXUIElement) -> Self {
+        let raw = element.as_CFTypeRef();
+        // SAFETY: `raw` is a live AXUIElement retained for this identity's
+        // lifetime.  The matching CFRelease is in Drop below.
+        unsafe { core_foundation::base::CFRetain(raw) };
+        Self { raw: raw as usize }
+    }
+
+    fn matches(&self, element: &AXUIElement) -> bool {
+        if self.raw == 0 {
+            return false;
+        }
+        // SAFETY: `self.raw` is retained by this value and `element` is live
+        // for the duration of the comparison.
+        unsafe {
+            core_foundation::base::CFEqual(self.raw as CFTypeRef, element.as_CFTypeRef()) != 0
+        }
+    }
+}
+
+impl Clone for CapturedElement {
+    fn clone(&self) -> Self {
+        if self.raw != 0 {
+            // SAFETY: `raw` remains retained by the source identity while the
+            // clone acquires its own retain.
+            unsafe { core_foundation::base::CFRetain(self.raw as CFTypeRef) };
+        }
+        Self { raw: self.raw }
+    }
+}
+
+impl Drop for CapturedElement {
+    fn drop(&mut self) {
+        if self.raw != 0 {
+            // SAFETY: this is the retain acquired in `CapturedElement::new`.
+            unsafe { core_foundation::base::CFRelease(self.raw as CFTypeRef) };
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CapturedSelection {
+    pid: Option<i32>,
+    element: CapturedElement,
+    window: CapturedElement,
+    original: String,
+    range: Option<(i64, i64)>,
+}
+
+#[derive(Debug, Clone)]
+struct CapturedTarget {
+    element: CapturedElement,
+    window: CapturedElement,
+}
+
+/// Owns a pasteboard write until the target has consumed and verified it. If
+/// pre-paste validation fails, Drop restores the old multi-item pasteboard only
+/// when no newer writer has taken ownership.
+struct PasteboardOwnership {
+    snapshot: Option<pasteboard::PasteboardSnapshot>,
+    change_count: i64,
+    text: String,
+}
+
+/// Result of a fresh Cmd+C capture. The previous pasteboard is restored only
+/// after the copied text is verified against the captured AX control. If that
+/// verification fails, leaving the fresh copy in place is safer than guessing
+/// that a concurrent user copy belonged to Selara.
+struct ClipboardCapture {
+    snapshot: pasteboard::PasteboardSnapshot,
+    change_count: i64,
+    text: String,
+}
+
+impl ClipboardCapture {
+    fn restore(self) {
+        match restore_if_owned(&self.snapshot, self.change_count, Some(self.text.as_str())) {
+            Ok(true) => debug!("restored pasteboard after selection capture"),
+            Ok(false) => debug!("newer clipboard contents won; leaving pasteboard alone"),
+            Err(e) => warn!("restore pasteboard after selection capture failed ({e})"),
+        }
+    }
+}
+
+impl PasteboardOwnership {
+    fn new(snapshot: pasteboard::PasteboardSnapshot, change_count: i64, text: &str) -> Self {
+        Self {
+            snapshot: Some(snapshot),
+            change_count,
+            text: text.to_string(),
+        }
+    }
+
+    fn take(&mut self) -> Option<(pasteboard::PasteboardSnapshot, i64, String)> {
+        self.snapshot
+            .take()
+            .map(|snapshot| (snapshot, self.change_count, self.text.clone()))
+    }
+}
+
+impl Drop for PasteboardOwnership {
+    fn drop(&mut self) {
+        let Some(snapshot) = self.snapshot.take() else {
+            return;
+        };
+        match restore_if_owned(&snapshot, self.change_count, Some(self.text.as_str())) {
+            Ok(true) => debug!("restored pasteboard after refusing an unsafe paste"),
+            Ok(false) => debug!("newer clipboard contents won; leaving pasteboard alone"),
+            Err(e) => warn!("restore pasteboard after refusing paste failed ({e})"),
+        }
+    }
+}
+
+fn replacement_verified(
+    target_pid: i32,
+    identity: &CapturedTarget,
+    text: &str,
+    range: Option<(i64, i64)>,
+    before_value: Option<&str>,
+) -> bool {
+    let output_units = text.encode_utf16().count() as i64;
+    let expected_after = before_value
+        .and_then(|before| range.and_then(|range| replace_utf16_range(before, range, text)));
+    let require_full_value = before_value.is_some() && range.is_some();
+    // Some editors leave the inserted text selected, while others collapse to
+    // a caret. Poll briefly for both representations without changing the
+    // user's current selection.
+    for _ in 0..25 {
+        if frontmost_pid() != Some(target_pid) {
+            return false;
+        }
+        let live = match focused_element_for_pid(target_pid) {
+            Ok(live) if identity.element.matches(&live) => live,
+            _ => return false,
+        };
+        let _live_window = match focused_window_for_pid(target_pid) {
+            Ok(window) if identity.window.matches(&window) => window,
+            _ => return false,
+        };
+        let selected = read_ax_selected_text(&live).ok();
+        if selected.as_deref() == Some(text) {
+            if require_full_value {
+                if expected_after.as_deref() == read_ax_value_text(&live).ok().as_deref() {
+                    return true;
+                }
+            } else if let Some((location, _)) = range {
+                if read_ax_selected_range(&live) == Some((location, output_units)) {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+        }
+        if let Some(expected) = expected_after.as_deref() {
+            if read_ax_value_text(&live).ok().as_deref() == Some(expected) {
+                return true;
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
 
 fn clip_get(clip: &Mutex<Clipboard>) -> Result<Option<String>> {
     // arboard talks to the same NSPasteboard; keep it off the delayed-restore thread's toes.
@@ -672,12 +860,14 @@ fn clip_get(clip: &Mutex<Clipboard>) -> Result<Option<String>> {
 
 pub struct MacosSelection {
     clipboard: Mutex<Clipboard>,
+    captured: Mutex<Option<CapturedSelection>>,
 }
 
 impl MacosSelection {
     pub fn new() -> Result<Self> {
         Ok(Self {
             clipboard: Mutex::new(Clipboard::new().context("open clipboard")?),
+            captured: Mutex::new(None),
         })
     }
 
@@ -691,59 +881,196 @@ impl MacosSelection {
         Ok(clip_get(&self.clipboard)?.filter(|t| !t.trim().is_empty()))
     }
 
-    fn read_via_clipboard_fallback(&self) -> Result<Option<String>> {
-        let snap = snapshot_pasteboard().context("snapshot pasteboard before ⌘C")?;
-        clipboard_copy()?;
-        thread::sleep(Duration::from_millis(80));
-        let copied = clip_get(&self.clipboard)?;
-        // Put back everything that was there (all items and types), not just the text.
-        if let Err(e) = restore_pasteboard(&snap) {
-            warn!("restore pasteboard after ⌘C failed ({e})");
-        }
-        Ok(copied.filter(|t| !t.is_empty()))
+    fn remember_selection(
+        &self,
+        pid: Option<i32>,
+        element: &AXUIElement,
+        original: &str,
+        range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        let pid = pid.context("selected app has no process identifier")?;
+        let window = focused_window_for_pid(pid).context("selected app has no focused window")?;
+        let captured = CapturedSelection {
+            pid: Some(pid),
+            element: CapturedElement::new(element),
+            window: CapturedElement::new(&window),
+            original: original.to_string(),
+            range,
+        };
+        *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = Some(captured);
+        Ok(())
     }
 
-    fn replace_via_clipboard_fallback(&self, text: &str) -> Result<()> {
+    fn read_via_clipboard_fallback(&self) -> Result<Option<ClipboardCapture>> {
+        let snap = snapshot_pasteboard().context("snapshot pasteboard before ⌘C")?;
+        clipboard_copy()?;
+        thread::sleep(Duration::from_millis(30));
+        let (first_count, _) = pasteboard::text_and_change_count();
+        thread::sleep(Duration::from_millis(50));
+        // Observe the copied text and its ownership token together. A later
+        // restore is allowed only while both still describe our copy.
+        let (ours, copied) = pasteboard::text_and_change_count();
+        if ours == snap.change_count || ours != first_count {
+            return Ok(None);
+        }
+        let copied = copied.filter(|t| !t.is_empty());
+        Ok(copied.map(|text| ClipboardCapture {
+            snapshot: snap,
+            change_count: ours,
+            text,
+        }))
+    }
+
+    fn replace_via_clipboard_fallback(
+        &self,
+        target_pid: i32,
+        identity: &CapturedTarget,
+        original: &str,
+        text: &str,
+        range: Option<(i64, i64)>,
+    ) -> Result<()> {
         let snap = snapshot_pasteboard().context("snapshot pasteboard before ⌘V")?;
         // Write and read the guard in one call: `clearContents` returns the
         // changeCount it produced, so `ours` is always Selara's own write and
         // never an intervening one from another process.
         let ours =
             pasteboard::write_text(text).context("write the paste text to the pasteboard")?;
-        let written = text.to_string();
+        let mut ownership = PasteboardOwnership::new(snap, ours, text);
         // Let the pasteboard settle before synthesizing ⌘V.
         thread::sleep(Duration::from_millis(80));
+        if frontmost_pid() != Some(target_pid) {
+            bail!("the selected app is no longer frontmost; refusing to paste");
+        }
+        let current = focused_element_for_pid(target_pid)
+            .context("the selected control is no longer available")?;
+        let window = focused_window_for_pid(target_pid)
+            .context("the selected window is no longer available")?;
+        if !identity.element.matches(&current) || !identity.window.matches(&window) {
+            bail!("the selected control changed before paste");
+        }
+        self.ensure_original_selected(&current, original, range)?;
+        let before_value = read_ax_value_text(&current).ok();
+        // This check is intentionally adjacent to Cmd+V. AX validation above
+        // can block long enough for a newer user clipboard write to arrive.
+        if frontmost_pid() != Some(target_pid) {
+            bail!("the selected app is no longer frontmost; refusing to paste");
+        }
+        if !pasteboard::owns_text(ours, text) {
+            bail!("clipboard changed before paste; refusing to paste into the target");
+        }
         clipboard_paste()?;
-        // Delayed restore so the target app can consume the paste.
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(500));
-            let now = pasteboard_change_count();
-            if now != ours {
-                debug!(
-                    ours,
-                    now, "pasteboard changed since our paste; leaving it alone"
-                );
-                return;
-            }
-            // Second guard on the contents themselves, so a writer that somehow
-            // leaves the count alone still cannot have its content discarded.
-            if pasteboard::pasteboard_text().as_deref() != Some(written.as_str()) {
-                debug!("pasteboard no longer holds our paste text; leaving it alone");
-                return;
-            }
-            if let Err(e) = restore_pasteboard(&snap) {
-                warn!("restore pasteboard after ⌘V failed ({e})");
-            } else {
-                debug!(
-                    items = snap.items.len(),
-                    "restored pasteboard snapshot after paste"
-                );
-            }
-        });
+        // Keep ownership until verification. On uncertain output we leave the
+        // pasteboard untouched rather than racing a slow consumer or restoring
+        // stale content after a failed paste.
+        let Some((snap, ours, written)) = ownership.take() else {
+            bail!("pasteboard ownership was lost before paste verification");
+        };
+
+        // A paste that cannot be observed is unsafe to report as a successful
+        // replacement. The expected output range is read from AXValue so this
+        // check never steals a newer user caret by selecting the output.
+        let verified =
+            replacement_verified(target_pid, identity, text, range, before_value.as_deref());
+        if !verified {
+            bail!(
+                "paste completed but the target app did not expose the expected replacement; \
+                 refusing to repeat it"
+            );
+        }
+        match restore_if_owned(&snap, ours, Some(written.as_str())) {
+            Ok(true) => debug!(
+                items = snap.items.len(),
+                "restored pasteboard snapshot after paste"
+            ),
+            Ok(false) => debug!("pasteboard changed since our paste; leaving it alone"),
+            Err(e) => warn!("restore pasteboard after ⌘V failed ({e})"),
+        }
         Ok(())
     }
 
-    /// Replace selection in a previously focused app. Call after hiding our UI.
+    fn captured_target(
+        &self,
+        pid: Option<i32>,
+        original: &str,
+        range: Option<(i64, i64)>,
+    ) -> Result<(i32, CapturedTarget)> {
+        let captured = self.captured.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(captured) = captured.as_ref() else {
+            bail!("no selection was captured for this command");
+        };
+        let target_pid = pid
+            .or(captured.pid)
+            .context("captured selection has no process")?;
+        if captured.pid != Some(target_pid) {
+            bail!("the selected app changed before replacement");
+        }
+        if captured.original != original {
+            bail!("the selected text changed before replacement");
+        }
+        if captured.range != range {
+            bail!("the selected range changed before replacement");
+        }
+        Ok((
+            target_pid,
+            CapturedTarget {
+                element: captured.element.clone(),
+                window: captured.window.clone(),
+            },
+        ))
+    }
+
+    /// Validate the captured target before spending provider time. This only
+    /// observes the target and never replaces or recaptures its identity.
+    pub fn validate_captured_selection(
+        &self,
+        pid: Option<i32>,
+        original: &str,
+        range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        if !accessibility_trusted() {
+            bail!(
+                "Accessibility permission missing. Enable Selara (or the Terminal/binary \
+                 you launched) under System Settings → Privacy & Security → Accessibility."
+            );
+        }
+        let (target_pid, identity) = self.captured_target(pid, original, range)?;
+        if frontmost_pid() != Some(target_pid) {
+            bail!("the selected app is no longer frontmost");
+        }
+        let element = focused_element_for_pid(target_pid)
+            .context("the selected control is no longer available")?;
+        let window = focused_window_for_pid(target_pid)
+            .context("the selected window is no longer available")?;
+        if !identity.element.matches(&element) || !identity.window.matches(&window) {
+            bail!("the selected control changed before replacement");
+        }
+        self.ensure_original_selected(&element, original, range)
+    }
+
+    fn ensure_original_selected(
+        &self,
+        element: &AXUIElement,
+        original: &str,
+        range: Option<(i64, i64)>,
+    ) -> Result<()> {
+        if let Some(expected_range) = range {
+            let current_range = read_ax_selected_range(element)
+                .context("could not verify the captured selection range")?;
+            if current_range != expected_range {
+                bail!("the selected range changed before replacement");
+            }
+        }
+        let current =
+            read_ax_selected_text(element).context("could not verify the captured selection")?;
+        if current != original {
+            bail!("the selected text changed before replacement");
+        }
+        Ok(())
+    }
+
+    /// Replace selection in a previously focused app with the target app's
+    /// normal Cmd+V operation. Call after hiding our UI and reactivating the
+    /// captured target.
     pub fn replace_in_app(
         &self,
         pid: Option<i32>,
@@ -751,209 +1078,41 @@ impl MacosSelection {
         original: &str,
         range: Option<(i64, i64)>,
     ) -> Result<()> {
+        if original.is_empty() {
+            bail!("cannot replace an empty selection");
+        }
         if !accessibility_trusted() {
             bail!(
                 "Accessibility permission missing. Enable Selara (or the Terminal/binary \
                  you launched) under System Settings → Privacy & Security → Accessibility."
             );
         }
-
-        let element = match pid {
-            Some(pid) => focused_element_for_pid(pid).or_else(|_| focused_element()),
-            None => focused_element(),
-        };
-
-        if let Ok(el) = element {
-            if let Some((loc, len)) = range {
-                if let Err(e) = set_ax_selected_range(&el, loc, len) {
-                    debug!("restore AXSelectedTextRange failed ({e})");
-                } else {
-                    thread::sleep(Duration::from_millis(40));
-                }
-            }
-
-            match set_ax_selected_text(&el, text) {
-                Ok(()) => {
-                    // Many apps (Electron, browsers) report success but do nothing.
-                    let verified = read_ax_selected_text(&el)
-                        .ok()
-                        .map(|t| t == text)
-                        .unwrap_or(false);
-                    // Also treat "original selection gone / replaced" as ok when selected text
-                    // is empty after a successful set (some fields clear selection after edit).
-                    let changed_away_from_original = read_ax_selected_text(&el)
-                        .ok()
-                        .map(|t| t != original)
-                        .unwrap_or(false);
-                    if verified || changed_away_from_original {
-                        debug!(len = text.len(), "replaced selection via AX");
-                        return Ok(());
-                    }
-                    debug!("AX replace reported ok but text unchanged; using paste fallback");
-                }
-                Err(e) => debug!("AX replace failed ({e}); using clipboard paste fallback"),
-            }
+        let (target_pid, identity) = self.captured_target(pid, original, range)?;
+        if frontmost_pid() != Some(target_pid) {
+            bail!("the selected app is no longer frontmost");
         }
-
-        self.replace_via_clipboard_fallback(text)
-            .context("clipboard replace fallback")
-    }
-}
-
-impl MacosSelection {
-    /// Insert `text` right after the selection that was captured, leaving the
-    /// selection itself untouched. Call after hiding our UI and re-activating
-    /// the target app.
-    ///
-    /// With a captured `range` the caret is moved to the end of the selection
-    /// through Accessibility and the text is written there, then verified by
-    /// where the caret ended up (see `insertion_landed`) before the write is
-    /// treated as done. If the range cannot be applied, or none was captured
-    /// (clipboard fallback read the selection), a plain → key press collapses
-    /// the selection to its end and the text is pasted.
-    pub fn insert_after_selection(
-        &self,
-        pid: Option<i32>,
-        text: &str,
-        range: Option<(i64, i64)>,
-    ) -> Result<()> {
-        if !accessibility_trusted() {
-            bail!(
-                "Accessibility permission missing. Enable Selara (or the Terminal/binary \
-                 you launched) under System Settings → Privacy & Security → Accessibility."
-            );
+        let element = focused_element_for_pid(target_pid)
+            .context("the selected control is no longer available")?;
+        let window = focused_window_for_pid(target_pid)
+            .context("the selected window is no longer available")?;
+        if !identity.element.matches(&element) || !identity.window.matches(&window) {
+            bail!("the selected control changed before replacement");
         }
-
-        // True once AX has already put the caret at the end of the selection, so
-        // the paste fallback must not press → again and skip a character.
-        let mut caret_collapsed = false;
-
-        if let Some((loc, len)) = range {
-            let caret = loc + len;
-            let element = match pid {
-                Some(pid) => focused_element_for_pid(pid).or_else(|_| focused_element()),
-                None => focused_element(),
-            };
-            match element {
-                Ok(el) => match set_ax_selected_range(&el, caret, 0) {
-                    Ok(()) => {
-                        caret_collapsed = true;
-                        thread::sleep(Duration::from_millis(40));
-                        match set_ax_selected_text(&el, text) {
-                            // Verify the insertion directly. Routing this through
-                            // `replace_in_app` with an empty `original` cannot tell a
-                            // real insert from a silent no-op in a field that clears
-                            // its selection after an edit, and so pasted a second copy.
-                            Ok(()) => {
-                                let landed = insertion_landed(
-                                    read_ax_selected_text(&el).ok().as_deref(),
-                                    read_ax_selected_range(&el),
-                                    text,
-                                    caret,
-                                );
-                                if landed {
-                                    debug!(len = text.len(), "inserted after selection via AX");
-                                    return Ok(());
-                                }
-                                debug!("AX insert reported ok but the caret did not move; pasting");
-                            }
-                            Err(e) => debug!("AX insert failed ({e}); using paste fallback"),
-                        }
-                    }
-                    Err(e) => debug!("collapse selection via AX failed ({e}); using → + paste"),
-                },
-                Err(e) => debug!("no focused element for insert ({e}); using → + paste"),
-            }
+        self.ensure_original_selected(&element, original, range)?;
+        if text == original {
+            self.captured
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            return Ok(());
         }
-
-        if !caret_collapsed {
-            collapse_selection_right()?;
-        }
-        self.replace_via_clipboard_fallback(text)
-            .context("clipboard insert fallback")
-    }
-
-    /// Put `original` back where a previous Replace wrote `replacement`.
-    ///
-    /// `range` is the location of the original selection when it was captured
-    /// (from `AXSelectedTextRange`). When it is missing (the clipboard fallback
-    /// read the selection) the caret is assumed to sit right after the pasted
-    /// text, which is where ⌘V leaves it; if that assumption cannot be
-    /// verified the caller gets an error rather than a paste in the wrong place.
-    /// Where the replaced text sits: the captured range when we have one,
-    /// otherwise derived from the caret, which ⌘V leaves just after the paste.
-    fn undo_target(
-        range: Option<(i64, i64)>,
-        selection: Option<(i64, i64)>,
-        replaced_len: i64,
-    ) -> Result<(i64, i64)> {
-        if let Some((loc, _)) = range {
-            return Ok((loc, replaced_len));
-        }
-        match selection {
-            Some((loc, 0)) if loc >= replaced_len => Ok((loc - replaced_len, replaced_len)),
-            Some((loc, len)) if len == replaced_len => Ok((loc, len)),
-            other => bail!(
-                "undo: cannot locate the replaced text (selection is {other:?}); \
-                 use Undo (⌘Z) in the app instead"
-            ),
-        }
-    }
-
-    /// Put `original` back where a previous Replace wrote `replacement`.
-    ///
-    /// Undo only ever overwrites text it can prove is still its own: it acts on
-    /// the process that received the replacement (never on whatever happens to
-    /// be focused now), and it re-reads the target range and refuses unless the
-    /// contents still equal `replacement`. There is deliberately no clipboard
-    /// paste fallback here: a paste cannot be verified, and guessing would mean
-    /// overwriting text the user wrote after the replacement.
-    pub fn undo_replace(
-        &self,
-        pid: Option<i32>,
-        original: &str,
-        replacement: &str,
-        range: Option<(i64, i64)>,
-    ) -> Result<()> {
-        if !accessibility_trusted() {
-            bail!(
-                "Accessibility permission missing. Enable Selara (or the Terminal/binary \
-                 you launched) under System Settings → Privacy & Security → Accessibility."
-            );
-        }
-        // Strict: if the app that received the replacement is gone, undoing
-        // into the current frontmost app would corrupt an unrelated document.
-        let element = match pid {
-            Some(pid) => focused_element_for_pid(pid)
-                .context("undo: the app that received the replacement is no longer available")?,
-            None => focused_element().context("undo: no focused element")?,
-        };
-
-        // AX ranges are NSRange-like: UTF-16 code units.
-        let replaced_len = replacement.encode_utf16().count() as i64;
-        let (loc, len) = Self::undo_target(range, read_ax_selected_range(&element), replaced_len)?;
-        set_ax_selected_range(&element, loc, len)
-            .context("undo: cannot select the replaced text")?;
-        thread::sleep(Duration::from_millis(40));
-
-        let current = read_ax_selected_text(&element)
-            .context("undo: cannot read the text to restore over")?;
-        if current != replacement {
-            bail!(
-                "undo: the text changed since the replacement, so Selara will not \
-                 overwrite it; use Undo (⌘Z) in the app instead"
-            );
-        }
-
-        set_ax_selected_text(&element, original)
-            .context("undo: could not write the original text back")?;
-        // Some apps report success without changing anything; an emptied
-        // selection is a normal post-edit state and counts as applied.
-        let after = read_ax_selected_text(&element).unwrap_or_default();
-        if !after.is_empty() && after != original {
-            bail!("undo: the app did not accept the restored text; use Undo (⌘Z) instead");
-        }
-        debug!(len = original.len(), "restored original via AX undo");
+        self.replace_via_clipboard_fallback(target_pid, &identity, original, text, range)
+            .context("clipboard replace fallback")?;
+        self.captured
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        debug!(len = text.len(), "replaced selection via Cmd+V");
         Ok(())
     }
 }
@@ -976,13 +1135,21 @@ impl SelectionService for MacosSelection {
 
         let app_name = frontmost_app_name();
         let bundle_id = frontmost_bundle_id();
+        let pid = frontmost_pid();
+        // A failed/empty capture must never leave an earlier command's target
+        // available for a later replacement.
+        self.captured
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
 
         match focused_element() {
             Ok(el) => {
                 let range = read_ax_selected_range(&el);
                 match read_ax_selected_text(&el) {
-                    Ok(text) if !text.is_empty() => {
+                    Ok(text) if !text.is_empty() && range.is_some() => {
                         debug!(len = text.len(), "read selection via AX");
+                        self.remember_selection(pid, &el, &text, range)?;
                         return Ok(Some(SelectionSnapshot {
                             text,
                             app_name,
@@ -993,60 +1160,60 @@ impl SelectionService for MacosSelection {
                     Ok(_) => debug!("AX selected text empty; trying clipboard fallback"),
                     Err(e) => debug!("AX read failed ({e}); trying clipboard fallback"),
                 }
+
+                let capture = self
+                    .read_via_clipboard_fallback()
+                    .context("clipboard selection fallback")?;
+                if let Some(capture) = capture {
+                    let text = capture.text.clone();
+                    // The copy was fresh, and the captured control/range is the
+                    // identity used for revalidation. If the control itself
+                    // changed during Cmd+C, refuse to treat its text as a
+                    // selection.
+                    if range.is_none()
+                        || read_ax_selected_text(&el).ok().as_deref() != Some(text.as_str())
+                    {
+                        return Ok(None);
+                    }
+                    let same_target = frontmost_pid() == pid
+                        && focused_element()
+                            .ok()
+                            .map(|current| CapturedElement::new(&el).matches(&current))
+                            .unwrap_or(false);
+                    if !same_target {
+                        return Ok(None);
+                    }
+                    capture.restore();
+                    self.remember_selection(pid, &el, &text, range)?;
+                    return Ok(Some(SelectionSnapshot {
+                        text,
+                        app_name,
+                        bundle_id,
+                        range,
+                    }));
+                }
+                return Ok(None);
             }
             Err(e) => debug!("focused element unavailable ({e}); trying clipboard fallback"),
         }
-
-        let text = self
-            .read_via_clipboard_fallback()
-            .context("clipboard selection fallback")?;
-        Ok(text.map(|text| SelectionSnapshot {
-            text,
-            app_name,
-            bundle_id,
-            range: None,
-        }))
+        // Clipboard contents without a focused AX control are not a selection.
+        Ok(None)
     }
 
-    async fn replace_selection(&self, text: &str) -> Result<()> {
-        self.replace_in_app(None, text, "", None)
+    async fn replace_selection(&self, _text: &str) -> Result<()> {
+        let (pid, original, range) = {
+            let captured = self.captured.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(captured) = captured.as_ref() else {
+                bail!("replace_selection requires a captured non-empty selection");
+            };
+            (captured.pid, captured.original.clone(), captured.range)
+        };
+        self.replace_in_app(pid, _text, &original, range)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::MacosSelection;
-
-    #[test]
-    fn undo_target_prefers_the_captured_range() {
-        // The captured location wins; the length always comes from what was written.
-        let t = MacosSelection::undo_target(Some((10, 3)), Some((99, 99)), 7).unwrap();
-        assert_eq!(t, (10, 7));
-    }
-
-    #[test]
-    fn undo_target_derives_from_a_caret_after_the_paste() {
-        // ⌘V leaves the caret just past the pasted text.
-        let t = MacosSelection::undo_target(None, Some((20, 0)), 5).unwrap();
-        assert_eq!(t, (15, 5));
-    }
-
-    #[test]
-    fn undo_target_accepts_a_selection_of_the_written_length() {
-        let t = MacosSelection::undo_target(None, Some((4, 6)), 6).unwrap();
-        assert_eq!(t, (4, 6));
-    }
-
-    #[test]
-    fn undo_target_refuses_when_the_caret_moved() {
-        // Caret before the paste could even fit, a wrong-length selection, or
-        // no selection at all: all unverifiable, so refuse rather than guess.
-        assert!(MacosSelection::undo_target(None, Some((2, 0)), 5).is_err());
-        assert!(MacosSelection::undo_target(None, Some((4, 3)), 6).is_err());
-        assert!(MacosSelection::undo_target(None, None, 5).is_err());
-    }
-
-    use super::insertion_landed;
     use super::pasteboard::{
         pasteboard_change_count, pasteboard_text, restore_pasteboard, snapshot_pasteboard,
         write_text, PasteboardSnapshot,
@@ -1208,32 +1375,64 @@ mod tests {
         assert_eq!(pasteboard_text().as_deref(), Some("someone else's copy"));
     }
 
-    /// The regression this guards: a field that clears its selection after an
-    /// AX edit reports an empty selection, which the Replace heuristic reads as
-    /// "nothing happened" and follows with a ⌘V, inserting the text twice.
     #[test]
-    fn insertion_is_recognised_when_the_field_clears_its_selection() {
-        assert!(insertion_landed(Some(""), Some((17, 0)), "added", 12));
+    fn guarded_restore_preserves_a_newer_copy() {
+        let _exclusive = exclusive();
+        let original = snapshot_pasteboard().expect("initial snapshot");
+        let _guard = RestoreOnDrop(original);
+        let before = snapshot_pasteboard().expect("saved clipboard");
+        let ours = write_text("generated replacement").expect("write output");
+        assert!(super::pasteboard::owns_text(ours, "generated replacement"));
+
+        Clipboard::new()
+            .expect("open clipboard")
+            .set_text("newer user copy".to_string())
+            .expect("copy while replacement is pending");
+        assert!(!super::pasteboard::owns_text(ours, "generated replacement"));
+        assert!(
+            !super::pasteboard::restore_if_owned(&before, ours, Some("generated replacement"))
+                .expect("attempt guarded restore")
+        );
+        assert_eq!(pasteboard_text().as_deref(), Some("newer user copy"));
     }
 
     #[test]
-    fn insertion_is_recognised_when_the_field_keeps_it_selected() {
-        assert!(insertion_landed(Some("added"), Some((12, 5)), "added", 12));
+    fn guarded_restore_checks_text_and_restores_all_formats() {
+        let _exclusive = exclusive();
+        let _guard = RestoreOnDrop(snapshot_pasteboard().expect("initial snapshot"));
+        let before = PasteboardSnapshot {
+            change_count: 0,
+            items: vec![vec![
+                (TEXT_TYPE.to_string(), b"original copy".to_vec()),
+                (CUSTOM_TYPE.to_string(), CUSTOM_BYTES.to_vec()),
+            ]],
+        };
+        let ours = write_text("generated replacement").expect("write output");
+        assert!(
+            !super::pasteboard::restore_if_owned(&before, ours, Some("wrong text"))
+                .expect("reject mismatched output")
+        );
+        assert_eq!(pasteboard_text().as_deref(), Some("generated replacement"));
+        assert!(
+            super::pasteboard::restore_if_owned(&before, ours, Some("generated replacement"))
+                .expect("restore owned clipboard")
+        );
+        assert_eq!(
+            snapshot_pasteboard().expect("restored formats").items,
+            before.items
+        );
     }
 
     #[test]
-    fn a_silent_no_op_is_not_mistaken_for_an_insertion() {
-        // App reported success, wrote nothing: caret still sits at the collapse
-        // point and the selection is empty. Must fall through to the paste.
-        assert!(!insertion_landed(Some(""), Some((12, 0)), "added", 12));
-        assert!(!insertion_landed(None, Some((12, 0)), "added", 12));
-        assert!(!insertion_landed(None, None, "added", 12));
-    }
-
-    #[test]
-    fn insertion_length_is_measured_in_utf16_code_units() {
-        // "🙂" is one char but two UTF-16 code units, which is what AX ranges use.
-        assert!(insertion_landed(Some(""), Some((14, 0)), "🙂", 12));
-        assert!(!insertion_landed(Some(""), Some((13, 0)), "🙂", 12));
+    fn replacement_ranges_use_utf16_code_units() {
+        assert_eq!(
+            super::replace_utf16_range("a🙂b", (1, 2), "x").as_deref(),
+            Some("axb")
+        );
+        assert_eq!(
+            super::replace_utf16_range("foobar", (0, 6), "foo").as_deref(),
+            Some("foo")
+        );
+        assert!(super::replace_utf16_range("abc", (2, 2), "x").is_none());
     }
 }

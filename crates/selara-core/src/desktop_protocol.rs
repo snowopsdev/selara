@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +45,18 @@ pub enum ProtocolCommand {
     Quiesce,
     Resume,
     ReloadAuth,
+    /// Admit a configured command; the response acknowledges admission, not completion.
+    RunCommand {
+        command_id: String,
+        target_pid: i32,
+    },
+    CustomInstruction {
+        target_pid: i32,
+    },
+    /// The run id is the generation returned by its admission response.
+    Cancel {
+        run_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,7 +148,7 @@ mod tests {
     use super::*;
     fn request(id: &str) -> Vec<u8> {
         let mut bytes = serde_json::to_vec(&ProtocolRequest {
-            version: 1,
+            version: PROTOCOL_VERSION,
             id: id.into(),
             command: ProtocolCommand::Status,
         })
@@ -144,6 +156,28 @@ mod tests {
         bytes.push(b'\n');
         bytes
     }
+    #[test]
+    fn command_requests_keep_source_and_cancellation_scope() {
+        for command in [
+            ProtocolCommand::RunCommand {
+                command_id: "summary".into(),
+                target_pid: 123,
+            },
+            ProtocolCommand::CustomInstruction { target_pid: 123 },
+            ProtocolCommand::Cancel { run_id: 42 },
+        ] {
+            let request = ProtocolRequest {
+                version: PROTOCOL_VERSION,
+                id: "test".into(),
+                command,
+            };
+            let mut raw = serde_json::to_vec(&request).unwrap();
+            raw.push(b'\n');
+            let mut decoder = ProtocolDecoder::default();
+            assert_eq!(decoder.push(&raw).remove(0).unwrap(), request);
+        }
+    }
+
     #[test]
     fn partial_chunks_are_reassembled() {
         let raw = request("a");

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::commands::{builtin_commands, WritingCommand};
+use crate::commands::{builtin_commands, normalize_commands, WritingCommand};
 use crate::error::CoreError;
 use crate::providers::{provider_from_config, ChatGptCodexProvider, LlmProvider, ProviderKind};
 use crate::secrets;
@@ -34,24 +34,22 @@ pub enum ProviderAuth {
 
 /// Bump when a field changes meaning or a migration is needed. Files without
 /// the key are treated as version 1 (everything written before it existed).
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
-fn current_schema_version() -> u32 {
-    CURRENT_SCHEMA_VERSION
+fn default_schema_version() -> u32 {
+    // A missing key is an old file. Keep that fact visible in memory until an
+    // explicit write migrates it, so reading a config remains side-effect free.
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     /// Config file format version; see [`CURRENT_SCHEMA_VERSION`].
-    #[serde(default = "current_schema_version")]
+    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub provider: ProviderConfig,
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
-    /// Optional global shortcut that restores the text the last Replace
-    /// overwrote. Unset means no shortcut (the picker still offers a button).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub undo_hotkey: Option<String>,
     /// Preferred content/UI language code (e.g. "en", "es").
     #[serde(default = "default_language")]
     pub language: String,
@@ -92,7 +90,7 @@ pub struct ProviderConfig {
 /// can raise these or set a knob to `0` (unlimited) from Settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimitsConfig {
-    /// Soft warn in the picker above this many characters. `0` = never warn.
+    /// Soft warn before sending above this many characters. `0` = never warn.
     #[serde(default = "default_soft_warn_chars")]
     pub soft_warn_chars: u64,
     /// Hard refuse above this many characters. `0` = no hard limit.
@@ -147,8 +145,6 @@ impl Default for LimitsConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GeneralSection {
     pub hotkey: String,
-    #[serde(default)]
-    pub undo_hotkey: Option<String>,
     pub language: String,
     /// Absent (older Settings builds) leaves the list on disk untouched.
     #[serde(default)]
@@ -156,7 +152,7 @@ pub struct GeneralSection {
 }
 
 /// Whether the frontmost app matches an `excluded_apps` entry, in which case
-/// the hotkeys must not open the picker or touch the selection.
+/// the hotkeys must not touch the selection.
 ///
 /// Entries are trimmed and compared case-insensitively against both the
 /// localized app name and the bundle id. An entry ending in `*` matches any
@@ -203,7 +199,6 @@ impl Default for AppConfig {
                 codex_home: None,
             },
             hotkey: default_hotkey(),
-            undo_hotkey: None,
             language: default_language(),
             commands: builtin_commands(),
             limits: LimitsConfig::default(),
@@ -236,22 +231,24 @@ impl AppConfig {
     }
 
     pub fn load_or_init(path: &Path) -> Result<Self, CoreError> {
+        if path.exists() {
+            return load_existing(path);
+        }
+
+        // Initialization and legacy-file copying are writes, so serialize
+        // them with the same cross-process lock used by update_config. The
+        // second existence check handles another process winning the race.
+        let _lock = ConfigLock::acquire(path)?;
+        if path.exists() {
+            return load_existing(path);
+        }
         maybe_migrate_legacy_config(path)?;
         if path.exists() {
-            let raw = std::fs::read_to_string(path)?;
-            let cfg: AppConfig = toml::from_str(&raw)?;
-            // The file may hold an API key; older versions wrote it world-readable.
-            restrict_to_owner(path);
-            cfg.check_schema_version(path)?;
-            Ok(cfg)
-        } else {
-            let cfg = Self::default();
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            cfg.save(path)?;
-            Ok(cfg)
+            return load_existing(path);
         }
+        let cfg = Self::default();
+        cfg.save_unlocked(path)?;
+        Ok(cfg)
     }
 
     /// Write the config atomically: serialize to a sibling temp file created
@@ -259,10 +256,23 @@ impl AppConfig {
     /// polls the file (`selara serve`) sees either the old or the new content,
     /// never a truncated file, and the key never sits in a world-readable file.
     pub fn save(&self, path: &Path) -> Result<(), CoreError> {
+        let _lock = ConfigLock::acquire(path)?;
+        self.save_unlocked(path)
+    }
+
+    fn save_unlocked(&self, path: &Path) -> Result<(), CoreError> {
+        self.check_schema_version(path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let raw = toml::to_string_pretty(self).map_err(|e| CoreError::Config(e.to_string()))?;
+        // Any explicit write is a migration boundary. Reads preserve the
+        // source version in memory; writes emit the current schema and the
+        // normalized command representation.
+        let mut canonical = self.clone();
+        canonical.schema_version = CURRENT_SCHEMA_VERSION;
+        normalize_commands(&mut canonical.commands);
+        let raw =
+            toml::to_string_pretty(&canonical).map_err(|e| CoreError::Config(e.to_string()))?;
         let tmp = temp_sibling(path);
         let _ = std::fs::remove_file(&tmp);
         write_private(&tmp, raw.as_bytes())?;
@@ -271,6 +281,15 @@ impl AppConfig {
             return Err(e.into());
         }
         Ok(())
+    }
+
+    /// Re-read the latest config under a cross-process lock, apply a mutation,
+    /// and persist one canonical schema-2 snapshot atomically.
+    pub fn update<F>(path: &Path, update: F) -> Result<Self, CoreError>
+    where
+        F: FnOnce(&mut Self) -> Result<(), CoreError>,
+    {
+        update_config(path, update)
     }
 
     /// Replace one section of the config from JSON and leave the rest untouched.
@@ -291,10 +310,6 @@ impl AppConfig {
                 } else {
                     g.hotkey.trim().to_string()
                 };
-                self.undo_hotkey = g
-                    .undo_hotkey
-                    .map(|h| h.trim().to_string())
-                    .filter(|h| !h.is_empty());
                 self.language = if g.language.trim().is_empty() {
                     default_language()
                 } else {
@@ -309,7 +324,10 @@ impl AppConfig {
                 }
             }
             "provider" => self.provider = serde_json::from_value(value).map_err(bad)?,
-            "commands" => self.commands = serde_json::from_value(value).map_err(bad)?,
+            "commands" => {
+                self.commands = serde_json::from_value(value).map_err(bad)?;
+                normalize_commands(&mut self.commands);
+            }
             "limits" => self.limits = serde_json::from_value(value).map_err(bad)?,
             other => {
                 return Err(CoreError::Config(format!(
@@ -408,6 +426,98 @@ impl AppConfig {
             &api_key,
         ))
     }
+}
+
+fn load_existing(path: &Path) -> Result<AppConfig, CoreError> {
+    let raw = std::fs::read_to_string(path)?;
+    let mut cfg: AppConfig = toml::from_str(&raw)?;
+    // The file may hold an API key; older versions wrote it world-readable.
+    restrict_to_owner(path);
+    cfg.check_schema_version(path)?;
+    // Legacy popup commands are still accepted by serde so old config files
+    // remain readable, but the live command set has one replacement behavior.
+    normalize_commands(&mut cfg.commands);
+    Ok(cfg)
+}
+
+/// Re-read, mutate, and persist a config as one serialized read-modify-write.
+///
+/// The callback runs while a sibling lock file is held. Callers should keep it
+/// focused on config state and avoid waiting on unrelated I/O; the resulting
+/// snapshot is written atomically after it returns.
+pub fn update_config<F>(path: &Path, update: F) -> Result<AppConfig, CoreError>
+where
+    F: FnOnce(&mut AppConfig) -> Result<(), CoreError>,
+{
+    let _lock = ConfigLock::acquire(path)?;
+    maybe_migrate_legacy_config(path)?;
+    let mut cfg = if path.exists() {
+        load_existing(path)?
+    } else {
+        AppConfig::default()
+    };
+    update(&mut cfg)?;
+    cfg.schema_version = CURRENT_SCHEMA_VERSION;
+    normalize_commands(&mut cfg.commands);
+    cfg.save_unlocked(path)?;
+    Ok(cfg)
+}
+
+/// An advisory lock held by keeping the lock file open. The file itself is
+/// persistent: unlinking it on drop would let a waiting process race with a
+/// new opener and lock a different inode. The OS releases this lock when the
+/// file descriptor closes, including when the process is killed.
+struct ConfigLock {
+    _file: std::fs::File,
+}
+
+impl ConfigLock {
+    const WAIT: std::time::Duration = std::time::Duration::from_millis(10);
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+    fn acquire(config_path: &Path) -> Result<Self, CoreError> {
+        let path = lock_path(config_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let started = std::time::Instant::now();
+        loop {
+            let mut opts = std::fs::OpenOptions::new();
+            opts.read(true).write(true).create(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(&path) {
+                Ok(file) => {
+                    restrict_to_owner(&path);
+                    match file.try_lock() {
+                        Ok(()) => return Ok(Self { _file: file }),
+                        Err(std::fs::TryLockError::WouldBlock) => {
+                            if started.elapsed() >= Self::TIMEOUT {
+                                return Err(CoreError::Config(format!(
+                                    "timed out waiting for config lock {}",
+                                    path.display()
+                                )));
+                            }
+                            std::thread::sleep(Self::WAIT);
+                        }
+                        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
+fn lock_path(config_path: &Path) -> PathBuf {
+    let name = config_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".into());
+    config_path.with_file_name(format!(".{name}.lock"))
 }
 
 /// Path of the pidfile `selara serve` writes while it runs: `serve.pid` next
@@ -577,6 +687,125 @@ model = "llama3.1:8b"
         dir
     }
 
+    struct ChildGuard(std::process::Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if self.0.try_wait().unwrap().is_none() {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    fn spawn_config_lock_child(path: &Path, mode: &str, field: &str, ready: &Path) -> ChildGuard {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::tests::config_lock_child_entrypoint",
+                "--nocapture",
+            ])
+            .env("SELARA_CONFIG_LOCK_CHILD_MODE", mode)
+            .env("SELARA_CONFIG_LOCK_CHILD_PATH", path)
+            .env("SELARA_CONFIG_LOCK_CHILD_FIELD", field)
+            .env("SELARA_CONFIG_LOCK_CHILD_READY", ready)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap();
+        ChildGuard(child)
+    }
+
+    fn wait_for_child_ready(ready: &Path, children: &mut [ChildGuard]) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready.exists() {
+            for child in children.iter_mut() {
+                if let Some(status) = child.0.try_wait().unwrap() {
+                    assert!(
+                        status.success(),
+                        "config lock child exited before acquiring lock: {status}"
+                    );
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for config lock child"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Entry point used by the parent-process locking regression below. The
+    /// environment guard keeps this test inert during the normal test run.
+    #[test]
+    fn config_lock_child_entrypoint() {
+        let Some(mode) = std::env::var_os("SELARA_CONFIG_LOCK_CHILD_MODE") else {
+            return;
+        };
+        let path = PathBuf::from(std::env::var_os("SELARA_CONFIG_LOCK_CHILD_PATH").unwrap());
+        let ready = PathBuf::from(std::env::var_os("SELARA_CONFIG_LOCK_CHILD_READY").unwrap());
+        match mode.to_string_lossy().as_ref() {
+            "hold" => {
+                let _lock = ConfigLock::acquire(&path).unwrap();
+                std::fs::write(ready, b"ready").unwrap();
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+            "update" => {
+                let field = std::env::var("SELARA_CONFIG_LOCK_CHILD_FIELD").unwrap();
+                AppConfig::update(&path, |cfg| {
+                    std::fs::write(&ready, b"ready").unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    match field.as_str() {
+                        "language" => cfg.language = "child-language".into(),
+                        "hotkey" => cfg.hotkey = "child-hotkey".into(),
+                        other => panic!("unknown child field {other}"),
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            }
+            other => panic!("unknown config lock child mode {other}"),
+        }
+    }
+
+    #[test]
+    fn config_lock_serializes_child_updates_and_recovers_after_kill() {
+        let dir = scratch_dir("config-lock-processes");
+        let path = dir.join("config.toml");
+        AppConfig::default().save(&path).unwrap();
+
+        let ready_language = dir.join("language.ready");
+        let ready_hotkey = dir.join("hotkey.ready");
+        let mut children = vec![
+            spawn_config_lock_child(&path, "update", "language", &ready_language),
+            spawn_config_lock_child(&path, "update", "hotkey", &ready_hotkey),
+        ];
+        wait_for_child_ready(&ready_language, &mut children);
+        wait_for_child_ready(&ready_hotkey, &mut children);
+        for child in &mut children {
+            assert!(child.0.wait().unwrap().success());
+        }
+
+        let cfg = AppConfig::load_or_init(&path).unwrap();
+        assert_eq!(cfg.language, "child-language");
+        assert_eq!(cfg.hotkey, "child-hotkey");
+
+        let ready_hold = dir.join("hold.ready");
+        let mut holder = spawn_config_lock_child(&path, "hold", "", &ready_hold);
+        wait_for_child_ready(&ready_hold, std::slice::from_mut(&mut holder));
+        holder.0.kill().unwrap();
+        let _ = holder.0.wait();
+
+        let recovered = AppConfig::update(&path, |cfg| {
+            cfg.language = "after-kill".into();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(recovered.language, "after-kill");
+        assert!(dir.join(".config.toml.lock").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn serve_pidfile_is_sibling_of_config() {
         let cfg = Path::new("/home/me/.config/selara/config.toml");
@@ -592,7 +821,7 @@ model = "llama3.1:8b"
     }
 
     #[test]
-    fn schema_version_defaults_to_one_and_is_written() {
+    fn versionless_config_defaults_to_one_and_explicit_save_migrates() {
         let raw = r#"
 [provider]
 kind = "open_ai_compatible"
@@ -603,6 +832,67 @@ model = "gpt-4o-mini"
         assert_eq!(cfg.schema_version, 1);
         let out = toml::to_string_pretty(&cfg).unwrap();
         assert!(out.contains("schema_version = 1"), "{out}");
+
+        let dir = scratch_dir("schema-migrate");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, raw).unwrap();
+        let loaded = AppConfig::load_or_init(&path).unwrap();
+        assert_eq!(loaded.schema_version, 1, "read normalization is in-memory");
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("schema_version"));
+        loaded.save(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("schema_version = 2"), "{saved}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loading_legacy_popup_commands_normalizes_in_memory_without_rewriting() {
+        let dir = scratch_dir("popup-migrate");
+        let path = dir.join("config.toml");
+        let raw = r#"
+[provider]
+kind = "open_ai_compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+
+[[commands]]
+id = "summary"
+label = "Summary"
+kind = "popup"
+prompt = "Summarize in markdown."
+"#;
+        std::fs::write(&path, raw).unwrap();
+        let cfg = AppConfig::load_or_init(&path).unwrap();
+        assert_eq!(cfg.schema_version, 1);
+        assert_eq!(cfg.commands[0].kind, crate::commands::CommandKind::Replace);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_config_rereads_under_lock_and_emits_schema_two() {
+        let dir = scratch_dir("update-config");
+        let path = dir.join("config.toml");
+        let first = update_config(&path, |cfg| {
+            cfg.language = "fr".into();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(first.schema_version, CURRENT_SCHEMA_VERSION);
+        let second = AppConfig::update(&path, |cfg| {
+            assert_eq!(cfg.language, "fr");
+            cfg.hotkey = "option+space".into();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(second.hotkey, "option+space");
+        assert_eq!(second.language, "fr");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("schema_version = 2"), "{saved}");
+        assert!(dir.join(".config.toml.lock").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -663,14 +953,15 @@ model = "gpt-4o-mini"
         cfg.language = "fr".into();
         cfg.save(&path).unwrap();
 
-        let entries: Vec<String> = std::fs::read_dir(&dir)
+        let mut entries: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
+        entries.sort();
         assert_eq!(
             entries,
-            vec!["config.toml"],
-            "no temp file may be left behind"
+            vec![".config.toml.lock", "config.toml"],
+            "only the persistent lock and config may remain"
         );
         assert_eq!(AppConfig::load_or_init(&path).unwrap().language, "fr");
 
@@ -709,7 +1000,6 @@ model = "gpt-4o-mini"
         )
         .unwrap();
         assert_eq!(cfg.hotkey, "option+space");
-        assert_eq!(cfg.undo_hotkey, None);
         assert_eq!(cfg.language, "en", "blank language falls back to default");
         assert_eq!(cfg.limits.hard_max_chars, 42, "other sections untouched");
 
@@ -719,7 +1009,6 @@ model = "gpt-4o-mini"
         )
         .unwrap();
         assert_eq!(cfg.hotkey, "ctrl+shift+space", "blank hotkey falls back");
-        assert_eq!(cfg.undo_hotkey.as_deref(), Some("ctrl+shift+z"));
         assert!(
             cfg.excluded_apps.is_empty(),
             "general save without excluded_apps leaves the list alone"
@@ -826,7 +1115,7 @@ model = "llama3.1:8b"
     }
 
     #[test]
-    fn undo_hotkey_is_optional_and_round_trips() {
+    fn legacy_undo_hotkey_is_accepted_but_ignored() {
         let without = r#"
 [provider]
 kind = "open_ai_compatible"
@@ -834,7 +1123,6 @@ base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 "#;
         let cfg: AppConfig = toml::from_str(without).unwrap();
-        assert_eq!(cfg.undo_hotkey, None);
         let raw = toml::to_string_pretty(&cfg).unwrap();
         assert!(
             !raw.contains("undo_hotkey"),
@@ -843,10 +1131,13 @@ model = "gpt-4o-mini"
 
         let with = format!("undo_hotkey = \"ctrl+shift+z\"\n{without}");
         let cfg: AppConfig = toml::from_str(&with).unwrap();
-        assert_eq!(cfg.undo_hotkey.as_deref(), Some("ctrl+shift+z"));
         let raw = toml::to_string_pretty(&cfg).unwrap();
         let back: AppConfig = toml::from_str(&raw).unwrap();
-        assert_eq!(back.undo_hotkey.as_deref(), Some("ctrl+shift+z"));
+        assert_eq!(back.schema_version, 1);
+        assert!(
+            !raw.contains("undo_hotkey"),
+            "legacy key must not be written: {raw}"
+        );
     }
 
     #[test]
