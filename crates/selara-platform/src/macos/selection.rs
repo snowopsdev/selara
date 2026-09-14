@@ -203,7 +203,8 @@ pub fn frontmost_pid() -> Option<i32> {
 }
 
 /// Re-activate another app so selection/paste targets it, not Selara's UI.
-pub fn activate_pid(pid: i32) -> Result<()> {
+/// Request activation without blocking the AppKit event loop.
+pub fn request_activate_pid(pid: i32) -> Result<()> {
     unsafe {
         let app: cocoa::base::id =
             msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid];
@@ -216,7 +217,13 @@ pub fn activate_pid(pid: i32) -> Result<()> {
             warn!("activateWithOptions returned false for pid {pid}");
         }
     }
-    // Activation is async; give the target time to become key.
+    Ok(())
+}
+
+pub fn activate_pid(pid: i32) -> Result<()> {
+    request_activate_pid(pid)?;
+    // Blocking compatibility path; UI callers should use request_activate_pid
+    // and observe activation on subsequent frames instead.
     thread::sleep(Duration::from_millis(220));
     Ok(())
 }

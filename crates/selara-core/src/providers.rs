@@ -294,15 +294,23 @@ pub enum ProviderKind {
     /// OpenRouter: OpenAI-compatible wire format at `https://openrouter.ai/api/v1`.
     OpenRouter,
     Anthropic,
+    ClaudeCli,
+    CursorCli,
+    OpenCodeCli,
 }
 
 impl ProviderKind {
+    pub fn is_cli(self) -> bool {
+        matches!(self, Self::ClaudeCli | Self::CursorCli | Self::OpenCodeCli)
+    }
+
     /// Base URL used when the config leaves `base_url` empty.
     pub fn default_base_url(self) -> &'static str {
         match self {
             ProviderKind::OpenAiCompatible => "https://api.openai.com/v1",
             ProviderKind::OpenRouter => "https://openrouter.ai/api/v1",
             ProviderKind::Anthropic => "https://api.anthropic.com",
+            ProviderKind::ClaudeCli | ProviderKind::CursorCli | ProviderKind::OpenCodeCli => "",
         }
     }
 
@@ -998,6 +1006,9 @@ pub fn provider_from_config(
             model: model.to_string(),
             base_url,
         }),
+        ProviderKind::ClaudeCli | ProviderKind::CursorCli | ProviderKind::OpenCodeCli => Box::new(
+            crate::cli_provider::CliProvider::new(kind, model.to_string(), None),
+        ),
     }
 }
 
@@ -1015,9 +1026,15 @@ pub async fn list_provider_models(
     base_url: &str,
     api_key: &str,
 ) -> Result<Vec<String>, CoreError> {
+    if kind.is_cli() {
+        return Err(CoreError::Provider("Choose a model in the CLI provider settings; API model listing is unavailable for CLI connections.".into()));
+    }
     let base = kind.resolve_base_url(base_url);
     let client = http_client()?;
     let mut models = match kind {
+        ProviderKind::ClaudeCli | ProviderKind::CursorCli | ProviderKind::OpenCodeCli => {
+            unreachable!()
+        }
         ProviderKind::OpenAiCompatible | ProviderKind::OpenRouter => {
             let mut builder = client.get(format!("{base}/models"));
             if !api_key.is_empty() {

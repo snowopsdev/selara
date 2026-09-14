@@ -1,4 +1,4 @@
-//! Append-only history of the transformations `selara serve` applied, so a
+//! Append-only history of the transformations `selara serve` generated, so a
 //! result (or the text it replaced) can be copied back later from Settings.
 //!
 //! One JSON object per line in `history.jsonl` next to the config file. The
@@ -7,7 +7,7 @@
 //! that many lines.
 
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::commands::CommandKind;
@@ -16,6 +16,15 @@ use crate::error::CoreError;
 /// Retention limit: the file never holds more than this many entries once an
 /// append has finished, which is the last-50 limit Settings advertises.
 pub const MAX_ENTRIES: usize = 50;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplacementOutcome {
+    #[default]
+    Applied,
+    NotApplied,
+    PasteUnverified,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
@@ -30,6 +39,52 @@ pub struct HistoryEntry {
     pub original: String,
     /// What the model produced (and what was written back, for Replace).
     pub result: String,
+    /// Older entries were only recorded after a verified replacement.
+    #[serde(default)]
+    pub outcome: ReplacementOutcome,
+}
+
+/// One logical append, retained across I/O retries. Identical completed runs
+/// still get separate appends; only retries of this operation skip the write.
+pub struct PendingEntry {
+    entry: HistoryEntry,
+    written: bool,
+}
+
+impl PendingEntry {
+    pub fn new(entry: HistoryEntry) -> Self {
+        Self {
+            entry,
+            written: false,
+        }
+    }
+
+    pub fn save(&mut self, path: &Path) -> Result<(), CoreError> {
+        if !self.written {
+            let line = serde_json::to_string(&self.entry)
+                .map_err(|e| CoreError::Config(format!("history entry: {e}")))?;
+            let mut file = open_append(path).map_err(io_err)?;
+            // Recover a partial record from an earlier failed write.
+            if file.metadata().map_err(io_err)?.len() > 0 {
+                file.seek(SeekFrom::End(-1)).map_err(io_err)?;
+                let mut last = [0];
+                file.read_exact(&mut last).map_err(io_err)?;
+                if last[0] != b'\n' {
+                    file.write_all(b"\n").map_err(io_err)?;
+                }
+            }
+            file.write_all(line.as_bytes()).map_err(io_err)?;
+            // A complete JSON record is readable even if its trailing newline
+            // or retention fails. Retrying must not append it a second time.
+            self.written = true;
+            file.write_all(b"\n").map_err(io_err)?;
+        }
+        let lines = read_lines(path).map_err(io_err)?;
+        if lines.len() > MAX_ENTRIES {
+            rewrite(path, &lines[lines.len() - MAX_ENTRIES..]).map_err(io_err)?;
+        }
+        Ok(())
+    }
 }
 
 /// `history.jsonl` beside the config file.
@@ -43,7 +98,7 @@ fn io_err(e: std::io::Error) -> CoreError {
 
 fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
-    opts.append(true).create(true);
+    opts.read(true).append(true).create(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -97,8 +152,12 @@ fn read_lines(path: &Path) -> std::io::Result<Vec<String>> {
         Err(e) => return Err(e),
     };
     let mut out = Vec::new();
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line?;
+    for line in std::io::BufReader::new(file).split(b'\n') {
+        // A short write may end inside a UTF-8 character. Skip that damaged
+        // record just like malformed JSON rather than hiding later results.
+        let Ok(line) = String::from_utf8(line?) else {
+            continue;
+        };
         if !line.trim().is_empty() {
             out.push(line);
         }
@@ -109,19 +168,7 @@ fn read_lines(path: &Path) -> std::io::Result<Vec<String>> {
 /// Append one entry as a JSON line, then trim the file back to the newest
 /// [`MAX_ENTRIES`] as soon as it holds more than that.
 pub fn append(path: &Path, entry: &HistoryEntry) -> Result<(), CoreError> {
-    let line = serde_json::to_string(entry)
-        .map_err(|e| CoreError::Config(format!("history entry: {e}")))?;
-    {
-        let mut file = open_append(path).map_err(io_err)?;
-        file.write_all(line.as_bytes()).map_err(io_err)?;
-        file.write_all(b"\n").map_err(io_err)?;
-    }
-    let lines = read_lines(path).map_err(io_err)?;
-    if lines.len() > MAX_ENTRIES {
-        let keep = &lines[lines.len() - MAX_ENTRIES..];
-        rewrite(path, keep).map_err(io_err)?;
-    }
-    Ok(())
+    PendingEntry::new(entry.clone()).save(path)
 }
 
 /// Every readable entry, newest first. Lines that fail to parse are skipped
@@ -162,6 +209,7 @@ mod tests {
             app: Some("Notes".into()),
             original: format!("orig {i}"),
             result: format!("result {i}"),
+            outcome: ReplacementOutcome::Applied,
         }
     }
 
@@ -184,6 +232,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         TempDir(dir)
+    }
+
+    #[test]
+    fn outcome_round_trips_and_old_entries_default_to_applied() {
+        let mut saved = entry(1);
+        let mut old = serde_json::to_value(&saved).unwrap();
+        old.as_object_mut().unwrap().remove("outcome");
+        assert_eq!(serde_json::from_value::<HistoryEntry>(old).unwrap(), saved);
+        let dir = temp_dir();
+        let path = dir.path().join("history.jsonl");
+        for outcome in [
+            ReplacementOutcome::NotApplied,
+            ReplacementOutcome::PasteUnverified,
+        ] {
+            saved.outcome = outcome;
+            append(&path, &saved).unwrap();
+            assert_eq!(load(&path).unwrap()[0], saved);
+        }
     }
 
     #[test]
@@ -218,6 +284,43 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "history must be owner-only, got {mode:o}");
         }
+    }
+
+    #[test]
+    fn identical_runs_are_distinct_but_retries_do_not_duplicate_them() {
+        let dir = temp_dir();
+        let path = dir.path().join("history.jsonl");
+        let saved = entry(1);
+        let mut first = PendingEntry::new(saved.clone());
+        first.save(&path).unwrap();
+        first.save(&path).unwrap();
+        let mut second = PendingEntry::new(saved.clone());
+        second.save(&path).unwrap();
+        second.save(&path).unwrap();
+        assert_eq!(load(&path).unwrap(), vec![saved.clone(), saved]);
+    }
+
+    #[test]
+    fn retention_failure_retries_without_appending_a_second_record() {
+        let dir = temp_dir();
+        let path = dir.path().join("history.jsonl");
+        for i in 0..MAX_ENTRIES {
+            append(&path, &entry(i as u64)).unwrap();
+        }
+        // A directory at the retention staging path makes its open fail after
+        // the new record has been appended, without relying on disk capacity.
+        let staging = path.with_file_name(format!(".history.jsonl.tmp-{}", std::process::id()));
+        std::fs::create_dir(&staging).unwrap();
+        let saved = entry(MAX_ENTRIES as u64);
+        let mut pending = PendingEntry::new(saved.clone());
+        assert!(pending.save(&path).is_err());
+        assert_eq!(load(&path).unwrap().len(), MAX_ENTRIES + 1);
+        std::fs::remove_dir(staging).unwrap();
+        pending.save(&path).unwrap();
+        let got = load(&path).unwrap();
+        assert_eq!(got.len(), MAX_ENTRIES);
+        assert_eq!(got.iter().filter(|e| **e == saved).count(), 1);
+        assert_eq!(got.last(), Some(&entry(1)));
     }
 
     #[test]
@@ -275,6 +378,21 @@ mod tests {
         assert!(!path.exists());
         clear(&path).unwrap();
         assert!(load(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn retry_after_partial_write_preserves_the_completed_result() {
+        let dir = temp_dir();
+        let path = dir.path().join("history.jsonl");
+        append(&path, &entry(1)).unwrap();
+        open_append(&path)
+            .unwrap()
+            .write_all(b"{\"result\":\"\xe2")
+            .unwrap();
+        let mut recovered = entry(2);
+        recovered.outcome = ReplacementOutcome::NotApplied;
+        append(&path, &recovered).unwrap();
+        assert_eq!(load(&path).unwrap(), vec![recovered, entry(1)]);
     }
 
     #[test]

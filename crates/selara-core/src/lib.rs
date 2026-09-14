@@ -2,6 +2,7 @@
 //! No OS UI or accessibility APIs live here.
 
 pub mod app_server;
+pub mod cli_provider;
 pub mod codex_cli;
 pub mod commands;
 pub mod config;

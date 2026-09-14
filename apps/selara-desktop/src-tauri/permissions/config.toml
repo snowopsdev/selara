@@ -14,6 +14,11 @@ description = "Save one section of the Selara config, leaving the rest as on dis
 commands.allow = ["save_config_section"]
 
 [[permission]]
+identifier = "allow-set-shortcut-recording"
+description = "Temporarily suspend Selara shortcuts while the Settings window records a key combination"
+commands.allow = ["set_shortcut_recording"]
+
+[[permission]]
 identifier = "allow-api-key-source"
 description = "Report where the provider API key comes from (never the key itself)"
 commands.allow = ["api_key_source"]
@@ -132,6 +137,16 @@ commands.allow = ["serve_supervisor_status"]
 identifier = "allow-app-version"
 description = "Read the running app's version"
 commands.allow = ["app_version"]
+
+[[permission]]
+identifier = "allow-bundled-codex-version"
+description = "Read the version metadata for Selara's bundled writing runtime"
+commands.allow = ["bundled_codex_version"]
+
+[[permission]]
+identifier = "allow-cli-provider-status"
+description = "Inspect an external provider executable with its version flag"
+commands.allow = ["cli_provider_status"]
 
 [[permission]]
 identifier = "allow-check-for-updates"

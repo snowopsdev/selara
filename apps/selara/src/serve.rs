@@ -20,31 +20,103 @@ use selara_core::desktop_protocol::{
     ServeStatus, PROTOCOL_VERSION,
 };
 use selara_core::guard::{provider_is_hosted, scan_secrets, SecretHit, SecretKind};
-use selara_core::history::{self, HistoryEntry};
+use selara_core::history::{self, HistoryEntry, ReplacementOutcome};
 use selara_platform::macos::{
     accessibility_trusted, activate_pid, frontmost_app_name, frontmost_bundle_id, frontmost_pid,
-    mouse_location, prompt_accessibility, screen_visible_frame_at, HotkeyAction, MacosHotkey,
-    MacosSelection,
+    mouse_location, prompt_accessibility, request_activate_pid, screen_visible_frame_at,
+    HotkeyAction, MacosHotkey, MacosSelection,
 };
 use selara_platform::SelectionService;
 
 const DIALOG_SIZE: (f32, f32) = (400.0, 280.0);
 const CURSOR_OFFSET: f64 = 12.0;
+const SHORTCUT_RECORDING_LEASE: Duration = Duration::from_secs(3);
+const SHORTCUT_RECORDING_REPAINT: Duration = Duration::from_millis(100);
+const HOTKEY_RESTORE_RETRY: Duration = Duration::from_millis(250);
+const MAX_SHORTCUT_RECORDING_SESSION_BYTES: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShortcutRecordingLease {
+    session_id: String,
+    owner_pid: i32,
+    deadline: Instant,
+}
+
+impl ShortcutRecordingLease {
+    fn new(session_id: String, owner_pid: i32, now: Instant) -> Self {
+        Self {
+            session_id,
+            owner_pid,
+            deadline: now + SHORTCUT_RECORDING_LEASE,
+        }
+    }
+
+    fn renew(&mut self, now: Instant) {
+        self.deadline = now + SHORTCUT_RECORDING_LEASE;
+    }
+
+    fn expired(&self, now: Instant, owner_alive: bool, owner_focused: bool) -> bool {
+        now >= self.deadline || !owner_alive || !owner_focused
+    }
+}
+
+fn validate_shortcut_recording_request(session_id: &str, owner_pid: i32) -> Result<(), String> {
+    if session_id.trim().is_empty() || session_id.len() > MAX_SHORTCUT_RECORDING_SESSION_BYTES {
+        return Err("Invalid shortcut recording session".into());
+    }
+    if owner_pid <= 0 {
+        return Err("Invalid shortcut recording owner".into());
+    }
+    Ok(())
+}
 
 #[derive(Debug)]
 enum JobResult {
     Delta { generation: u64, text: String },
     Success { generation: u64, text: String },
     Error { generation: u64, message: String },
+    Cancelled { generation: u64 },
 }
 impl JobResult {
     fn generation(&self) -> u64 {
         match self {
             Self::Delta { generation, .. }
             | Self::Success { generation, .. }
-            | Self::Error { generation, .. } => *generation,
+            | Self::Error { generation, .. }
+            | Self::Cancelled { generation } => *generation,
         }
     }
+}
+
+/// Keep the worker abortable, and report its termination only after its future
+/// has been dropped. Quiesce must still wait for subprocess cleanup on cancel.
+fn spawn_job(
+    runtime: &tokio::runtime::Handle,
+    generation: u64,
+    tx: Sender<JobResult>,
+    wake: egui::Context,
+    work: impl std::future::Future<Output = Result<String, String>> + Send + 'static,
+) -> tokio::task::AbortHandle {
+    let worker = runtime.spawn(work);
+    let abort = worker.abort_handle();
+    runtime.spawn(async move {
+        let job = match worker.await {
+            Ok(Ok(text)) => JobResult::Success { generation, text },
+            Ok(Err(message)) => JobResult::Error {
+                generation,
+                message,
+            },
+            Err(error) if error.is_cancelled() => JobResult::Cancelled { generation },
+            Err(_) => JobResult::Error {
+                generation,
+                message: "The writing task stopped unexpectedly. Your selection was not changed."
+                    .into(),
+            },
+        };
+        let _ = tx.send(job);
+        wake.request_repaint();
+    });
+    abort
 }
 fn should_apply_job(job: u64, current: u64, waiting: bool) -> bool {
     waiting && job == current
@@ -259,18 +331,45 @@ fn replace_progress(partial: &str) -> String {
     )
 }
 
+/// A completed rewrite saved for recovery in History, without interrupting the source app.
+struct PendingReplacement {
+    text: String,
+    message: String,
+    outcome: ReplacementOutcome,
+}
+
+fn apply_verified_replacement(
+    text: String,
+    verify: impl FnOnce() -> anyhow::Result<()>,
+    paste: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> Result<(), PendingReplacement> {
+    if let Err(error) = verify() {
+        return Err(PendingReplacement {
+            text,
+            message: format!("Your rewrite is ready, but the original selection is not ready for replacement. {error:#}"),
+            outcome: ReplacementOutcome::NotApplied,
+        });
+    }
+    paste(&text).map_err(|error| PendingReplacement {
+        text,
+        message: format!("The paste could not be verified. Check the source before copying this rewrite. {error:#}"),
+        outcome: ReplacementOutcome::PasteUnverified,
+    })
+}
+
 enum UiPhase {
     Hidden,
     Instruction,
     Confirm,
     Working { label: String, partial: String },
+    Restoring { text: String, deadline: Instant },
     Error { message: String },
 }
 impl UiPhase {
     fn is_active(&self) -> bool {
         matches!(
             self,
-            Self::Instruction | Self::Confirm | Self::Working { .. }
+            Self::Instruction | Self::Confirm | Self::Working { .. } | Self::Restoring { .. }
         )
     }
 }
@@ -341,15 +440,24 @@ struct ServeApp {
     last_command: Option<WritingCommand>,
     job_rx: Receiver<JobResult>,
     job_tx: Sender<JobResult>,
+    active_job: Option<(u64, tokio::task::AbortHandle)>,
     runtime: tokio::runtime::Runtime,
     instruction: String,
     focus_instruction: bool,
     instruction_history: VecDeque<String>,
     history_cursor: Option<usize>,
+    unsaved_history: VecDeque<history::PendingEntry>,
+    last_history_retry: Instant,
     notice: String,
     protocol: Option<Receiver<ProtocolInput>>,
     gate: WorkGate,
     pending_quiesce: Vec<String>,
+    shortcut_recording: Option<ShortcutRecordingLease>,
+    hotkey_restore_pending: bool,
+    hotkey_registration_needed: bool,
+    hotkey_restore_error: Option<String>,
+    last_hotkey_restore_attempt: Instant,
+    last_hotkey_restore_log: Option<Instant>,
     last_protocol_status: Option<ServeStatus>,
     last_protocol_emit: Instant,
     protocol_output: Option<Arc<std::sync::Mutex<std::io::BufWriter<std::io::Stdout>>>>,
@@ -401,7 +509,7 @@ impl ServeApp {
         let egui_ctx = cc.egui_ctx.clone();
         let wake = egui_ctx.clone();
         hotkey.set_wake(move || wake.request_repaint());
-        Self::register_hotkeys(&hotkey, &config)?;
+        let pending_hotkeys = Self::register_hotkeys(&hotkey, &config)?;
         let config_mtime = std::fs::metadata(&config_path)
             .and_then(|m| m.modified())
             .ok();
@@ -439,15 +547,24 @@ impl ServeApp {
             last_command: None,
             job_rx,
             job_tx,
+            active_job: None,
             runtime,
             instruction: String::new(),
             focus_instruction: false,
             instruction_history: VecDeque::new(),
             history_cursor: None,
+            unsaved_history: VecDeque::new(),
+            last_history_retry: Instant::now(),
             notice: String::new(),
             protocol: None,
             gate: WorkGate::default(),
             pending_quiesce: Vec::new(),
+            shortcut_recording: None,
+            hotkey_restore_pending: pending_hotkeys != 0,
+            hotkey_registration_needed: false,
+            hotkey_restore_error: None,
+            last_hotkey_restore_attempt: Instant::now(),
+            last_hotkey_restore_log: None,
             last_protocol_status: None,
             last_protocol_emit: Instant::now(),
             protocol_output: None,
@@ -520,6 +637,150 @@ impl ServeApp {
         });
     }
 
+    fn shortcut_actions_blocked(&self) -> bool {
+        self.shortcut_recording.is_some()
+    }
+
+    /// Restore the registrations after a recording lease ends. Native hotkey
+    /// registration can fail transiently while macOS is changing focus, so a
+    /// failed attempt remains pending and is retried from the UI loop.
+    fn restore_hotkeys(&mut self, force: bool) -> Result<(), String> {
+        if self.shortcut_recording.is_some() || !self.hotkey_restore_pending {
+            return Ok(());
+        }
+        if !force && self.last_hotkey_restore_attempt.elapsed() < HOTKEY_RESTORE_RETRY {
+            return Ok(());
+        }
+        self.last_hotkey_restore_attempt = Instant::now();
+        let result = if self.hotkey_registration_needed {
+            Self::register_hotkeys(&self.hotkey, &self.config).inspect(|_| {
+                // A manager now exists, even if some individual bindings need
+                // another attempt. Keep its successful registrations alive.
+                self.hotkey_registration_needed = false;
+            })
+        } else {
+            self.hotkey.retry_pending()
+        };
+        match result.and_then(|pending| {
+            if pending == 0 {
+                Ok(())
+            } else {
+                anyhow::bail!("{pending} shortcut registration(s) still pending")
+            }
+        }) {
+            Ok(()) => {
+                if self.hotkey_restore_error.is_some() {
+                    tracing::info!("selara: restored native hotkeys after retry");
+                }
+                self.hotkey_restore_pending = false;
+                self.hotkey_restore_error = None;
+                self.last_hotkey_restore_log = None;
+                Ok(())
+            }
+            Err(error) => {
+                let message = format!("Hotkey restore failed: {error}");
+                let log_again = self
+                    .last_hotkey_restore_log
+                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(5));
+                if log_again {
+                    tracing::error!(
+                        error = %error,
+                        "selara: some native hotkeys remain unavailable and will be retried"
+                    );
+                    self.last_hotkey_restore_log = Some(Instant::now());
+                }
+                self.hotkey_restore_pending = true;
+                self.hotkey_restore_error = Some(message.clone());
+                Err(message)
+            }
+        }
+    }
+
+    fn expire_shortcut_recording(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        let expired = self.shortcut_recording.as_ref().is_some_and(|lease| {
+            lease.expired(
+                now,
+                pid_alive(lease.owner_pid),
+                frontmost_pid() == Some(lease.owner_pid),
+            )
+        });
+        if !expired {
+            return;
+        }
+        if let Some(lease) = self.shortcut_recording.take() {
+            tracing::warn!(
+                session_id = %lease.session_id,
+                owner_pid = lease.owner_pid,
+                "selara: shortcut recording lease expired; restoring native hotkeys"
+            );
+        }
+        self.hotkey_restore_pending = true;
+        self.hotkey_registration_needed = true;
+        let _ = self.restore_hotkeys(true);
+        ctx.request_repaint();
+    }
+
+    fn set_shortcut_recording(
+        &mut self,
+        ctx: &egui::Context,
+        session_id: String,
+        active: bool,
+        owner_pid: i32,
+    ) -> Result<(), String> {
+        if active {
+            validate_shortcut_recording_request(&session_id, owner_pid)?;
+            self.expire_shortcut_recording(ctx);
+
+            if self.gate.quiescing {
+                return Err("The writing service is paused".into());
+            }
+            if self.gate.active != 0 || self.phase.is_active() {
+                return Err("Finish active work before recording a shortcut".into());
+            }
+            if frontmost_pid() != Some(owner_pid) || !pid_alive(owner_pid) {
+                return Err("Keep Settings focused while recording a shortcut".into());
+            }
+            if let Some(lease) = self.shortcut_recording.as_mut() {
+                if lease.session_id != session_id {
+                    return Err("Another shortcut is being recorded".into());
+                }
+                if lease.owner_pid != owner_pid {
+                    return Err("The shortcut recording owner changed".into());
+                }
+                lease.renew(Instant::now());
+                return Ok(());
+            }
+
+            // Suspending also clears pending native registrations. Recording
+            // remains available so users can fix a conflicting shortcut.
+            self.hotkey.suspend();
+            self.pending_direct = None;
+            self.shortcut_recording = Some(ShortcutRecordingLease::new(
+                session_id,
+                owner_pid,
+                Instant::now(),
+            ));
+            Ok(())
+        } else {
+            let owns_lease = self
+                .shortcut_recording
+                .as_ref()
+                .is_some_and(|lease| lease.session_id == session_id);
+            if owns_lease {
+                self.shortcut_recording = None;
+                self.hotkey_restore_pending = true;
+                self.hotkey_registration_needed = true;
+                self.restore_hotkeys(true)
+            } else {
+                // A stale cleanup request must not release a newer lease. If
+                // there is no lease, it is still useful for it to trigger a
+                // pending restoration left by an earlier timeout.
+                self.restore_hotkeys(true)
+            }
+        }
+    }
+
     fn poll_protocol(&mut self, ctx: &egui::Context) {
         let frames: Vec<_> = self
             .protocol
@@ -575,6 +836,15 @@ impl ServeApp {
                     }
                     ProtocolCommand::Status => {}
                     ProtocolCommand::RequestPermission => prompt_accessibility(),
+                    ProtocolCommand::SetShortcutRecording {
+                        session_id,
+                        active,
+                        owner_pid,
+                    } => {
+                        error = self
+                            .set_shortcut_recording(ctx, session_id, active, owner_pid)
+                            .err();
+                    }
                     ProtocolCommand::Quiesce => {
                         self.gate.quiesce();
                         self.hide(ctx);
@@ -654,23 +924,14 @@ impl ServeApp {
         ctx.request_repaint_after(Duration::from_secs(1));
     }
 
-    fn position_near_cursor(&self, ctx: &egui::Context) -> Option<egui::Pos2> {
+    fn position_near_cursor(&self, size: (f32, f32)) -> Option<egui::Pos2> {
         let cursor = mouse_location()?;
         let visible = screen_visible_frame_at(cursor.0, cursor.1)?;
-        // No OS decorations, so the outer size is the inner size. Prefer the
-        // live size in case the user resized the window.
-        let size = ctx
-            .input(|i| {
-                i.viewport()
-                    .outer_rect
-                    .map(|r| (f64::from(r.width()), f64::from(r.height())))
-            })
-            .unwrap_or((f64::from(DIALOG_SIZE.0), f64::from(DIALOG_SIZE.1)));
-        let (x, y) = place_near(cursor, size, visible);
+        let (x, y) = place_near(cursor, (f64::from(size.0), f64::from(size.1)), visible);
         Some(egui::pos2(x as f32, y as f32))
     }
 
-    fn register_hotkeys(hotkey: &MacosHotkey, config: &AppConfig) -> Result<()> {
+    fn register_hotkeys(hotkey: &MacosHotkey, config: &AppConfig) -> Result<usize> {
         let cmd_keys: Vec<(String, String)> = config
             .commands
             .iter()
@@ -690,8 +951,7 @@ impl ServeApp {
         for (id, spec) in &cmd_keys {
             tracing::info!("selara:   command `{id}` → `{spec}`");
         }
-        hotkey.reregister_all(&config.hotkey, &cmd_keys)?;
-        Ok(())
+        hotkey.reregister_all(&config.hotkey, &cmd_keys)
     }
 
     /// Reload when the watcher flagged a change, or every 5 s as a fallback.
@@ -718,13 +978,25 @@ impl ServeApp {
         // config edit is invalid. Report the reload error once the run ends.
         self.config_mtime = Some(mtime);
         match AppConfig::load_or_init(&self.config_path) {
-            Ok(cfg) => match Self::register_hotkeys(&self.hotkey, &cfg) {
-                Ok(()) => {
-                    self.config = cfg;
+            Ok(cfg) => {
+                // Keep the latest config visible immediately, but do not
+                // re-register while Settings owns the native shortcut lease.
+                // Its release path will register this current configuration.
+                self.config = cfg;
+                self.hotkey_restore_pending = true;
+                self.hotkey_registration_needed = true;
+                if self.shortcut_recording.is_some() {
+                    tracing::info!(
+                        "selara: config changed during shortcut recording; deferring hotkey registration"
+                    );
                     self.reload_error = None;
+                } else {
+                    match self.restore_hotkeys(true) {
+                        Ok(()) => self.reload_error = None,
+                        Err(error) => self.reload_error = Some(error),
+                    }
                 }
-                Err(e) => self.reload_error = Some(format!("Hotkey reload failed: {e}")),
-            },
+            }
             Err(e) => self.reload_error = Some(format!("Config reload failed: {e}")),
         }
     }
@@ -762,7 +1034,7 @@ impl ServeApp {
             && self.provider_hosted()
     }
 
-    fn record_history(&self, result: &str) {
+    fn record_history(&mut self, result: &str, outcome: ReplacementOutcome) {
         let Some(cmd) = self.last_command.as_ref() else {
             return;
         };
@@ -778,10 +1050,25 @@ impl ServeApp {
             app: self.captured_app.clone(),
             original: self.captured_text.clone(),
             result: result.to_string(),
+            outcome,
         };
+        self.unsaved_history
+            .push_back(history::PendingEntry::new(entry));
+        self.flush_history();
+    }
+
+    fn flush_history(&mut self) {
+        self.last_history_retry = Instant::now();
         let path = history::history_path(&self.config_path);
-        if let Err(e) = history::append(&path, &entry) {
-            tracing::warn!("history: could not append to {}: {e}", path.display());
+        while let Some(entry) = self.unsaved_history.front_mut() {
+            if let Err(e) = entry.save(&path) {
+                tracing::warn!(
+                    "history: retaining unsaved result in memory; could not append to {}: {e}",
+                    path.display()
+                );
+                break;
+            }
+            self.unsaved_history.pop_front();
         }
     }
 
@@ -796,17 +1083,16 @@ impl ServeApp {
     }
 
     fn show_dialog(&self, ctx: &egui::Context) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-            DIALOG_SIZE.0,
-            DIALOG_SIZE.1,
-        )));
-        if let Some(pos) = self.position_near_cursor(ctx) {
+        let size = DIALOG_SIZE;
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(size.0, size.1)));
+        if let Some(pos) = self.position_near_cursor(size) {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
         self.show_window(ctx, true);
     }
 
     fn fail(&mut self, ctx: &egui::Context, message: String) {
+        self.cancel_active_job();
         let _ = self.hotkey.set_cancel_enabled(false);
         self.progress.hide();
         self.pending_direct = None;
@@ -815,12 +1101,27 @@ impl ServeApp {
     }
 
     fn hide(&mut self, ctx: &egui::Context) {
+        self.finish_run(ctx, false);
+    }
+
+    fn finish_run(&mut self, ctx: &egui::Context, succeeded: bool) {
+        self.cancel_active_job();
         self.generation += 1;
-        self.progress.hide();
+        if succeeded {
+            self.progress.succeed();
+        } else {
+            self.progress.hide();
+        }
         self.pending_direct = None;
         self.phase = UiPhase::Hidden;
         let _ = self.hotkey.set_cancel_enabled(false);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    fn cancel_active_job(&mut self) {
+        if let Some((_, task)) = self.active_job.take() {
+            task.abort();
+        }
     }
 
     /// Capture before any Selara window becomes key. A tray request must still
@@ -831,6 +1132,13 @@ impl ServeApp {
         command_id: Option<&str>,
         target: Option<i32>,
     ) -> Result<(), String> {
+        if self.shortcut_actions_blocked() {
+            return Err(if self.shortcut_recording.is_some() {
+                "Finish recording the shortcut before running a command".into()
+            } else {
+                "Native shortcuts are still being restored; try again shortly".into()
+            });
+        }
         if self.gate.quiescing {
             return Err("The writing service is paused".into());
         }
@@ -875,6 +1183,7 @@ impl ServeApp {
         }
         self.hide(ctx);
         self.target_pid = Some(target);
+        self.progress.capture_anchor(self.target_pid);
         self.request_config = self.config.clone();
         self.soft_warn_acked = false;
         self.secret_guard_acked = false;
@@ -954,8 +1263,27 @@ impl ServeApp {
         command: WritingCommand,
         origin: CommandOrigin,
     ) -> Result<(), String> {
+        if self.shortcut_actions_blocked() {
+            return Err(if self.shortcut_recording.is_some() {
+                "Finish recording the shortcut before running a command".into()
+            } else {
+                "Native shortcuts are still being restored; try again shortly".into()
+            });
+        }
         if self.gate.quiescing {
             return Err("The writing service is paused".into());
+        }
+        // A dialog can outlive a settings edit. Keep its frozen model/prompt,
+        // but honour disabling the selected connection before admitting work.
+        self.maybe_reload_config();
+        if !self
+            .config
+            .connection_is_enabled(&self.request_config.provider)
+        {
+            return Err(
+                "This provider is disabled. Enable it in Providers and run the command again."
+                    .into(),
+            );
         }
         self.return_to_source(ctx)?;
         // Revalidate before transmitting too: dismissing a dialog must not
@@ -986,73 +1314,115 @@ impl ServeApp {
         let generation = self.generation;
         let tx = self.job_tx.clone();
         let wake = ctx.clone();
-        self.runtime.spawn(async move {
-            let result = async {
-                let provider = cfg.build_provider_for(&command)?;
-                let delta_tx = tx.clone();
-                let delta_wake = wake.clone();
-                let mut on_delta = move |text: &str| {
-                    let _ = delta_tx.send(JobResult::Delta {
-                        generation,
-                        text: text.into(),
-                    });
-                    delta_wake.request_repaint();
-                };
-                run_command_stream(
-                    provider.as_ref(),
-                    &command,
-                    &input,
-                    None,
-                    PromptVars {
-                        language: Some(&cfg.language),
-                        app: app_name.as_deref(),
-                    },
-                    &mut on_delta,
-                )
-                .await
-            }
-            .await;
-            let job = match result {
-                Ok(text) => JobResult::Success { generation, text },
-                Err(e) => JobResult::Error {
-                    generation,
-                    message: e.to_string(),
-                },
-            };
-            let _ = tx.send(job);
-            wake.request_repaint();
-        });
+        let abort = spawn_job(
+            self.runtime.handle(),
+            generation,
+            tx.clone(),
+            wake.clone(),
+            async move {
+                let result = async {
+                    let provider = cfg.build_provider_for(&command)?;
+                    let delta_tx = tx.clone();
+                    let delta_wake = wake.clone();
+                    let mut on_delta = move |text: &str| {
+                        let _ = delta_tx.send(JobResult::Delta {
+                            generation,
+                            text: text.into(),
+                        });
+                        delta_wake.request_repaint();
+                    };
+                    run_command_stream(
+                        provider.as_ref(),
+                        &command,
+                        &input,
+                        None,
+                        PromptVars {
+                            language: Some(&cfg.language),
+                            app: app_name.as_deref(),
+                        },
+                        &mut on_delta,
+                    )
+                    .await
+                }
+                .await;
+                result.map_err(|e: selara_core::error::CoreError| e.to_string())
+            },
+        );
+        self.active_job = Some((generation, abort));
         Ok(())
     }
 
     fn apply_job(&mut self, ctx: &egui::Context, job: JobResult) {
         match job {
             JobResult::Delta { text, .. } => {
-                if let UiPhase::Working { label, partial } = &mut self.phase {
+                if let UiPhase::Working { partial, .. } = &mut self.phase {
                     partial.push_str(&text);
-                    self.progress.update(label, partial.chars().count());
                 }
             }
             JobResult::Error { message, .. } => self.fail(ctx, message),
+            JobResult::Cancelled { .. } => self.hide(ctx),
             JobResult::Success { text, .. } => {
-                let result = if text.trim().is_empty() {
-                    Err(anyhow::anyhow!(
-                        "The provider returned no text. Your selection was not changed."
-                    ))
+                if text.trim().is_empty() {
+                    self.fail(
+                        ctx,
+                        "The provider returned no text. Your selection was not changed.".into(),
+                    );
                 } else {
-                    self.selection.replace_in_app(
-                        self.target_pid,
-                        &text,
-                        &self.captured_text,
-                        self.captured_range,
-                    )
-                };
-                match result {
-                    Ok(()) => { self.record_history(&text); self.hide(ctx); }
-                    Err(e) => self.fail(ctx, format!("Replacement could not be verified: {e}\nNo automatic retry was attempted.")),
+                    self.apply_completed_rewrite(ctx, text);
                 }
             }
         }
+    }
+
+    fn apply_completed_rewrite(&mut self, ctx: &egui::Context, text: String) {
+        if frontmost_pid() == Some(std::process::id() as i32) {
+            // Hiding a winit window is deferred until the end of this frame.
+            // Do not block AppKit while waiting for the source to activate.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            let _ = self.hotkey.set_cancel_enabled(true);
+            self.phase = UiPhase::Restoring {
+                text,
+                deadline: Instant::now() + Duration::from_secs(2),
+            };
+            if let Some(pid) = self.target_pid {
+                let _ = request_activate_pid(pid);
+            }
+            ctx.request_repaint_after(Duration::from_millis(16));
+            return;
+        }
+        let result = apply_verified_replacement(
+            text.clone(),
+            || {
+                self.selection.validate_captured_selection(
+                    self.target_pid,
+                    &self.captured_text,
+                    self.captured_range,
+                )
+            },
+            |text| {
+                self.selection.replace_in_app(
+                    self.target_pid,
+                    text,
+                    &self.captured_text,
+                    self.captured_range,
+                )
+            },
+        );
+        match result {
+            Ok(()) => {
+                self.record_history(&text, ReplacementOutcome::Applied);
+                self.finish_run(ctx, true);
+            }
+            Err(pending) => {
+                self.finish_unapplied_rewrite(ctx, pending);
+            }
+        }
+    }
+
+    fn finish_unapplied_rewrite(&mut self, ctx: &egui::Context, pending: PendingReplacement) {
+        self.record_history(&pending.text, pending.outcome);
+        tracing::warn!("Replacement incomplete: {}", pending.message);
+        self.hide(ctx);
     }
 
     fn save_instruction(&mut self) {
@@ -1080,13 +1450,18 @@ impl ServeApp {
 }
 impl eframe::App for ServeApp {
     fn on_exit(&mut self) {
-        let _ = self.hotkey.set_cancel_enabled(false);
+        self.cancel_active_job();
+        self.flush_history();
+        self.hotkey.suspend();
         let _ = self.runtime.block_on(selara_core::app_server::reset());
         remove_pidfile(&self.pidfile);
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if matches!(self.phase, UiPhase::Hidden | UiPhase::Working { .. }) {
+        if matches!(
+            self.phase,
+            UiPhase::Hidden | UiPhase::Working { .. } | UiPhase::Restoring { .. }
+        ) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         if self.progress.take_cancelled() {
@@ -1094,8 +1469,20 @@ impl eframe::App for ServeApp {
         }
         self.hotkey.poll();
         self.poll_config();
+        if !self.unsaved_history.is_empty()
+            && self.last_history_retry.elapsed() >= Duration::from_secs(5)
+        {
+            self.flush_history();
+        }
         self.poll_protocol(ctx);
-        if let Some(action) = self.hotkey.take_pending() {
+        self.expire_shortcut_recording(ctx);
+        let _ = self.restore_hotkeys(false);
+        if self.shortcut_actions_blocked() {
+            // `suspend` normally clears this queue synchronously. Drain once
+            // more here so an event queued before the protocol frame cannot
+            // run after recording began or while restoration is incomplete.
+            let _ = self.hotkey.take_pending();
+        } else if let Some(action) = self.hotkey.take_pending() {
             if !self.gate.quiescing {
                 let result = match action {
                     HotkeyAction::CustomInstruction => self.begin_run(ctx, None, None),
@@ -1110,9 +1497,39 @@ impl eframe::App for ServeApp {
                 }
             }
         }
+        if !self.gate.quiescing {
+            if let UiPhase::Restoring { deadline, .. } = &self.phase {
+                let restored = frontmost_pid() == self.target_pid && self.target_pid.is_some();
+                if restored || Instant::now() >= *deadline {
+                    if let UiPhase::Restoring { text, .. } =
+                        std::mem::replace(&mut self.phase, UiPhase::Hidden)
+                    {
+                        if restored {
+                            self.apply_completed_rewrite(ctx, text);
+                        } else {
+                            self.finish_unapplied_rewrite(
+                                ctx,
+                                PendingReplacement {
+                                    text,
+                                    message: "The source app could not receive focus.".into(),
+                                    outcome: ReplacementOutcome::NotApplied,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
         while let Ok(job) = self.job_rx.try_recv() {
             if !matches!(&job, JobResult::Delta { .. }) {
                 self.gate.finish();
+                if self
+                    .active_job
+                    .as_ref()
+                    .is_some_and(|(generation, _)| *generation == job.generation())
+                {
+                    self.active_job = None;
+                }
             }
             let waiting = matches!(self.phase, UiPhase::Working { .. });
             if !self.gate.quiescing && should_apply_job(job.generation(), self.generation, waiting)
@@ -1126,15 +1543,22 @@ impl eframe::App for ServeApp {
             }
         }
         self.finish_protocol_frame(ctx);
-        ctx.request_repaint_after(if matches!(self.phase, UiPhase::Working { .. }) {
-            Duration::from_millis(50)
-        } else {
-            Duration::from_secs(1)
-        });
+        ctx.request_repaint_after(
+            if self.shortcut_recording.is_some() || self.hotkey_restore_pending {
+                SHORTCUT_RECORDING_REPAINT
+            } else if matches!(self.phase, UiPhase::Restoring { .. }) {
+                Duration::from_millis(16)
+            } else if matches!(self.phase, UiPhase::Working { .. }) {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_secs(1)
+            },
+        );
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.gate.quiescing || matches!(self.phase, UiPhase::Hidden) {
+        if self.gate.quiescing || matches!(self.phase, UiPhase::Hidden | UiPhase::Restoring { .. })
+        {
             return;
         }
         let ctx = ui.ctx().clone();
@@ -1238,7 +1662,7 @@ impl eframe::App for ServeApp {
                 ui.label(message);
                 dismiss = ui.button("Close").clicked();
             }
-            UiPhase::Hidden => {}
+            UiPhase::Hidden | UiPhase::Restoring { .. } => {}
         }
         if dismiss {
             self.hide(&ctx);
@@ -1450,11 +1874,12 @@ mod tests {
     use super::{
         adhoc_command, can_cancel, command_from_instruction, format_thousands, history_step,
         instruction_label, place_near, push_history, remove_pidfile, replace_progress,
-        secret_banner, selected_text, should_apply_job, slugify, unique_command_id, write_pidfile,
-        HISTORY_CAP,
+        secret_banner, selected_text, should_apply_job, slugify, unique_command_id,
+        validate_shortcut_recording_request, write_pidfile, ShortcutRecordingLease, HISTORY_CAP,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
 
     /// A fresh directory per call, so the pidfile tests never share a path.
     fn scratch_dir(name: &str) -> PathBuf {
@@ -1478,6 +1903,92 @@ mod tests {
     const SIZE: (f64, f64) = (380.0, 440.0);
     /// 1920×1080 display with a 25 pt menu bar and a 70 pt Dock, top-left origin.
     const VISIBLE: (f64, f64, f64, f64) = (0.0, 25.0, 1920.0, 985.0);
+
+    #[test]
+    fn shortcut_recording_lease_renews_for_three_seconds() {
+        let now = Instant::now();
+        let mut lease = ShortcutRecordingLease::new("session".into(), 123, now);
+        let first_deadline = lease.deadline;
+        assert_eq!(lease.session_id, "session");
+        assert_eq!(lease.owner_pid, 123);
+        assert!(!lease.expired(now + Duration::from_secs(2), true, true));
+        assert!(lease.expired(now + Duration::from_secs(3), true, true));
+
+        lease.renew(now + Duration::from_secs(2));
+        assert!(lease.deadline > first_deadline);
+        assert!(!lease.expired(now + Duration::from_secs(4), true, true));
+    }
+
+    #[test]
+    fn shortcut_recording_validation_rejects_empty_oversized_and_dead_owners() {
+        assert!(validate_shortcut_recording_request("session", 123).is_ok());
+        assert!(validate_shortcut_recording_request("", 123).is_err());
+        assert!(validate_shortcut_recording_request("  \n", 123).is_err());
+        assert!(validate_shortcut_recording_request(&"x".repeat(129), 123).is_err());
+        assert!(validate_shortcut_recording_request("session", 0).is_err());
+        assert!(validate_shortcut_recording_request("session", -1).is_err());
+    }
+
+    #[test]
+    fn shortcut_recording_lease_expiry_also_covers_focus_and_process_loss() {
+        let now = Instant::now();
+        let lease = ShortcutRecordingLease::new("session".into(), 123, now);
+        assert!(lease.expired(now + Duration::from_millis(1), false, true));
+        assert!(lease.expired(now + Duration::from_millis(1), true, false));
+        assert!(!lease.expired(now + Duration::from_millis(1), true, true));
+    }
+
+    #[test]
+    fn completed_rewrite_survives_focus_loss_without_attempting_paste() {
+        let failure = super::apply_verified_replacement(
+            "Completed rewrite".into(),
+            || anyhow::bail!("the selected app is no longer frontmost"),
+            |_| panic!("must not paste while focus is elsewhere"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            failure.outcome,
+            selara_core::history::ReplacementOutcome::NotApplied
+        );
+        assert_eq!(failure.text, "Completed rewrite");
+        assert!(failure.message.contains("no longer frontmost"));
+        let mut pasted = String::new();
+        assert!(super::apply_verified_replacement(
+            failure.text,
+            || Ok(()),
+            |text| {
+                pasted = text.into();
+                Ok(())
+            },
+        )
+        .is_ok());
+        assert_eq!(pasted, "Completed rewrite");
+    }
+
+    #[test]
+    fn changed_selection_blocks_retry_and_uncertain_paste_cannot_be_retried() {
+        let failure = super::apply_verified_replacement(
+            "Completed rewrite".into(),
+            || anyhow::bail!("the selected control changed before replacement"),
+            |_| panic!("must not paste into a changed selection"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(failure.text, "Completed rewrite");
+        let failure = super::apply_verified_replacement(
+            failure.text,
+            || Ok(()),
+            |_| anyhow::bail!("paste verification failed"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            failure.outcome,
+            selara_core::history::ReplacementOutcome::PasteUnverified
+        );
+        assert_eq!(failure.text, "Completed rewrite");
+    }
 
     #[test]
     fn place_near_offsets_from_the_cursor_when_there_is_room() {
@@ -1741,7 +2252,106 @@ mod tests {
 }
 #[cfg(test)]
 mod work_gate_tests {
-    use super::WorkGate;
+    use super::{spawn_job, JobResult, WorkGate};
+
+    #[test]
+    fn cancelled_cli_job_stops_its_process_group_before_quiesce_completes() {
+        use selara_core::providers::{CompletionRequest, LlmProvider, ProviderKind};
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(std::env::temp_dir().join(format!(
+            "selara-job-cancel-{}-{}", std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        )));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let binary = dir.0.join("provider");
+        std::fs::write(&binary, "#!/bin/sh\nfixture_dir=$(dirname \"$0\")\ncat >/dev/null\n(sleep 0.5; touch \"$fixture_dir/leaked\") &\nprintf ready > \"$fixture_dir/started\"\nwait\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut gate = WorkGate::default();
+        assert!(gate.admit());
+        let task = spawn_job(
+            runtime.handle(),
+            7,
+            tx,
+            eframe::egui::Context::default(),
+            async move {
+                let provider = selara_core::cli_provider::CliProvider::new(
+                    ProviderKind::ClaudeCli,
+                    String::new(),
+                    Some(binary),
+                );
+                provider
+                    .complete(CompletionRequest {
+                        system: "Rewrite".into(),
+                        user: "Fixture text".into(),
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !dir.0.join("started").exists() {
+            assert!(Instant::now() < deadline, "fixture CLI must start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        gate.quiesce();
+        task.abort();
+        assert!(
+            !gate.pause_if_idle(),
+            "abort request alone is not cleanup completion"
+        );
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            JobResult::Cancelled { generation: 7 }
+        ));
+        gate.finish();
+        assert!(gate.pause_if_idle());
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one terminal event releases the worker"
+        );
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            !dir.0.join("leaked").exists(),
+            "the CLI's descendants must stop on cancellation"
+        );
+    }
+
+    #[test]
+    fn cancelling_before_first_poll_still_reports_worker_completion() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let task = spawn_job(
+            runtime.handle(),
+            8,
+            tx,
+            eframe::egui::Context::default(),
+            std::future::pending(),
+        );
+        task.abort();
+        runtime.block_on(async {
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+        });
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            JobResult::Cancelled { generation: 8 }
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn pause_waits_for_every_worker_even_after_ui_dismissal() {
         let mut gate = WorkGate::default();

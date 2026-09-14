@@ -15,6 +15,9 @@ pub fn keychain_account(kind: ProviderKind) -> &'static str {
         ProviderKind::OpenAiCompatible => "open_ai_compatible",
         ProviderKind::OpenRouter => "open_router",
         ProviderKind::Anthropic => "anthropic",
+        ProviderKind::ClaudeCli => "claude_cli",
+        ProviderKind::CursorCli => "cursor_cli",
+        ProviderKind::OpenCodeCli => "open_code_cli",
     }
 }
 
