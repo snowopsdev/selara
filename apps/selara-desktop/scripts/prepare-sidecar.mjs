@@ -58,3 +58,4 @@ mkdirSync(notices, { recursive: true });
 for (const suffix of ["LICENSE", "NOTICE", "provenance.json"]) {
   copyFileSync(join(repoRoot, `target/selara-codex.${suffix}`), join(notices, `selara-codex.${suffix}`));
 }
+copyFileSync(join(repoRoot, "vendor/thinking-orbs/LICENSE"), join(notices, "thinking-orbs.LICENSE"));

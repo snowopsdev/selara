@@ -64,6 +64,7 @@ if (present.has(cli)) {
     const directory = join(output, basename(cli, ".tar.gz"));
     mkdirSync(directory, { recursive: true });
     for (const [from, name] of [["target/release/selara", "selara"], ["target/selara-codex", "selara-codex"], ["README.md", "README.md"], ["LICENSE", "LICENSE"], ...["LICENSE", "NOTICE", "provenance.json"].map(s => [`target/selara-codex.${s}`, `selara-codex.${s}`])]) copyFileSync(join(root, from), join(directory, name));
+    copyFileSync(join(root, "vendor/thinking-orbs/LICENSE"), join(directory, "thinking-orbs.LICENSE"));
     for (const name of ["selara", "selara-codex"]) {
       run("codesign", ["--force", "--options", "runtime", "--timestamp", "--identifier", `dev.snowops.selara.${name}`, "--sign", settings.environment.APPLE_SIGNING_IDENTITY, "--keychain", keychain, join(directory, name)]);
       run("codesign", ["--verify", "--strict", join(directory, name)]);

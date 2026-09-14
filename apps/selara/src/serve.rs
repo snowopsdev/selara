@@ -1126,6 +1126,9 @@ impl eframe::App for ServeApp {
             }
         }
         self.finish_protocol_frame(ctx);
+        if matches!(self.phase, UiPhase::Working { .. }) {
+            self.progress.animate();
+        }
         ctx.request_repaint_after(if matches!(self.phase, UiPhase::Working { .. }) {
             Duration::from_millis(50)
         } else {

@@ -7,6 +7,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use cocoa::base::{id, nil};
 use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
@@ -14,11 +15,64 @@ use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 
+#[path = "progress/orb.rs"]
+mod orb;
+
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {
+    static NSAppearanceNameAqua: id;
+    static NSAppearanceNameDarkAqua: id;
+}
+
 pub struct ProgressPanel {
     panel: id,
+    orb: id,
     label: id,
     target: id,
     cancelled: Arc<AtomicBool>,
+}
+
+extern "C" fn draw_orb(view: &Object, _: Sel, _: NSRect) {
+    // SAFETY: AppKit draws this view on the main thread, with a graphics
+    // context and the view's effective appearance already installed.
+    unsafe {
+        let time = *view.get_ivar::<f64>("orbTime");
+        let appearance: id = msg_send![view, effectiveAppearance];
+        let names = [NSAppearanceNameAqua, NSAppearanceNameDarkAqua];
+        let names: id =
+            msg_send![class!(NSArray), arrayWithObjects: names.as_ptr() count: names.len()];
+        let best: id = msg_send![appearance, bestMatchFromAppearancesWithNames: names];
+        let dark: bool = msg_send![best, isEqualToString: NSAppearanceNameDarkAqua];
+        for dot in orb::working_frame(time) {
+            let white = if dark { 1.0 - dot.white } else { dot.white };
+            let color: id = msg_send![class!(NSColor), colorWithSRGBRed: white green: white blue: white alpha: dot.alpha];
+            let _: () = msg_send![color, setFill];
+            // The upstream canvas has a top-left origin; AppKit is bottom-up.
+            let rect = NSRect::new(
+                NSPoint::new(dot.x - dot.radius, 64.0 - dot.y - dot.radius),
+                NSSize::new(dot.radius * 2.0, dot.radius * 2.0),
+            );
+            let path: id = msg_send![class!(NSBezierPath), bezierPathWithOvalInRect: rect];
+            let _: () = msg_send![path, fill];
+        }
+    }
+}
+
+fn orb_class() -> &'static Class {
+    static CLASS: OnceLock<&'static Class> = OnceLock::new();
+    CLASS.get_or_init(|| {
+        let mut class = ClassDecl::new("SelaraWorkingOrbView", class!(NSView))
+            .expect("unique working orb view class");
+        class.add_ivar::<f64>("orbTime");
+        // SAFETY: drawRect: has the NSView callback signature shown here.
+        unsafe {
+            class.add_method(
+                sel!(drawRect:),
+                draw_orb as extern "C" fn(&Object, Sel, NSRect),
+            );
+        }
+        class.register()
+    })
 }
 
 extern "C" fn cancel(target: &Object, _: Sel, _: id) {
@@ -70,8 +124,14 @@ impl ProgressPanel {
             let _: () = msg_send![panel, setTitle: title];
             let _: () = msg_send![title, release];
             let content: id = msg_send![panel, contentView];
+            let orb: id = msg_send![orb_class(), alloc];
+            let orb: id = msg_send![orb, initWithFrame: NSRect::new(NSPoint::new(12.0, 34.0), NSSize::new(64.0, 64.0))];
+            // The adjacent text conveys progress to VoiceOver; the orb is decorative.
+            let _: () = msg_send![orb, setAccessibilityElement: false];
+            let _: () = msg_send![content, addSubview: orb];
+            let _: () = msg_send![orb, release];
             let label: id = msg_send![class!(NSTextField), alloc];
-            let label: id = msg_send![label, initWithFrame: NSRect::new(NSPoint::new(16.0, 52.0), NSSize::new(308.0, 44.0))];
+            let label: id = msg_send![label, initWithFrame: NSRect::new(NSPoint::new(88.0, 46.0), NSSize::new(236.0, 50.0))];
             let _: () = msg_send![label, setEditable: false];
             let _: () = msg_send![label, setSelectable: false];
             let _: () = msg_send![label, setBezeled: false];
@@ -95,6 +155,7 @@ impl ProgressPanel {
             let _: () = msg_send![button, release];
             Self {
                 panel,
+                orb,
                 label,
                 target,
                 cancelled,
@@ -130,6 +191,31 @@ impl ProgressPanel {
                 }
             }
             let _: () = msg_send![self.panel, orderFrontRegardless];
+        }
+        self.animate();
+    }
+
+    /// Driven by the existing main-thread working-state refresh, with no timer
+    /// to retain the panel or continue running after it is hidden.
+    pub fn animate(&self) {
+        static CLOCK: OnceLock<Instant> = OnceLock::new();
+        unsafe {
+            let visible: bool = msg_send![self.panel, isVisible];
+            if !visible {
+                return;
+            }
+            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let reduced: bool = msg_send![workspace, accessibilityDisplayShouldReduceMotion];
+            let time = if reduced {
+                // Match the component's representative reduced-motion frame.
+                0.6 / 1.885
+            } else {
+                CLOCK.get_or_init(Instant::now).elapsed().as_secs_f64()
+            };
+            if *(*self.orb).get_ivar::<f64>("orbTime") != time {
+                (*self.orb).set_ivar("orbTime", time);
+                let _: () = msg_send![self.orb, setNeedsDisplay: true];
+            }
         }
     }
 
