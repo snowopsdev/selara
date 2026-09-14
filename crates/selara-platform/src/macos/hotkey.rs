@@ -3,7 +3,9 @@ use async_trait::async_trait;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use tracing::warn;
 
 use crate::HotkeyService;
 
@@ -132,12 +134,12 @@ fn key_token(token: &str) -> Option<Code> {
 /// What a registered global hotkey should do when pressed.
 #[derive(Debug, Clone)]
 pub enum HotkeyAction {
-    /// Open the command picker.
-    Picker,
+    /// Open the custom-instruction dialog.
+    CustomInstruction,
     /// Run this command id directly.
     Command(String),
-    /// Restore the text the last Replace overwrote.
-    Undo,
+    /// Cancel the active command when Escape cancellation is enabled.
+    Cancel,
 }
 
 struct SharedHotkeys {
@@ -145,6 +147,7 @@ struct SharedHotkeys {
     by_id: Mutex<HashMap<u32, HotkeyAction>>,
     pending: Mutex<Option<HotkeyAction>>,
     wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    cancel_enabled: AtomicBool,
 }
 
 impl SharedHotkeys {
@@ -161,6 +164,9 @@ impl SharedHotkeys {
         let Some(action) = action else {
             return;
         };
+        if matches!(action, HotkeyAction::Cancel) && !self.cancel_enabled.load(Ordering::Acquire) {
+            return;
+        }
         *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(action);
         if let Some(w) = self.wake.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             w();
@@ -177,6 +183,7 @@ fn shared() -> Arc<SharedHotkeys> {
                 by_id: Mutex::new(HashMap::new()),
                 pending: Mutex::new(None),
                 wake: Mutex::new(None),
+                cancel_enabled: AtomicBool::new(false),
             });
             let s2 = s.clone();
             GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
@@ -187,7 +194,7 @@ fn shared() -> Arc<SharedHotkeys> {
         .clone()
 }
 
-/// Global hotkey hub. Supports picker + many per-command bindings; call
+/// Global hotkey hub. Supports custom-instruction + many per-command bindings; call
 /// [`MacosHotkey::reregister_all`] when config changes.
 pub struct MacosHotkey {
     manager: Mutex<Option<GlobalHotKeyManager>>,
@@ -207,7 +214,7 @@ impl MacosHotkey {
         *self.shared.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(wake));
     }
 
-    /// Take a pending action (picker or command id), if any.
+    /// Take a pending custom-instruction, command, or cancellation action.
     pub fn take_pending(&self) -> Option<HotkeyAction> {
         self.shared
             .pending
@@ -216,51 +223,119 @@ impl MacosHotkey {
             .take()
     }
 
-    /// Unregister everything and register picker + command hotkeys, plus the
-    /// optional undo chord. `command_hotkeys` is `(command_id, hotkey_spec)`.
+    /// Enable or disable the Escape binding used to cancel the active run.
+    /// The binding is registered only while enabled, so idle applications keep
+    /// their native Escape behavior.
+    pub fn set_cancel_enabled(&self, enabled: bool) -> Result<()> {
+        let cancel_hk = HotKey::new(None, Code::Escape);
+        let manager = self.manager.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(manager) = manager.as_ref() else {
+            return Err(anyhow::anyhow!(
+                "hotkeys have not been registered; cannot change Escape cancellation"
+            ));
+        };
+        if enabled {
+            if self
+                .shared
+                .by_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&cancel_hk.id())
+            {
+                self.shared.cancel_enabled.store(true, Ordering::Release);
+                return Ok(());
+            }
+            manager
+                .register(cancel_hk)
+                .context("register Escape cancellation hotkey")?;
+            self.shared
+                .by_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(cancel_hk.id(), HotkeyAction::Cancel);
+            self.shared.cancel_enabled.store(true, Ordering::Release);
+        } else {
+            self.shared.cancel_enabled.store(false, Ordering::Release);
+            let was_registered = self
+                .shared
+                .by_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&cancel_hk.id());
+            if was_registered {
+                manager
+                    .unregister(cancel_hk)
+                    .context("unregister Escape cancellation hotkey")?;
+                self.shared
+                    .by_id
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&cancel_hk.id());
+            }
+            let mut pending = self
+                .shared
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if matches!(pending.as_ref(), Some(HotkeyAction::Cancel)) {
+                pending.take();
+            }
+        }
+        Ok(())
+    }
+
+    /// Unregister everything and register the custom-instruction and command
+    /// hotkeys. `command_hotkeys` is `(command_id, hotkey_spec)`.
+    ///
+    /// Invalid, reserved, duplicate, or unavailable individual bindings are
+    /// reported and skipped so one bad command cannot disable the others.
     pub fn reregister_all(
         &self,
-        picker: &str,
+        custom_instruction: &str,
         command_hotkeys: &[(String, String)],
-        undo: Option<&str>,
     ) -> Result<()> {
+        let cancel_was_enabled = self.shared.cancel_enabled.load(Ordering::Acquire);
+        // Drop the previous manager before creating the replacement. macOS
+        // rejects duplicate registrations while the old manager is alive.
+        let old_manager = self
+            .manager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        drop(old_manager);
+        self.shared.cancel_enabled.store(false, Ordering::Release);
         let manager =
             GlobalHotKeyManager::new().context("create GlobalHotKeyManager (main thread)")?;
 
         let mut map = HashMap::new();
 
-        let picker_hk =
-            parse_hotkey(picker).with_context(|| format!("parse picker hotkey `{picker}`"))?;
-        manager
-            .register(picker_hk)
-            .with_context(|| format!("register picker hotkey `{picker}`"))?;
-        map.insert(picker_hk.id(), HotkeyAction::Picker);
+        register_binding(
+            &manager,
+            &mut map,
+            custom_instruction,
+            HotkeyAction::CustomInstruction,
+            "custom instruction",
+        );
 
         for (cmd_id, spec) in command_hotkeys {
-            let spec = spec.trim();
-            if spec.is_empty() {
-                continue;
-            }
-            let hk = parse_hotkey(spec)
-                .with_context(|| format!("parse command hotkey `{spec}` for `{cmd_id}`"))?;
-            if map.contains_key(&hk.id()) {
-                bail!("hotkey `{spec}` collides with another binding");
-            }
-            manager
-                .register(hk)
-                .with_context(|| format!("register command hotkey `{spec}` for `{cmd_id}`"))?;
-            map.insert(hk.id(), HotkeyAction::Command(cmd_id.clone()));
+            register_binding(
+                &manager,
+                &mut map,
+                spec,
+                HotkeyAction::Command(cmd_id.clone()),
+                &format!("command `{cmd_id}`"),
+            );
         }
 
-        if let Some(spec) = undo.map(str::trim).filter(|s| !s.is_empty()) {
-            let hk = parse_hotkey(spec).with_context(|| format!("parse undo hotkey `{spec}`"))?;
-            if map.contains_key(&hk.id()) {
-                bail!("undo hotkey `{spec}` collides with another binding");
+        if cancel_was_enabled {
+            let cancel_hk = HotKey::new(None, Code::Escape);
+            match manager.register(cancel_hk) {
+                Ok(()) => {
+                    map.insert(cancel_hk.id(), HotkeyAction::Cancel);
+                    self.shared.cancel_enabled.store(true, Ordering::Release);
+                }
+                Err(e) => warn!(error = %e, "could not restore Escape cancellation hotkey"),
             }
-            manager
-                .register(hk)
-                .with_context(|| format!("register undo hotkey `{spec}`"))?;
-            map.insert(hk.id(), HotkeyAction::Undo);
         }
 
         *self.shared.by_id.lock().unwrap_or_else(|e| e.into_inner()) = map;
@@ -276,6 +351,48 @@ impl MacosHotkey {
     }
 }
 
+fn is_reserved_native(hk: &HotKey) -> bool {
+    let cmd = Modifiers::SUPER;
+    match (hk.mods, hk.key) {
+        (mods, Code::KeyZ) => mods == cmd || mods == (cmd | Modifiers::SHIFT),
+        (mods, Code::KeyC | Code::KeyX | Code::KeyV) => mods == cmd,
+        _ => false,
+    }
+}
+
+fn register_binding(
+    manager: &GlobalHotKeyManager,
+    map: &mut HashMap<u32, HotkeyAction>,
+    spec: &str,
+    action: HotkeyAction,
+    label: &str,
+) {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return;
+    }
+    let hk = match parse_hotkey(spec) {
+        Ok(hk) => hk,
+        Err(e) => {
+            warn!(binding = %spec, target = %label, error = %e, "ignoring invalid hotkey");
+            return;
+        }
+    };
+    if is_reserved_native(&hk) || hk == HotKey::new(None, Code::Escape) {
+        warn!(binding = %spec, target = %label, "ignoring native editing hotkey");
+        return;
+    }
+    if map.contains_key(&hk.id()) {
+        warn!(binding = %spec, target = %label, "ignoring duplicate hotkey");
+        return;
+    }
+    if let Err(e) = manager.register(hk) {
+        warn!(binding = %spec, target = %label, error = %e, "could not register hotkey");
+        return;
+    }
+    map.insert(hk.id(), action);
+}
+
 impl Default for MacosHotkey {
     fn default() -> Self {
         Self::new()
@@ -285,8 +402,8 @@ impl Default for MacosHotkey {
 #[async_trait]
 impl HotkeyService for MacosHotkey {
     async fn register(&self, hotkey: &str, _on_fire: Box<dyn Fn() + Send + Sync>) -> Result<()> {
-        // Legacy single-hotkey path: register as picker only.
-        self.reregister_all(hotkey, &[], None)
+        // Legacy single-hotkey path: register as custom instruction.
+        self.reregister_all(hotkey, &[])
     }
 }
 
@@ -591,6 +708,16 @@ mod tests {
                     assert_ne!(a, b, "{} vs {}", chords[i], chords[j]);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn native_editing_chords_are_reserved_exactly() {
+        for spec in ["cmd+z", "shift+cmd+z", "cmd+c", "cmd+x", "cmd+v"] {
+            assert!(is_reserved_native(&parse(spec)), "{spec}");
+        }
+        for spec in ["cmd+a", "shift+cmd+c", "ctrl+z", "cmd+escape"] {
+            assert!(!is_reserved_native(&parse(spec)), "{spec}");
         }
     }
 }

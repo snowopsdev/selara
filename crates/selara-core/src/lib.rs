@@ -15,9 +15,12 @@ pub mod usage;
 
 pub use codex_cli::CodexLoginStatus;
 pub use commands::{
-    build_system_prompt, builtin_commands, run_command, CommandKind, WritingCommand,
+    build_system_prompt, builtin_commands, normalize_command, normalize_commands, run_command,
+    CommandKind, WritingCommand,
 };
-pub use config::{AppConfig, LimitsConfig, ProviderAuth, ProviderConfig};
+pub use config::{
+    update_config, AppConfig, LimitsConfig, ProviderAuth, ProviderConfig, CURRENT_SCHEMA_VERSION,
+};
 pub use error::CoreError;
 pub use guard::{provider_is_hosted, scan_secrets, SecretHit, SecretKind};
 pub use history::HistoryEntry;

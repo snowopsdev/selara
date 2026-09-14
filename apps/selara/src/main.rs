@@ -2,13 +2,13 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use selara_core::commands::{
-    find_command, run_command, run_command_stream, CommandKind, PromptVars,
-};
+use selara_core::commands::{find_command, run_command};
 use selara_core::config::{ApiKeySource, AppConfig};
 use selara_core::secrets;
 use selara_core::usage;
 
+#[cfg(target_os = "macos")]
+mod progress;
 #[cfg(target_os = "macos")]
 mod serve;
 
@@ -43,13 +43,12 @@ enum Action {
         /// Extra instruction appended to the command prompt
         #[arg(long)]
         instruct: Option<String>,
-        /// Print the result only once it is complete. By default popup
-        /// commands stream their output as the model writes it; replace
-        /// commands always print the finished, cleaned text.
+        /// Retained for compatibility. Commands always print the complete,
+        /// cleaned replacement text.
         #[arg(long)]
         no_stream: bool,
     },
-    /// Start the desktop shell (global hotkey + picker UI). macOS only for now.
+    /// Start the desktop shell (command shortcuts + instruction dialog). macOS only for now.
     Serve {
         /// Use the Settings app's versioned JSON-lines control protocol.
         #[arg(long)]
@@ -138,7 +137,7 @@ async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
             println!("api key: {}", describe_source(cfg.api_key_source()));
         }
         Action::Key { action } => {
-            let mut cfg = AppConfig::load_or_init(&config_path)?;
+            let cfg = AppConfig::load_or_init(&config_path)?;
             let kind = cfg.provider.kind;
             match action {
                 KeyAction::Set => {
@@ -149,8 +148,12 @@ async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
                         .context("reading API key from stdin")?;
                     secrets::keychain_set(kind, raw.trim())?;
                     if cfg.provider.api_key.is_some() {
-                        cfg.provider.api_key = None;
-                        cfg.save(&config_path)?;
+                        AppConfig::update(&config_path, |latest| {
+                            if latest.provider.kind == kind {
+                                latest.provider.api_key = None;
+                            }
+                            Ok(())
+                        })?;
                         println!("removed provider.api_key from {}", config_path.display());
                     }
                     println!(
@@ -195,43 +198,18 @@ async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
             };
             let command = find_command(&cfg.commands, &id)?;
             let provider = cfg.build_provider_for(command)?;
-            // Replace output is cleaned only once the reply is complete, so
-            // it is never streamed; popup markdown is printed as it arrives.
-            if no_stream || command.kind == CommandKind::Replace {
-                let out = run_command(
-                    provider.as_ref(),
-                    command,
-                    &input,
-                    instruct.as_deref(),
-                    Some(&cfg.language),
-                )
-                .await?;
-                println!("{out}");
-            } else {
-                use std::io::Write;
-                let mut stdout = std::io::stdout();
-                let mut print_delta = |delta: &str| {
-                    let _ = stdout.write_all(delta.as_bytes());
-                    let _ = stdout.flush();
-                };
-                let result = run_command_stream(
-                    provider.as_ref(),
-                    command,
-                    &input,
-                    instruct.as_deref(),
-                    PromptVars {
-                        language: Some(&cfg.language),
-                        app: None,
-                    },
-                    &mut print_delta,
-                )
-                .await;
-                // End the streamed line even when the stream failed midway, so
-                // the error on stderr does not continue a partial line.
-                println!();
-                result?;
-            }
+            let _ = no_stream;
+            let out = run_command(
+                provider.as_ref(),
+                command,
+                &input,
+                instruct.as_deref(),
+                Some(&cfg.language),
+            )
+            .await?;
+            println!("{out}");
         }
+
         Action::Usage => {
             let path = usage::usage_path(&config_path);
             let summary = usage::summary(&path)?;

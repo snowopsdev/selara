@@ -1,7 +1,7 @@
 //! `selara-core` cannot call `parse_hotkey`: that lives in `selara-platform`
 //! behind the macOS-only `global_hotkey` dependency. So `canonical_hotkey`
 //! carries its own copy of the alias table, and the two can drift apart
-//! silently — a spec the picker registers one way and the pack importer
+//! silently — a spec the service registers one way and the pack importer
 //! considers different would let an imported command steal a live binding.
 //!
 //! `apps/selara` depends on both crates, so this is where they can be held

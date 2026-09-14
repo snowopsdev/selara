@@ -3,10 +3,14 @@ use serde::{Deserialize, Serialize};
 use crate::error::CoreError;
 use crate::providers::{CompletionRequest, DeltaSink, LlmProvider};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandKind {
+    #[default]
     Replace,
+    /// Legacy value retained so history written by schema-1 builds remains
+    /// readable. Commands loaded from config or a command pack are normalized
+    /// to [`CommandKind::Replace`].
     Popup,
 }
 
@@ -14,10 +18,11 @@ pub enum CommandKind {
 pub struct WritingCommand {
     pub id: String,
     pub label: String,
+    #[serde(default, deserialize_with = "deserialize_live_kind")]
     pub kind: CommandKind,
     /// Instruction sent to the model with the selected/input text.
     pub prompt: String,
-    /// Optional global shortcut that runs this command directly (skip picker).
+    /// Optional global shortcut that runs this command directly on the selection.
     #[serde(default)]
     pub hotkey: Option<String>,
     /// Optional model id that overrides `provider.model` for this command
@@ -31,6 +36,35 @@ pub struct WritingCommand {
     /// the same matching style as `excluded_apps`. See [`command_applies_to`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apps: Vec<String>,
+}
+
+/// Normalize command data written by schema-1 builds.
+///
+/// Popup commands no longer have a separate execution mode. The enum variant
+/// is intentionally kept for legacy history rows, but config and pack readers
+/// call this function before exposing commands to the rest of the app.
+pub fn normalize_command(command: &mut WritingCommand) {
+    if command.kind == CommandKind::Popup {
+        command.kind = CommandKind::Replace;
+    }
+}
+
+fn deserialize_live_kind<'de, D>(deserializer: D) -> Result<CommandKind, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let kind = CommandKind::deserialize(deserializer)?;
+    Ok(match kind {
+        CommandKind::Popup => CommandKind::Replace,
+        CommandKind::Replace => CommandKind::Replace,
+    })
+}
+
+/// Normalize all commands in place, preserving their order and identity.
+pub fn normalize_commands(commands: &mut [WritingCommand]) {
+    for command in commands {
+        normalize_command(command);
+    }
 }
 
 /// True when `cmd` should be offered in the app a selection came from.
@@ -134,7 +168,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
         WritingCommand {
             id: "summary".into(),
             label: "Summary".into(),
-            kind: CommandKind::Popup,
+            kind: CommandKind::Replace,
             prompt: "Summarize the text clearly in markdown. Use short paragraphs or bullets as needed.".into(),
             hotkey: None,
             model: None,
@@ -143,7 +177,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
         WritingCommand {
             id: "key_points".into(),
             label: "Key Points".into(),
-            kind: CommandKind::Popup,
+            kind: CommandKind::Replace,
             prompt: "Extract the key points as a markdown bullet list.".into(),
             hotkey: None,
             model: None,
@@ -152,7 +186,7 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
         WritingCommand {
             id: "table".into(),
             label: "Table".into(),
-            kind: CommandKind::Popup,
+            kind: CommandKind::Replace,
             prompt: "Convert the useful information in the text into a markdown table.".into(),
             hotkey: None,
             model: None,
@@ -184,14 +218,14 @@ pub fn parse_command_pack(text: &str) -> Result<Vec<WritingCommand>, CoreError> 
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') || trimmed.starts_with('{') {
         if let Ok(list) = serde_json::from_str::<Vec<WritingCommand>>(trimmed) {
-            return Ok(list);
+            return Ok(normalized_pack(list));
         }
         if let Ok(pack) = serde_json::from_str::<CommandPack>(trimmed) {
-            return Ok(pack.commands);
+            return Ok(normalized_pack(pack.commands));
         }
     }
     match toml::from_str::<CommandPack>(text) {
-        Ok(pack) if !pack.commands.is_empty() => Ok(pack.commands),
+        Ok(pack) if !pack.commands.is_empty() => Ok(normalized_pack(pack.commands)),
         Ok(_) => Err(CoreError::Config(
             "command pack contains no commands (expected `[[commands]]` in TOML or a JSON array)"
                 .into(),
@@ -202,11 +236,16 @@ pub fn parse_command_pack(text: &str) -> Result<Vec<WritingCommand>, CoreError> 
     }
 }
 
+fn normalized_pack(mut commands: Vec<WritingCommand>) -> Vec<WritingCommand> {
+    normalize_commands(&mut commands);
+    commands
+}
+
 /// Render commands as a TOML pack (`[[commands]]` tables).
 pub fn render_command_pack(commands: &[WritingCommand]) -> Result<String, CoreError> {
-    let pack = CommandPack {
-        commands: commands.to_vec(),
-    };
+    let mut commands = commands.to_vec();
+    normalize_commands(&mut commands);
+    let pack = CommandPack { commands };
     toml::to_string_pretty(&pack).map_err(|e| CoreError::Config(e.to_string()))
 }
 
@@ -289,8 +328,8 @@ fn canonical_hotkey_key(token: &str) -> String {
 }
 
 /// Merge `incoming` into `existing` according to `mode`. Hotkeys that would
-/// collide with a command already in the list, or with one of `reserved` (the
-/// picker and undo bindings, which `reregister_all` registers first), are
+/// collide with a command already in the list, or with one of `reserved`
+/// (bindings registered before command shortcuts), are
 /// dropped rather than duplicated, so a reload of `serve` cannot fail on a
 /// duplicate binding.
 pub fn merge_commands(
@@ -299,12 +338,14 @@ pub fn merge_commands(
     mode: MergeMode,
     reserved: &[&str],
 ) -> MergeReport {
+    normalize_commands(existing);
     let mut report = MergeReport::default();
     let reserved: Vec<String> = reserved
         .iter()
         .filter_map(|spec| canonical_hotkey(spec))
         .collect();
     for mut cmd in incoming {
+        normalize_command(&mut cmd);
         let pos = existing.iter().position(|c| c.id == cmd.id);
         // A skipped import changes nothing that gets saved, so decide that
         // before any hotkey accounting: it must not report a dropped hotkey.
@@ -410,17 +451,18 @@ pub fn substitute_prompt_vars(template: &str, vars: PromptVars<'_>) -> String {
     out
 }
 
-/// Output contract appended to the system prompt of every `Replace` command.
-/// Replace output is written verbatim over the user's selection, so any chat
-/// framing the model adds would land in their document.
+/// Output contract appended to the system prompt of every live command.
+/// Output is written verbatim over the user's selection, so any chat framing
+/// the model adds would land in their document.
 pub const REPLACE_OUTPUT_RULES: &str = "Reply with the transformed text only. Do not add an \
 introduction, explanation, or closing remark. Do not wrap the reply in quotes or a code fence. \
 Preserve the original's line breaks and leading and trailing whitespace unless the instruction \
 asks otherwise. If the text is already correct, return it unchanged.";
 
-/// Assemble the system prompt: the command's prompt, then (for `Replace`
-/// commands) the output rules, then the preferred language from config (blank
-/// means no hint), then any one-off instruction.
+/// Assemble the system prompt: the command's prompt, replacement output rules,
+/// the preferred language from config (blank means no hint), then any one-off
+/// instruction. Every live command replaces the selected text; the legacy
+/// `Popup` kind is retained only for reading historical entries.
 pub fn build_system_prompt(
     command: &WritingCommand,
     custom_instruction: Option<&str>,
@@ -448,10 +490,8 @@ pub fn build_system_prompt_with(
     let custom_instruction = custom_instruction.map(|c| substitute_prompt_vars(c, vars));
     let custom_instruction = custom_instruction.as_deref();
     let mut system = substitute_prompt_vars(&command.prompt, vars);
-    if command.kind == CommandKind::Replace {
-        system.push('\n');
-        system.push_str(REPLACE_OUTPUT_RULES);
-    }
+    system.push('\n');
+    system.push_str(REPLACE_OUTPUT_RULES);
     if let Some(lang) = language.map(str::trim).filter(|l| !l.is_empty()) {
         system.push_str(&format!(
             "\nPreferred language: {lang}. Use it for the reply only when the instructions \
@@ -514,9 +554,9 @@ pub async fn run_command_with(
 /// the end exactly as `run_command_with` would have returned it.
 ///
 /// Fragments are forwarded raw. Only the returned text has
-/// [`clean_replace_output`] applied for `Replace` commands, so a caller that
-/// writes over the user's selection must wait for the return value instead
-/// of assembling the fragments itself; fragments are for progress display.
+/// [`clean_replace_output`] applied, so a caller that writes over the user's
+/// selection must wait for the return value instead of assembling the
+/// fragments itself; fragments are for progress display.
 pub async fn run_command_stream(
     provider: &dyn LlmProvider,
     command: &WritingCommand,
@@ -542,16 +582,14 @@ pub async fn run_command_stream(
     Ok(finish_output(command.kind, out, input))
 }
 
-/// Post-process a finished reply for its command kind: `Replace` output is
-/// cleaned of chat framing, `Popup` markdown is returned as-is.
-fn finish_output(kind: CommandKind, out: String, input: &str) -> String {
-    match kind {
-        CommandKind::Replace => clean_replace_output(&out, input),
-        CommandKind::Popup => out,
-    }
+/// Post-process a finished reply. Every live command writes over the captured
+/// selection, so even a manually constructed legacy `Popup` command receives
+/// the replacement cleaning rules.
+fn finish_output(_kind: CommandKind, out: String, input: &str) -> String {
+    clean_replace_output(&out, input)
 }
 
-/// Strip the chat framing models add around `Replace` output: an outer code
+/// Strip the chat framing models add around replacement output: an outer code
 /// fence, a single leading "Here is the corrected text:" style line, and one
 /// pair of wrapping quotes.
 ///
@@ -715,10 +753,10 @@ mod tests {
     }
 
     #[test]
-    fn popup_prompt_is_bare_without_extras() {
+    fn legacy_popup_prompt_still_uses_replacement_rules() {
         assert_eq!(
             build_system_prompt(&popup_cmd(), None, None),
-            "Summarize the text."
+            format!("Summarize the text.\n{REPLACE_OUTPUT_RULES}")
         );
     }
 
@@ -732,9 +770,9 @@ mod tests {
     }
 
     #[test]
-    fn popup_prompt_omits_output_rules() {
+    fn legacy_popup_prompt_includes_output_rules() {
         let system = build_system_prompt(&popup_cmd(), Some("Be brief."), Some("de"));
-        assert!(!system.contains(REPLACE_OUTPUT_RULES));
+        assert!(system.contains(REPLACE_OUTPUT_RULES));
     }
 
     #[test]
@@ -754,7 +792,7 @@ mod tests {
     fn prompt_skips_blank_language() {
         assert_eq!(
             build_system_prompt(&popup_cmd(), None, Some("  ")),
-            "Summarize the text."
+            format!("Summarize the text.\n{REPLACE_OUTPUT_RULES}")
         );
         assert_eq!(
             build_system_prompt(&cmd(), None, Some("  ")),
@@ -1105,7 +1143,7 @@ mod tests {
         let json_array = r#"[{"id":"x","label":"X","kind":"popup","prompt":"P"}]"#;
         assert_eq!(
             parse_command_pack(json_array).unwrap()[0].kind,
-            CommandKind::Popup
+            CommandKind::Replace
         );
         let json_obj = r#"{"commands":[{"id":"y","label":"Y","kind":"replace","prompt":"Q"}]}"#;
         assert_eq!(parse_command_pack(json_obj).unwrap()[0].id, "y");
@@ -1116,6 +1154,46 @@ mod tests {
 
         assert!(parse_command_pack("not a pack").is_err());
         assert!(parse_command_pack("hotkey = \"x\"").is_err(), "no commands");
+    }
+
+    #[test]
+    fn legacy_popup_commands_normalize_when_imported() {
+        let json = r#"[{"id":"summary","label":"Summary","kind":"popup","prompt":"Summarize."}]"#;
+        let imported = parse_command_pack(json).unwrap();
+        assert_eq!(imported[0].kind, CommandKind::Replace);
+        let direct: WritingCommand = serde_json::from_str(
+            r#"{"id":"direct","label":"Direct","kind":"popup","prompt":"Do it."}"#,
+        )
+        .unwrap();
+        assert_eq!(direct.kind, CommandKind::Replace);
+
+        let rendered = render_command_pack(&[WritingCommand {
+            kind: CommandKind::Popup,
+            ..cmd_with_id("legacy")
+        }])
+        .unwrap();
+        assert!(rendered.contains("kind = \"replace\""), "{rendered}");
+        assert!(!rendered.contains("kind = \"popup\""), "{rendered}");
+    }
+
+    #[test]
+    fn all_builtins_are_replacements() {
+        assert!(builtin_commands()
+            .iter()
+            .all(|command| command.kind == CommandKind::Replace));
+    }
+
+    #[test]
+    fn markdown_lists_and_tables_survive_output_cleaning() {
+        let table = "| Name | Value |\n| --- | --- |\n| A | 1 |";
+        assert_eq!(clean_replace_output(table, "source"), table);
+        let list = "Here are the key points:\n- First\n- Second";
+        assert_eq!(clean_replace_output(list, "source"), "- First\n- Second");
+        let fenced_table = "```markdown\n| Name | Value |\n| --- | --- |\n| A | 1 |\n```";
+        assert_eq!(
+            clean_replace_output(fenced_table, "source"),
+            "| Name | Value |\n| --- | --- |\n| A | 1 |"
+        );
     }
 
     #[test]
@@ -1179,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_reserves_picker_and_undo_hotkeys() {
+    fn merge_reserves_existing_hotkeys() {
         let mut e = vec![pack_cmd("a", None)];
         let r = merge_commands(
             &mut e,
@@ -1191,8 +1269,8 @@ mod tests {
             &["ctrl+shift+space", "meta+shift+z"],
         );
         assert_eq!(r.hotkeys_dropped, 2);
-        assert_eq!(e[1].hotkey, None, "picker hotkey reserved");
-        assert_eq!(e[2].hotkey, None, "undo hotkey reserved");
+        assert_eq!(e[1].hotkey, None, "existing hotkey reserved");
+        assert_eq!(e[2].hotkey, None, "existing hotkey reserved");
     }
 
     #[test]
@@ -1245,7 +1323,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_command_cleans_replace_but_not_popup() {
+    async fn run_command_cleans_all_command_kinds() {
         let fenced = "```\nHere is the corrected text:\nTwo cats.\n```";
         let provider = FixedProvider(fenced);
         let replaced = run_command(&provider, &cmd(), "Two cats!", None, None)
@@ -1255,7 +1333,7 @@ mod tests {
         let popup = run_command(&provider, &popup_cmd(), "Two cats!", None, None)
             .await
             .unwrap();
-        assert_eq!(popup, fenced);
+        assert_eq!(popup, "Two cats.");
     }
 
     #[tokio::test]
