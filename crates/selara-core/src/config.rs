@@ -489,24 +489,20 @@ impl ConfigLock {
                 use std::os::unix::fs::OpenOptionsExt;
                 opts.mode(0o600);
             }
-            match opts.open(&path) {
-                Ok(file) => {
-                    restrict_to_owner(&path);
-                    match file.try_lock() {
-                        Ok(()) => return Ok(Self { _file: file }),
-                        Err(std::fs::TryLockError::WouldBlock) => {
-                            if started.elapsed() >= Self::TIMEOUT {
-                                return Err(CoreError::Config(format!(
-                                    "timed out waiting for config lock {}",
-                                    path.display()
-                                )));
-                            }
-                            std::thread::sleep(Self::WAIT);
-                        }
-                        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            let file = opts.open(&path)?;
+            restrict_to_owner(&path);
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if started.elapsed() >= Self::TIMEOUT {
+                        return Err(CoreError::Config(format!(
+                            "timed out waiting for config lock {}",
+                            path.display()
+                        )));
                     }
+                    std::thread::sleep(Self::WAIT);
                 }
-                Err(error) => return Err(error.into()),
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
     }
