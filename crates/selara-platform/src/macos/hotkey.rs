@@ -143,6 +143,10 @@ pub enum HotkeyAction {
 }
 
 struct SharedHotkeys {
+    /// Serialize event dispatch with registration changes. An event already
+    /// delivered by macOS must not become pending after `suspend` clears the
+    /// queue.
+    registration_lock: Mutex<()>,
     /// hotkey id → action
     by_id: Mutex<HashMap<u32, HotkeyAction>>,
     pending: Mutex<Option<HotkeyAction>>,
@@ -152,6 +156,10 @@ struct SharedHotkeys {
 
 impl SharedHotkeys {
     fn handle(&self, event: GlobalHotKeyEvent) {
+        let _registration = self
+            .registration_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if event.state != HotKeyState::Pressed {
             return;
         }
@@ -180,6 +188,7 @@ fn shared() -> Arc<SharedHotkeys> {
     SHARED
         .get_or_init(|| {
             let s = Arc::new(SharedHotkeys {
+                registration_lock: Mutex::new(()),
                 by_id: Mutex::new(HashMap::new()),
                 pending: Mutex::new(None),
                 wake: Mutex::new(None),
@@ -216,6 +225,11 @@ impl MacosHotkey {
 
     /// Take a pending custom-instruction, command, or cancellation action.
     pub fn take_pending(&self) -> Option<HotkeyAction> {
+        let _registration = self
+            .shared
+            .registration_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         self.shared
             .pending
             .lock()
@@ -223,13 +237,67 @@ impl MacosHotkey {
             .take()
     }
 
+    /// Release every native registration while another application records a
+    /// shortcut. The shared dispatch lock makes the clear atomic with respect
+    /// to an in-flight event handler, so a key event cannot run after this
+    /// method returns.
+    pub fn suspend(&self) {
+        let _registration = self
+            .shared
+            .registration_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Clear the dispatch state before tearing down the native manager. A
+        // platform event arriving during manager teardown then sees no action.
+        self.shared.cancel_enabled.store(false, Ordering::Release);
+        self.shared
+            .by_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.shared
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let manager = self
+            .manager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        drop(manager);
+    }
+
     /// Enable or disable the Escape binding used to cancel the active run.
     /// The binding is registered only while enabled, so idle applications keep
     /// their native Escape behavior.
     pub fn set_cancel_enabled(&self, enabled: bool) -> Result<()> {
+        let _registration = self
+            .shared
+            .registration_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cancel_hk = HotKey::new(None, Code::Escape);
         let manager = self.manager.lock().unwrap_or_else(|e| e.into_inner());
         let Some(manager) = manager.as_ref() else {
+            if !enabled {
+                self.shared.cancel_enabled.store(false, Ordering::Release);
+                self.shared
+                    .by_id
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&cancel_hk.id());
+                let mut pending = self
+                    .shared
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if matches!(pending.as_ref(), Some(HotkeyAction::Cancel)) {
+                    pending.take();
+                }
+                return Ok(());
+            }
             return Err(anyhow::anyhow!(
                 "hotkeys have not been registered; cannot change Escape cancellation"
             ));
@@ -294,7 +362,23 @@ impl MacosHotkey {
         custom_instruction: &str,
         command_hotkeys: &[(String, String)],
     ) -> Result<()> {
+        let _registration = self
+            .shared
+            .registration_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cancel_was_enabled = self.shared.cancel_enabled.load(Ordering::Acquire);
+        self.shared.cancel_enabled.store(false, Ordering::Release);
+        self.shared
+            .by_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.shared
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         // Drop the previous manager before creating the replacement. macOS
         // rejects duplicate registrations while the old manager is alive.
         let old_manager = self
@@ -303,7 +387,6 @@ impl MacosHotkey {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         drop(old_manager);
-        self.shared.cancel_enabled.store(false, Ordering::Release);
         let manager =
             GlobalHotKeyManager::new().context("create GlobalHotKeyManager (main thread)")?;
 

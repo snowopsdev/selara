@@ -1,4 +1,4 @@
-//! Append-only history of the transformations `selara serve` applied, so a
+//! Append-only history of the transformations `selara serve` generated, so a
 //! result (or the text it replaced) can be copied back later from Settings.
 //!
 //! One JSON object per line in `history.jsonl` next to the config file. The
@@ -7,7 +7,7 @@
 //! that many lines.
 
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::commands::CommandKind;
@@ -16,6 +16,15 @@ use crate::error::CoreError;
 /// Retention limit: the file never holds more than this many entries once an
 /// append has finished, which is the last-50 limit Settings advertises.
 pub const MAX_ENTRIES: usize = 50;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplacementOutcome {
+    #[default]
+    Applied,
+    NotApplied,
+    PasteUnverified,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
@@ -30,6 +39,9 @@ pub struct HistoryEntry {
     pub original: String,
     /// What the model produced (and what was written back, for Replace).
     pub result: String,
+    /// Older entries were only recorded after a verified replacement.
+    #[serde(default)]
+    pub outcome: ReplacementOutcome,
 }
 
 /// `history.jsonl` beside the config file.
@@ -43,7 +55,7 @@ fn io_err(e: std::io::Error) -> CoreError {
 
 fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
-    opts.append(true).create(true);
+    opts.read(true).append(true).create(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -97,8 +109,12 @@ fn read_lines(path: &Path) -> std::io::Result<Vec<String>> {
         Err(e) => return Err(e),
     };
     let mut out = Vec::new();
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line?;
+    for line in std::io::BufReader::new(file).split(b'\n') {
+        // A short write may end inside a UTF-8 character. Skip that damaged
+        // record just like malformed JSON rather than hiding later results.
+        let Ok(line) = String::from_utf8(line?) else {
+            continue;
+        };
         if !line.trim().is_empty() {
             out.push(line);
         }
@@ -113,6 +129,16 @@ pub fn append(path: &Path, entry: &HistoryEntry) -> Result<(), CoreError> {
         .map_err(|e| CoreError::Config(format!("history entry: {e}")))?;
     {
         let mut file = open_append(path).map_err(io_err)?;
+        // A previous disk-full failure can leave a partial JSON record. Start
+        // the retry on its own line so load can recover the complete entry.
+        if file.metadata().map_err(io_err)?.len() > 0 {
+            file.seek(SeekFrom::End(-1)).map_err(io_err)?;
+            let mut last = [0];
+            file.read_exact(&mut last).map_err(io_err)?;
+            if last[0] != b'\n' {
+                file.write_all(b"\n").map_err(io_err)?;
+            }
+        }
         file.write_all(line.as_bytes()).map_err(io_err)?;
         file.write_all(b"\n").map_err(io_err)?;
     }
@@ -162,6 +188,7 @@ mod tests {
             app: Some("Notes".into()),
             original: format!("orig {i}"),
             result: format!("result {i}"),
+            outcome: ReplacementOutcome::Applied,
         }
     }
 
@@ -184,6 +211,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         TempDir(dir)
+    }
+
+    #[test]
+    fn outcome_round_trips_and_old_entries_default_to_applied() {
+        let mut saved = entry(1);
+        let mut old = serde_json::to_value(&saved).unwrap();
+        old.as_object_mut().unwrap().remove("outcome");
+        assert_eq!(serde_json::from_value::<HistoryEntry>(old).unwrap(), saved);
+        let dir = temp_dir();
+        let path = dir.path().join("history.jsonl");
+        for outcome in [
+            ReplacementOutcome::NotApplied,
+            ReplacementOutcome::PasteUnverified,
+        ] {
+            saved.outcome = outcome;
+            append(&path, &saved).unwrap();
+            assert_eq!(load(&path).unwrap()[0], saved);
+        }
     }
 
     #[test]
@@ -275,6 +320,21 @@ mod tests {
         assert!(!path.exists());
         clear(&path).unwrap();
         assert!(load(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn retry_after_partial_write_preserves_the_completed_result() {
+        let dir = temp_dir();
+        let path = dir.path().join("history.jsonl");
+        append(&path, &entry(1)).unwrap();
+        open_append(&path)
+            .unwrap()
+            .write_all(b"{\"result\":\"\xe2")
+            .unwrap();
+        let mut recovered = entry(2);
+        recovered.outcome = ReplacementOutcome::NotApplied;
+        append(&path, &recovered).unwrap();
+        assert_eq!(load(&path).unwrap(), vec![recovered, entry(1)]);
     }
 
     #[test]

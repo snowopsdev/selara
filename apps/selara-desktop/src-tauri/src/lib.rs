@@ -1,3 +1,4 @@
+mod shortcut_recording;
 mod update_backup;
 
 use selara_core::app_server;
@@ -107,9 +108,7 @@ fn store_api_key(
     secrets::keychain_set(kind, &api_key).map_err(|e| e.to_string())?;
     let path = AppConfig::default_path();
     let cfg = AppConfig::update(&path, move |cfg| {
-        if cfg.provider.kind == kind && cfg.provider.api_key.is_some() {
-            cfg.provider.api_key = None;
-        }
+        cfg.clear_plaintext_keys(kind);
         Ok(())
     })
     .map_err(|e| e.to_string())?;
@@ -122,6 +121,20 @@ fn clear_api_key(kind: ProviderKind) -> Result<ApiKeySource, String> {
     secrets::keychain_delete(kind).map_err(|e| e.to_string())?;
     let cfg = AppConfig::load_or_init(&AppConfig::default_path()).map_err(|e| e.to_string())?;
     Ok(cfg.api_key_source())
+}
+
+/// Inspect only the CLI runtime; a version check does not prove account access.
+#[tauri::command]
+async fn cli_provider_status(
+    kind: ProviderKind,
+    binary: Option<std::path::PathBuf>,
+) -> Result<selara_core::cli_provider::CliStatus, String> {
+    if !kind.is_cli() {
+        return Err("This connection does not use an external CLI.".into());
+    }
+    selara_core::cli_provider::inspect(kind, binary)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Save every command as a TOML pack via a save dialog. Returns the path, or
@@ -618,7 +631,7 @@ fn menu_command_enabled(app: &AppHandle) -> bool {
     let sup = app.state::<Supervisor>();
     let managed = sup.managed_pid().is_some();
     let external = !managed && serve_status().running;
-    managed && !external && !MAINTENANCE.load(Ordering::SeqCst)
+    managed && !external && !MAINTENANCE.load(Ordering::SeqCst) && !shortcut_recording::active()
 }
 
 /// Rebuild only the user command portion of the tray menu. This runs on the
@@ -632,6 +645,13 @@ fn refresh_command_menu_main(app: &AppHandle) {
     let enabled = menu_command_enabled(app);
     let active = app.state::<Supervisor>().active_run().is_some();
     let service_running = serve_status().running;
+    let recording = shortcut_recording::active();
+    let managed = app.state::<Supervisor>().managed_pid().is_some();
+    let _ = menu
+        .start
+        .set_enabled(!service_running && !managed && !recording);
+    let _ = menu.stop.set_enabled(managed && !recording);
+    let _ = menu.restart.set_enabled(managed && !recording);
     let _ = menu
         .commands
         .set_enabled(enabled || active || service_running);
@@ -665,7 +685,11 @@ fn refresh_command_menu_main(app: &AppHandle) {
     let mut items = Vec::with_capacity(cfg.commands.len());
     for command in cfg.commands {
         let id = format!("command:{}", command.id);
-        let accelerator = configured_menu_accelerator(command.hotkey.as_deref());
+        let accelerator = if shortcut_recording::active() {
+            None
+        } else {
+            configured_menu_accelerator(command.hotkey.as_deref())
+        };
         let label = command.label;
         let item = match MenuItem::with_id(
             app,
@@ -782,6 +806,9 @@ fn start_serve_locked(app: &AppHandle, sup: &Supervisor) -> Result<(), String> {
     if sup.managed_pid().is_some() {
         return Ok(());
     }
+    if shortcut_recording::active() {
+        return Err("Finish recording the shortcut before starting the service".into());
+    }
     let status = serve_status();
     if status.running {
         let pid = status.pid.unwrap_or(0);
@@ -881,6 +908,15 @@ fn protocol_request_locked(
     sup: &Supervisor,
     command: selara_core::desktop_protocol::ProtocolCommand,
 ) -> Result<selara_core::desktop_protocol::ProtocolResponse, String> {
+    protocol_request_with_timeout_locked(_app, sup, command, Duration::from_secs(30))
+}
+
+fn protocol_request_with_timeout_locked(
+    _app: &AppHandle,
+    sup: &Supervisor,
+    command: selara_core::desktop_protocol::ProtocolCommand,
+    timeout: Duration,
+) -> Result<selara_core::desktop_protocol::ProtocolResponse, String> {
     let generation = sup.generation.load(Ordering::SeqCst);
     let sequence = sup.request_sequence.fetch_add(1, Ordering::SeqCst);
     let id = format!("desktop-{generation}-{sequence}");
@@ -906,7 +942,7 @@ fn protocol_request_locked(
                 )
                 .map_err(|e| e.to_string())?;
         }
-        let response = rx.recv_timeout(Duration::from_secs(30)).map_err(|_| {
+        let response = rx.recv_timeout(timeout).map_err(|_| {
             "The background service did not acknowledge the request; try restarting it".to_string()
         })?;
         if sup.generation.load(Ordering::SeqCst) != generation {
@@ -948,7 +984,7 @@ fn dispatch_menu_command(
         let sup = app.state::<Supervisor>();
         let response = {
             let _transition = lock(&sup.transition);
-            if MAINTENANCE.load(Ordering::SeqCst) {
+            if MAINTENANCE.load(Ordering::SeqCst) || shortcut_recording::active() {
                 return;
             }
             if sup.managed_pid().is_none() {
@@ -1169,10 +1205,23 @@ fn on_terminated(app: &AppHandle, generation: u64, payload: TerminatedPayload) {
             std::thread::spawn(move || {
                 std::thread::sleep(delay);
                 let sup = app.state::<Supervisor>();
-                if sup.desired.load(Ordering::SeqCst)
-                    && sup.generation.load(Ordering::SeqCst) == generation
-                {
-                    let _ = start_serve(&app);
+                loop {
+                    {
+                        let _transition = lock(&sup.transition);
+                        if !sup.desired.load(Ordering::SeqCst)
+                            || sup.generation.load(Ordering::SeqCst) != generation
+                            || MAINTENANCE.load(Ordering::SeqCst)
+                        {
+                            break;
+                        }
+                        if !shortcut_recording::active() {
+                            let _ = start_serve_locked(&app, &sup);
+                            break;
+                        }
+                    }
+                    // A crash must not re-register shortcuts beneath a live
+                    // recorder. Its next heartbeat fails, or its lease expires.
+                    std::thread::sleep(Duration::from_millis(100));
                 }
             });
         }
@@ -1235,6 +1284,9 @@ fn restart_serve(app: &AppHandle) -> Result<(), String> {
     // One transition, so nothing can start a second sidecar in the window
     // between the stop and the start.
     let _transition = lock(&sup.transition);
+    if shortcut_recording::active() {
+        return Err("Finish recording the shortcut before restarting the service".into());
+    }
     if MAINTENANCE.load(Ordering::SeqCst) {
         return Err("Finish the account change or update before restarting the service".into());
     }
@@ -1667,6 +1719,20 @@ fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// Report the version of the writing runtime staged with this app, without
+/// launching a system CLI or depending on the user's PATH.
+#[tauri::command]
+fn bundled_codex_version() -> Option<String> {
+    let provenance: serde_json::Value = serde_json::from_str(include_str!(
+        "../runtime-notices/selara-codex.provenance.json"
+    ))
+    .ok()?;
+    provenance
+        .get("source_version")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 /// The last check's result, without touching the network. Lets the Settings
 /// window recover a status that was emitted before its listener was bound.
 #[tauri::command]
@@ -1720,6 +1786,7 @@ pub fn run() {
             get_config,
             save_config,
             save_config_section,
+            shortcut_recording::set_shortcut_recording,
             api_key_source,
             store_api_key,
             clear_api_key,
@@ -1748,6 +1815,8 @@ pub fn run() {
             accessibility_status,
             open_accessibility_settings,
             app_version,
+            bundled_codex_version,
+            cli_provider_status,
             check_for_updates,
             update_status,
             install_update
@@ -1850,6 +1919,12 @@ pub fn run() {
                 .menu(&menu)
                 .tooltip("Selara")
                 .on_menu_event(move |app, event| {
+                    if shortcut_recording::active()
+                        && (event.id.as_ref().starts_with("command:")
+                            || event.id.as_ref() == "custom-instruction")
+                    {
+                        return;
+                    }
                     // Read this before dispatching any action that could show
                     // Settings or a custom-instruction window. The service
                     // uses it to capture the target app's selection.
@@ -1967,6 +2042,14 @@ pub fn run() {
                 }
                 let h = handle.clone();
                 win.on_window_event(move |event| {
+                    if matches!(
+                        event,
+                        WindowEvent::Focused(false)
+                            | WindowEvent::CloseRequested { .. }
+                            | WindowEvent::Destroyed
+                    ) {
+                        shortcut_recording::release_on_blur(&h);
+                    }
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
                         if let Some(w) = h.get_webview_window("settings") {

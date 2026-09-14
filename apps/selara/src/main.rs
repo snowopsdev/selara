@@ -147,11 +147,14 @@ async fn async_cli(command: Action, config_path: PathBuf) -> Result<()> {
                         .read_to_string(&mut raw)
                         .context("reading API key from stdin")?;
                     secrets::keychain_set(kind, raw.trim())?;
-                    if cfg.provider.api_key.is_some() {
+                    if cfg.provider.api_key.is_some()
+                        || cfg
+                            .provider_connections
+                            .values()
+                            .any(|p| p.kind == kind && p.api_key.is_some())
+                    {
                         AppConfig::update(&config_path, |latest| {
-                            if latest.provider.kind == kind {
-                                latest.provider.api_key = None;
-                            }
+                            latest.clear_plaintext_keys(kind);
                             Ok(())
                         })?;
                         println!("removed provider.api_key from {}", config_path.display());
@@ -230,6 +233,13 @@ fn format_usage_table(summary: &usage::UsageSummary) -> String {
             None => "n/a".to_string(),
         }
     }
+    fn tokens(bucket: &usage::UsageBucket, count: u64) -> String {
+        if bucket.tokens_missing > 0 && bucket.tokens_missing == bucket.requests {
+            "n/a".into()
+        } else {
+            count.to_string()
+        }
+    }
     let mut out = String::new();
     out.push_str(&format!("ledger: {}\n\n", summary.path));
     out.push_str(&format!(
@@ -244,8 +254,8 @@ fn format_usage_table(summary: &usage::UsageSummary) -> String {
         out.push_str(&format!(
             "{label:<12} {:>9} {:>12} {:>12}  {}\n",
             b.requests,
-            b.input,
-            b.output,
+            tokens(b, b.input),
+            tokens(b, b.output),
             cost(b)
         ));
     }
@@ -262,11 +272,17 @@ fn format_usage_table(summary: &usage::UsageSummary) -> String {
                 m.kind,
                 m.model,
                 m.totals.requests,
-                m.totals.input,
-                m.totals.output,
+                tokens(&m.totals, m.totals.input),
+                tokens(&m.totals, m.totals.output),
                 cost(&m.totals)
             ));
         }
+    }
+    if summary.all_time.tokens_missing > 0 {
+        out.push_str(&format!(
+            "\ntoken totals exclude {} requests without token metadata\n",
+            summary.all_time.tokens_missing
+        ));
     }
     out.push_str(
         "\ncosts are estimates from a built-in list-price table; local only, never sent anywhere\n",

@@ -45,6 +45,14 @@ pub enum ProtocolCommand {
     Quiesce,
     Resume,
     ReloadAuth,
+    /// Temporarily release native shortcuts so the Settings webview can record
+    /// the same key combinations. `active` requests renew the fixed lease;
+    /// `owner_pid` identifies the focused Settings process.
+    SetShortcutRecording {
+        session_id: String,
+        active: bool,
+        owner_pid: i32,
+    },
     /// Admit a configured command; the response acknowledges admission, not completion.
     RunCommand {
         command_id: String,
@@ -175,6 +183,26 @@ mod tests {
             raw.push(b'\n');
             let mut decoder = ProtocolDecoder::default();
             assert_eq!(decoder.push(&raw).remove(0).unwrap(), request);
+        }
+    }
+
+    #[test]
+    fn shortcut_recording_requests_round_trip_with_protocol_version_two() {
+        for active in [true, false] {
+            let request = ProtocolRequest {
+                version: PROTOCOL_VERSION,
+                id: "recording".into(),
+                command: ProtocolCommand::SetShortcutRecording {
+                    session_id: "shortcut-session".into(),
+                    active,
+                    owner_pid: 123,
+                },
+            };
+            let mut raw = serde_json::to_vec(&request).unwrap();
+            raw.push(b'\n');
+            let mut decoder = ProtocolDecoder::default();
+            assert_eq!(decoder.push(&raw).remove(0).unwrap(), request);
+            assert_eq!(request.version, 2);
         }
     }
 

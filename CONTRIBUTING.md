@@ -11,10 +11,27 @@ Thanks for your interest in contributing. This document covers how to build, tes
 ## Prerequisites
 
 - Rust stable, version 1.95 or newer (edition 2021 workspace; required by the egui shell)
-- On macOS: Xcode command-line tools (Accessibility / hotkey / egui `serve` shell)
+- On macOS: Xcode command-line tools, including Swift (Accessibility / hotkey / native command progress / egui `serve` shell). Cargo compiles the local Swift progress bridge automatically; no package download is required.
 - For the Tauri Settings app (`apps/selara-desktop`): Node.js + a package manager, plus platform-specific Tauri dependencies
 
 ## Build and test
+
+### Worktree environment files
+
+Orca runs `python3 scripts/copy-worktree-env.py` through `orca.yaml` when it
+sets up a new worktree. Keep the repository's setup policy set to run by default.
+The setup copies ignored `.env` and `.env.*` files from the main checkout,
+including nested app directories, and preserves files already in the worktree.
+Tracked examples, symlinks, and dependency/build directories are skipped.
+Copied files remain local and are created with owner-only access.
+
+For worktrees created with plain `git worktree add`, run
+`python3 scripts/copy-worktree-env.py` from the new worktree's root. Python 3
+is required; the source defaults to the primary checkout, or `ORCA_ROOT_PATH`
+when Orca supplies it. Adding dotenv files to the primary checkout makes them
+available to subsequent worktree setups; this is a one-time copy, not live sync.
+
+### Commands
 
 From the repo root:
 
@@ -30,7 +47,13 @@ macOS Settings tray (one-liner, starts the Vite dev server the debug build loads
 cd apps/selara-desktop && npx tauri dev
 ```
 
-(`serve` / hotkeys still need a separate `cargo run -p selara -- serve`.)
+The Settings app starts and supervises its bundled `serve` process. To run the shell independently, use `cargo run -p selara -- serve`; Settings will detect it and avoid starting a second copy.
+
+The native command progress lifecycle can be checked locally with
+`sh apps/selara/native/test.sh`. It verifies focus preservation, cancellation,
+fast completion, overlapping runs, and disposal while animations are pending.
+The working orb uses SwiftUI on macOS 12+; macOS 11 uses a native spinner in
+the same transparent 48-point indicator.
 
 CI checks Rust formatting/lints/tests, macOS platform behavior, frontend DOM regressions and committed dist, release helpers, and full app/DMG packaging. Packaging runs both local mode with empty Apple credentials and updater mode with a temporary test key. It verifies every bundled executable and the signed updater archive. The actual pinned writing runtime runs hostile-home isolation and authentication race tests. Python 3.12 and Rust 1.95.0 are required for that native runtime; its build is locked and cached. Interactive Accessibility and production notarization still require a local/release check.
 
@@ -82,6 +105,18 @@ Settings account state is independent of unsaved provider settings. `provider.co
 
 The managed CLI uses `selara serve --desktop-protocol`: bounded, versioned JSON lines on stdin/stdout, with logs on stderr. Status includes actual selection-process Accessibility trust and readiness. Quiesce acknowledges only after all workers finish and pending command executions are cleared. External or incompatible processes have unknown trust and must be restarted under app management. Ordinary `selara serve` retains its existing logging behavior. Desktop commands require a verified nonempty selection and replace it only after a complete response; users restore a replacement with the target app's native undo command.
 
+### External CLI providers
+
+Settings → Providers includes Claude Code, Cursor, and OpenCode alongside the bundled Codex runtime and API connections. Install and sign in to the external CLI first, then choose it in Selara. The executable field accepts an absolute path or a command name; blank uses discovery. A blank model uses the CLI default. OpenCode model overrides use `provider/model` IDs.
+
+Discovery looks for `claude`, `cursor-agent`, and `opencode`. The generic name `agent` is not automatically treated as Cursor because other products use it; a renamed Cursor installation can be selected explicitly.
+
+`provider.kind` accepts `claude_cli`, `cursor_cli`, and `open_code_cli`. `provider.cli_binary` optionally selects the executable. These connections use their CLI account instead of Selara's API key. Each connection has a persisted `enabled` flag (existing configurations default to enabled). Switches save immediately without changing the active connection or discarding settings. Disabling the active connection blocks new writing requests after config reload; it does not cancel an in-flight request or choose a fallback. “Save and use” enables and activates the selected connection and retains previous connection settings in `provider_connections`, keyed by provider kind and auth mode. Multiple named copies of the same connection are not supported.
+
+Cursor uses read-only ask mode and denies writing tools in a private temporary workspace, but its normal local and team-managed hooks still run. Those hooks may process the submitted text; the Providers screen discloses this behavior. OpenCode retains built-in authentication adapters but excludes external plugins, skills, and custom endpoint configuration. Set a `provider/model` explicitly when the isolated CLI default is not the desired model.
+
+“Check CLI” executes only a version check; it does not establish authentication or model access. Writing requests invoke the provider's noninteractive interface. Protocol tests use fake executables and do not require paid accounts. When changing an adapter, verify the installed CLI's flags against its official documentation and test real requests separately; CLI versions can change independently of Selara.
+
 ## No secrets
 
 Do **not** commit:
@@ -100,3 +135,7 @@ By participating, you agree to uphold our [Code of Conduct](CODE_OF_CONDUCT.md).
 ## License
 
 Contributions are licensed under the [MIT License](LICENSE).
+
+The native progress indicator includes MIT-licensed ThinkingOrbsKit source.
+Its license and pinned upstream revision are in
+[`apps/selara/native/ThinkingOrbsKit`](apps/selara/native/ThinkingOrbsKit).

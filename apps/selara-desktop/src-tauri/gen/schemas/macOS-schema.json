@@ -405,6 +405,12 @@
           "markdownDescription": "Read the running app's version"
         },
         {
+          "description": "Read the version metadata for Selara's bundled writing runtime",
+          "type": "string",
+          "const": "allow-bundled-codex-version",
+          "markdownDescription": "Read the version metadata for Selara's bundled writing runtime"
+        },
+        {
           "description": "Read ChatGPT / Codex CLI login status (Experimental)",
           "type": "string",
           "const": "allow-chatgpt-auth-status",
@@ -445,6 +451,12 @@
           "type": "string",
           "const": "allow-clear-usage",
           "markdownDescription": "Truncate the local usage ledger"
+        },
+        {
+          "description": "Inspect an external provider executable with its version flag",
+          "type": "string",
+          "const": "allow-cli-provider-status",
+          "markdownDescription": "Inspect an external provider executable with its version flag"
         },
         {
           "description": "Read config file path",
@@ -559,6 +571,12 @@
           "type": "string",
           "const": "allow-serve-supervisor-status",
           "markdownDescription": "Report whether the app manages `selara serve`, or an external one runs"
+        },
+        {
+          "description": "Temporarily suspend Selara shortcuts while the Settings window records a key combination",
+          "type": "string",
+          "const": "allow-set-shortcut-recording",
+          "markdownDescription": "Temporarily suspend Selara shortcuts while the Settings window records a key combination"
         },
         {
           "description": "Store the provider API key in the OS keychain",

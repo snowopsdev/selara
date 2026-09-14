@@ -28,5 +28,8 @@ libc = "0.2"
 notify = "8"
 winit = "0.30"
 
+[build-dependencies]
+serde_json.workspace = true
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
