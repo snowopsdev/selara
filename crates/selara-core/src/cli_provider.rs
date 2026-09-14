@@ -120,13 +120,13 @@ fn resolve_binary_in(
 // not outlive a discarded completion future and keep generating in background.
 struct RunningChild {
     child: Child,
-    #[cfg(unix)]
-    group: Option<u32>,
 }
 impl Drop for RunningChild {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let Some(pid) = self.group.take() {
+        // Child::id is cleared after wait reaps the process. Never signal a
+        // cached PID then: the OS may have reused it for an unrelated group.
+        if let Some(pid) = self.child.id() {
             unsafe {
                 libc::kill(-(pid as i32), libc::SIGKILL);
             }
@@ -159,13 +159,7 @@ async fn run_process(
     #[cfg(unix)]
     cmd.process_group(0);
     let child = cmd.spawn().map_err(|_| failure("Could not start the provider CLI. Check the executable path and its runtime dependencies."))?;
-    #[cfg(unix)]
-    let group = child.id();
-    let mut running = RunningChild {
-        child,
-        #[cfg(unix)]
-        group,
-    };
+    let mut running = RunningChild { child };
     let mut stdin = running.child.stdin.take().expect("piped stdin");
     let stdout = running.child.stdout.take().expect("piped stdout");
     let stderr = running.child.stderr.take().expect("piped stderr");
@@ -180,8 +174,11 @@ async fn run_process(
                 _ => Ok(()),
             }
         };
-        let wait = async { running.child.wait().await.map_err(CoreError::from) };
-        let (_, out, _, status) = tokio::try_join!(write, bounded(stdout), bounded(stderr), wait)?;
+        // Keep the child unreaped while draining pipes. Descendants may still
+        // hold them after the parent exits; cancellation can safely kill that
+        // group while its original leader's PID remains reserved.
+        let (_, out, _) = tokio::try_join!(write, bounded(stdout), bounded(stderr))?;
+        let status = running.child.wait().await.map_err(CoreError::from)?;
         if !status.success() {
             return Err(failure(format!("Provider CLI exited unsuccessfully ({}). Check its sign-in, model access, and installed version in Providers.", status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()))));
         }
@@ -604,28 +601,34 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_and_cancellation_kill_the_child_process_group() {
-        for cancel in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = script(dir.path(), "(sleep 0.3; printf leaked > leaked) &\nwait");
-            let mut cmd = Command::new(path);
-            cmd.current_dir(dir.path());
-            if cancel {
-                let task =
-                    tokio::spawn(
-                        async move { run_process(cmd, b"", Duration::from_secs(2)).await },
-                    );
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                task.abort();
-                let _ = task.await;
-            } else {
-                assert!(run_process(cmd, b"", Duration::from_millis(50))
-                    .await
-                    .unwrap_err()
-                    .to_string()
-                    .contains("timed out"));
+        for parent_waits in [false, true] {
+            for cancel in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let parent = if parent_waits { "wait" } else { "exit 0" };
+                let path = script(
+                    dir.path(),
+                    &format!("(sleep 0.3; printf leaked > leaked) &\n{parent}"),
+                );
+                let mut cmd = Command::new(path);
+                cmd.current_dir(dir.path());
+                if cancel {
+                    let task =
+                        tokio::spawn(
+                            async move { run_process(cmd, b"", Duration::from_secs(2)).await },
+                        );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    task.abort();
+                    let _ = task.await;
+                } else {
+                    assert!(run_process(cmd, b"", Duration::from_millis(50))
+                        .await
+                        .unwrap_err()
+                        .to_string()
+                        .contains("timed out"));
+                }
+                tokio::time::sleep(Duration::from_millis(350)).await;
+                assert!(!dir.path().join("leaked").exists());
             }
-            tokio::time::sleep(Duration::from_millis(350)).await;
-            assert!(!dir.path().join("leaked").exists());
         }
     }
 }

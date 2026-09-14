@@ -15,8 +15,9 @@ The panel is a clear, borderless, nonactivating `NSPanel` backed by an
 SwiftUI library. Its `.working` animation uses the tuned `.px64` preset while
 the preview's Reduce Motion control, plus system Reduce Motion, freezes it.
 Replay runs a simulated rewrite in its own draft. Hovering the panel exposes
-the cancel button; Cancel or Escape stops that simulation. Dark appearance and
-Reduce Motion controls let you compare the presentation.
+the cancel button; Cancel or Escape stops that simulation. Dark background and
+Reduce Motion controls let you compare the presentation. The orb keeps the
+production artwork on both backgrounds: dark particles with a white halo.
 
 Production placement prefers the editor gutter beside the selected text or
 caret, keeping the indicator clear of the selection and surrounding toolbar.

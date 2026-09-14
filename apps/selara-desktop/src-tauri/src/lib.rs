@@ -1723,10 +1723,8 @@ fn app_version(app: AppHandle) -> String {
 /// launching a system CLI or depending on the user's PATH.
 #[tauri::command]
 fn bundled_codex_version() -> Option<String> {
-    let provenance: serde_json::Value = serde_json::from_str(include_str!(
-        "../runtime-notices/selara-codex.provenance.json"
-    ))
-    .ok()?;
+    let metadata: Option<&str> = include!(concat!(env!("OUT_DIR"), "/bundled_codex_provenance.rs"));
+    let provenance: serde_json::Value = serde_json::from_str(metadata?).ok()?;
     provenance
         .get("source_version")?
         .as_str()

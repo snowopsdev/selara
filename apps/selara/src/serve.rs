@@ -75,15 +75,48 @@ enum JobResult {
     Delta { generation: u64, text: String },
     Success { generation: u64, text: String },
     Error { generation: u64, message: String },
+    Cancelled { generation: u64 },
 }
 impl JobResult {
     fn generation(&self) -> u64 {
         match self {
             Self::Delta { generation, .. }
             | Self::Success { generation, .. }
-            | Self::Error { generation, .. } => *generation,
+            | Self::Error { generation, .. }
+            | Self::Cancelled { generation } => *generation,
         }
     }
+}
+
+/// Keep the worker abortable, and report its termination only after its future
+/// has been dropped. Quiesce must still wait for subprocess cleanup on cancel.
+fn spawn_job(
+    runtime: &tokio::runtime::Handle,
+    generation: u64,
+    tx: Sender<JobResult>,
+    wake: egui::Context,
+    work: impl std::future::Future<Output = Result<String, String>> + Send + 'static,
+) -> tokio::task::AbortHandle {
+    let worker = runtime.spawn(work);
+    let abort = worker.abort_handle();
+    runtime.spawn(async move {
+        let job = match worker.await {
+            Ok(Ok(text)) => JobResult::Success { generation, text },
+            Ok(Err(message)) => JobResult::Error {
+                generation,
+                message,
+            },
+            Err(error) if error.is_cancelled() => JobResult::Cancelled { generation },
+            Err(_) => JobResult::Error {
+                generation,
+                message: "The writing task stopped unexpectedly. Your selection was not changed."
+                    .into(),
+            },
+        };
+        let _ = tx.send(job);
+        wake.request_repaint();
+    });
+    abort
 }
 fn should_apply_job(job: u64, current: u64, waiting: bool) -> bool {
     waiting && job == current
@@ -407,12 +440,13 @@ struct ServeApp {
     last_command: Option<WritingCommand>,
     job_rx: Receiver<JobResult>,
     job_tx: Sender<JobResult>,
+    active_job: Option<(u64, tokio::task::AbortHandle)>,
     runtime: tokio::runtime::Runtime,
     instruction: String,
     focus_instruction: bool,
     instruction_history: VecDeque<String>,
     history_cursor: Option<usize>,
-    unsaved_history: VecDeque<HistoryEntry>,
+    unsaved_history: VecDeque<history::PendingEntry>,
     last_history_retry: Instant,
     notice: String,
     protocol: Option<Receiver<ProtocolInput>>,
@@ -420,6 +454,7 @@ struct ServeApp {
     pending_quiesce: Vec<String>,
     shortcut_recording: Option<ShortcutRecordingLease>,
     hotkey_restore_pending: bool,
+    hotkey_registration_needed: bool,
     hotkey_restore_error: Option<String>,
     last_hotkey_restore_attempt: Instant,
     last_hotkey_restore_log: Option<Instant>,
@@ -474,7 +509,7 @@ impl ServeApp {
         let egui_ctx = cc.egui_ctx.clone();
         let wake = egui_ctx.clone();
         hotkey.set_wake(move || wake.request_repaint());
-        Self::register_hotkeys(&hotkey, &config)?;
+        let pending_hotkeys = Self::register_hotkeys(&hotkey, &config)?;
         let config_mtime = std::fs::metadata(&config_path)
             .and_then(|m| m.modified())
             .ok();
@@ -512,6 +547,7 @@ impl ServeApp {
             last_command: None,
             job_rx,
             job_tx,
+            active_job: None,
             runtime,
             instruction: String::new(),
             focus_instruction: false,
@@ -524,7 +560,8 @@ impl ServeApp {
             gate: WorkGate::default(),
             pending_quiesce: Vec::new(),
             shortcut_recording: None,
-            hotkey_restore_pending: false,
+            hotkey_restore_pending: pending_hotkeys != 0,
+            hotkey_registration_needed: false,
             hotkey_restore_error: None,
             last_hotkey_restore_attempt: Instant::now(),
             last_hotkey_restore_log: None,
@@ -601,7 +638,7 @@ impl ServeApp {
     }
 
     fn shortcut_actions_blocked(&self) -> bool {
-        self.shortcut_recording.is_some() || self.hotkey_restore_pending
+        self.shortcut_recording.is_some()
     }
 
     /// Restore the registrations after a recording lease ends. Native hotkey
@@ -615,7 +652,22 @@ impl ServeApp {
             return Ok(());
         }
         self.last_hotkey_restore_attempt = Instant::now();
-        match Self::register_hotkeys(&self.hotkey, &self.config) {
+        let result = if self.hotkey_registration_needed {
+            Self::register_hotkeys(&self.hotkey, &self.config).inspect(|_| {
+                // A manager now exists, even if some individual bindings need
+                // another attempt. Keep its successful registrations alive.
+                self.hotkey_registration_needed = false;
+            })
+        } else {
+            self.hotkey.retry_pending()
+        };
+        match result.and_then(|pending| {
+            if pending == 0 {
+                Ok(())
+            } else {
+                anyhow::bail!("{pending} shortcut registration(s) still pending")
+            }
+        }) {
             Ok(()) => {
                 if self.hotkey_restore_error.is_some() {
                     tracing::info!("selara: restored native hotkeys after retry");
@@ -633,7 +685,7 @@ impl ServeApp {
                 if log_again {
                     tracing::error!(
                         error = %error,
-                        "selara: native hotkey restore failed; registrations remain disabled and will be retried"
+                        "selara: some native hotkeys remain unavailable and will be retried"
                     );
                     self.last_hotkey_restore_log = Some(Instant::now());
                 }
@@ -664,6 +716,7 @@ impl ServeApp {
             );
         }
         self.hotkey_restore_pending = true;
+        self.hotkey_registration_needed = true;
         let _ = self.restore_hotkeys(true);
         ctx.request_repaint();
     }
@@ -699,9 +752,8 @@ impl ServeApp {
                 return Ok(());
             }
 
-            // A failed previous restore must complete before another recorder
-            // can suspend an already-disabled registration set.
-            self.restore_hotkeys(true)?;
+            // Suspending also clears pending native registrations. Recording
+            // remains available so users can fix a conflicting shortcut.
             self.hotkey.suspend();
             self.pending_direct = None;
             self.shortcut_recording = Some(ShortcutRecordingLease::new(
@@ -718,6 +770,7 @@ impl ServeApp {
             if owns_lease {
                 self.shortcut_recording = None;
                 self.hotkey_restore_pending = true;
+                self.hotkey_registration_needed = true;
                 self.restore_hotkeys(true)
             } else {
                 // A stale cleanup request must not release a newer lease. If
@@ -878,7 +931,7 @@ impl ServeApp {
         Some(egui::pos2(x as f32, y as f32))
     }
 
-    fn register_hotkeys(hotkey: &MacosHotkey, config: &AppConfig) -> Result<()> {
+    fn register_hotkeys(hotkey: &MacosHotkey, config: &AppConfig) -> Result<usize> {
         let cmd_keys: Vec<(String, String)> = config
             .commands
             .iter()
@@ -898,8 +951,7 @@ impl ServeApp {
         for (id, spec) in &cmd_keys {
             tracing::info!("selara:   command `{id}` → `{spec}`");
         }
-        hotkey.reregister_all(&config.hotkey, &cmd_keys)?;
-        Ok(())
+        hotkey.reregister_all(&config.hotkey, &cmd_keys)
     }
 
     /// Reload when the watcher flagged a change, or every 5 s as a fallback.
@@ -932,6 +984,7 @@ impl ServeApp {
                 // Its release path will register this current configuration.
                 self.config = cfg;
                 self.hotkey_restore_pending = true;
+                self.hotkey_registration_needed = true;
                 if self.shortcut_recording.is_some() {
                     tracing::info!(
                         "selara: config changed during shortcut recording; deferring hotkey registration"
@@ -999,27 +1052,21 @@ impl ServeApp {
             result: result.to_string(),
             outcome,
         };
-        self.unsaved_history.push_back(entry);
+        self.unsaved_history
+            .push_back(history::PendingEntry::new(entry));
         self.flush_history();
     }
 
     fn flush_history(&mut self) {
         self.last_history_retry = Instant::now();
         let path = history::history_path(&self.config_path);
-        while let Some(entry) = self.unsaved_history.front() {
-            // append can fail during retention after the entry has been written.
-            // Avoid duplicating that entry on a subsequent save attempt.
-            let already_saved = history::load(&path)
-                .map(|entries| entries.contains(entry))
-                .unwrap_or(false);
-            if !already_saved {
-                if let Err(e) = history::append(&path, entry) {
-                    tracing::warn!(
-                        "history: retaining unsaved result in memory; could not append to {}: {e}",
-                        path.display()
-                    );
-                    break;
-                }
+        while let Some(entry) = self.unsaved_history.front_mut() {
+            if let Err(e) = entry.save(&path) {
+                tracing::warn!(
+                    "history: retaining unsaved result in memory; could not append to {}: {e}",
+                    path.display()
+                );
+                break;
             }
             self.unsaved_history.pop_front();
         }
@@ -1045,6 +1092,7 @@ impl ServeApp {
     }
 
     fn fail(&mut self, ctx: &egui::Context, message: String) {
+        self.cancel_active_job();
         let _ = self.hotkey.set_cancel_enabled(false);
         self.progress.hide();
         self.pending_direct = None;
@@ -1057,6 +1105,7 @@ impl ServeApp {
     }
 
     fn finish_run(&mut self, ctx: &egui::Context, succeeded: bool) {
+        self.cancel_active_job();
         self.generation += 1;
         if succeeded {
             self.progress.succeed();
@@ -1067,6 +1116,12 @@ impl ServeApp {
         self.phase = UiPhase::Hidden;
         let _ = self.hotkey.set_cancel_enabled(false);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    fn cancel_active_job(&mut self) {
+        if let Some((_, task)) = self.active_job.take() {
+            task.abort();
+        }
     }
 
     /// Capture before any Selara window becomes key. A tray request must still
@@ -1259,42 +1314,41 @@ impl ServeApp {
         let generation = self.generation;
         let tx = self.job_tx.clone();
         let wake = ctx.clone();
-        self.runtime.spawn(async move {
-            let result = async {
-                let provider = cfg.build_provider_for(&command)?;
-                let delta_tx = tx.clone();
-                let delta_wake = wake.clone();
-                let mut on_delta = move |text: &str| {
-                    let _ = delta_tx.send(JobResult::Delta {
-                        generation,
-                        text: text.into(),
-                    });
-                    delta_wake.request_repaint();
-                };
-                run_command_stream(
-                    provider.as_ref(),
-                    &command,
-                    &input,
-                    None,
-                    PromptVars {
-                        language: Some(&cfg.language),
-                        app: app_name.as_deref(),
-                    },
-                    &mut on_delta,
-                )
-                .await
-            }
-            .await;
-            let job = match result {
-                Ok(text) => JobResult::Success { generation, text },
-                Err(e) => JobResult::Error {
-                    generation,
-                    message: e.to_string(),
-                },
-            };
-            let _ = tx.send(job);
-            wake.request_repaint();
-        });
+        let abort = spawn_job(
+            self.runtime.handle(),
+            generation,
+            tx.clone(),
+            wake.clone(),
+            async move {
+                let result = async {
+                    let provider = cfg.build_provider_for(&command)?;
+                    let delta_tx = tx.clone();
+                    let delta_wake = wake.clone();
+                    let mut on_delta = move |text: &str| {
+                        let _ = delta_tx.send(JobResult::Delta {
+                            generation,
+                            text: text.into(),
+                        });
+                        delta_wake.request_repaint();
+                    };
+                    run_command_stream(
+                        provider.as_ref(),
+                        &command,
+                        &input,
+                        None,
+                        PromptVars {
+                            language: Some(&cfg.language),
+                            app: app_name.as_deref(),
+                        },
+                        &mut on_delta,
+                    )
+                    .await
+                }
+                .await;
+                result.map_err(|e: selara_core::error::CoreError| e.to_string())
+            },
+        );
+        self.active_job = Some((generation, abort));
         Ok(())
     }
 
@@ -1306,6 +1360,7 @@ impl ServeApp {
                 }
             }
             JobResult::Error { message, .. } => self.fail(ctx, message),
+            JobResult::Cancelled { .. } => self.hide(ctx),
             JobResult::Success { text, .. } => {
                 if text.trim().is_empty() {
                     self.fail(
@@ -1395,6 +1450,7 @@ impl ServeApp {
 }
 impl eframe::App for ServeApp {
     fn on_exit(&mut self) {
+        self.cancel_active_job();
         self.flush_history();
         self.hotkey.suspend();
         let _ = self.runtime.block_on(selara_core::app_server::reset());
@@ -1467,6 +1523,13 @@ impl eframe::App for ServeApp {
         while let Ok(job) = self.job_rx.try_recv() {
             if !matches!(&job, JobResult::Delta { .. }) {
                 self.gate.finish();
+                if self
+                    .active_job
+                    .as_ref()
+                    .is_some_and(|(generation, _)| *generation == job.generation())
+                {
+                    self.active_job = None;
+                }
             }
             let waiting = matches!(self.phase, UiPhase::Working { .. });
             if !self.gate.quiescing && should_apply_job(job.generation(), self.generation, waiting)
@@ -2189,7 +2252,106 @@ mod tests {
 }
 #[cfg(test)]
 mod work_gate_tests {
-    use super::WorkGate;
+    use super::{spawn_job, JobResult, WorkGate};
+
+    #[test]
+    fn cancelled_cli_job_stops_its_process_group_before_quiesce_completes() {
+        use selara_core::providers::{CompletionRequest, LlmProvider, ProviderKind};
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(std::env::temp_dir().join(format!(
+            "selara-job-cancel-{}-{}", std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        )));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let binary = dir.0.join("provider");
+        std::fs::write(&binary, "#!/bin/sh\nfixture_dir=$(dirname \"$0\")\ncat >/dev/null\n(sleep 0.5; touch \"$fixture_dir/leaked\") &\nprintf ready > \"$fixture_dir/started\"\nwait\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut gate = WorkGate::default();
+        assert!(gate.admit());
+        let task = spawn_job(
+            runtime.handle(),
+            7,
+            tx,
+            eframe::egui::Context::default(),
+            async move {
+                let provider = selara_core::cli_provider::CliProvider::new(
+                    ProviderKind::ClaudeCli,
+                    String::new(),
+                    Some(binary),
+                );
+                provider
+                    .complete(CompletionRequest {
+                        system: "Rewrite".into(),
+                        user: "Fixture text".into(),
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !dir.0.join("started").exists() {
+            assert!(Instant::now() < deadline, "fixture CLI must start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        gate.quiesce();
+        task.abort();
+        assert!(
+            !gate.pause_if_idle(),
+            "abort request alone is not cleanup completion"
+        );
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            JobResult::Cancelled { generation: 7 }
+        ));
+        gate.finish();
+        assert!(gate.pause_if_idle());
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one terminal event releases the worker"
+        );
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            !dir.0.join("leaked").exists(),
+            "the CLI's descendants must stop on cancellation"
+        );
+    }
+
+    #[test]
+    fn cancelling_before_first_poll_still_reports_worker_completion() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let task = spawn_job(
+            runtime.handle(),
+            8,
+            tx,
+            eframe::egui::Context::default(),
+            std::future::pending(),
+        );
+        task.abort();
+        runtime.block_on(async {
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+        });
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            JobResult::Cancelled { generation: 8 }
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn pause_waits_for_every_worker_even_after_ui_dismissal() {
         let mut gate = WorkGate::default();

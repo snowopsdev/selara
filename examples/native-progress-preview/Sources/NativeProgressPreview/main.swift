@@ -6,12 +6,13 @@ import ThinkingOrbsKit
 
 final class OrbPlayback: ObservableObject {
     @Published var paused = true
-    @Published var dark = true
 }
 
 struct PreviewOrb: View {
     @ObservedObject var playback: OrbPlayback
     var body: some View {
+        // Match the production orb: dark particles and a white halo keep it
+        // visible on either background without changing the chosen artwork.
         ThinkingOrb(state: .working, size: .px64,
                     theme: .light, paused: playback.paused, displaySize: 40)
             .shadow(color: .white.opacity(0.9), radius: 0.7)
@@ -123,7 +124,7 @@ final class Demo: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let capsule = ProgressOrbPanel()
     let paragraph = NSTextField(wrappingLabelWithString: "")
     let replay = NSButton(title: "Replay animation", target: nil, action: nil)
-    let appearanceButton = NSButton(checkboxWithTitle: "Dark appearance", target: nil, action: nil)
+    let appearanceButton = NSButton(checkboxWithTitle: "Dark background", target: nil, action: nil)
     let motionButton = NSButton(checkboxWithTitle: "Reduce motion", target: nil, action: nil)
     var generation = 0
     var escapeMonitor: Any?
@@ -169,7 +170,6 @@ final class Demo: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.contentView!.addSubview(appearanceButton)
         motionButton.frame = NSRect(x: 556, y: 30, width: 160, height: 24)
         window.contentView!.addSubview(motionButton)
-        capsule.playback.dark = appearanceButton.state == .on
         capsule.onCancel = { [weak self] in self?.cancel() }
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53 { self?.cancel(); return nil }
@@ -202,7 +202,6 @@ final class Demo: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let appearance = NSAppearance(named: appearanceButton.state == .on ? .darkAqua : .aqua)
         window.appearance = appearance
         capsule.appearance = appearance
-        capsule.playback.dark = appearanceButton.state == .on
     }
     @objc func start() {
         generation += 1
