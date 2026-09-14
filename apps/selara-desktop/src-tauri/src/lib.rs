@@ -2150,6 +2150,7 @@ mod update_transport_tests {
     use std::time::{Duration, Instant};
     use tauri_plugin_updater::UpdaterExt;
 
+    /// Read one complete HTTP request header from an accepted fixture connection.
     fn read_request(stream: &mut TcpStream) -> Vec<u8> {
         // macOS can inherit the listener's nonblocking mode. Wait for the
         // request before replying, or the updater can reject an unsolicited response.
