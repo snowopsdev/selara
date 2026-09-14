@@ -2146,9 +2146,51 @@ mod tests {
 #[cfg(test)]
 mod update_transport_tests {
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::time::{Duration, Instant};
     use tauri_plugin_updater::UpdaterExt;
+
+    /// Read one complete HTTP request header from an accepted fixture connection.
+    fn read_request(stream: &mut TcpStream) -> Vec<u8> {
+        // macOS can inherit the listener's nonblocking mode. Wait for the
+        // request before replying, or the updater can reject an unsolicited response.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0u8; 1];
+        while !request.ends_with(b"\r\n\r\n") && request.len() < 16384 {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        assert!(
+            request.ends_with(b"\r\n\r\n"),
+            "incomplete HTTP request headers"
+        );
+        request
+    }
+
+    #[test]
+    fn fixture_waits_for_complete_request_on_nonblocking_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        // Model macOS's inherited nonblocking mode on every platform.
+        stream.set_nonblocking(true).unwrap();
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            client.write_all(b"GET /latest.json HTTP/1.1\r\n").unwrap();
+            std::thread::sleep(Duration::from_millis(30));
+            client.write_all(b"Host: localhost\r\n\r\n").unwrap();
+        });
+        let request = read_request(&mut stream);
+        sender.join().unwrap();
+        assert_eq!(
+            request,
+            b"GET /latest.json HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        );
+    }
 
     #[tokio::test]
     async fn actual_updater_verifies_downloads_and_rejects_missing_tampered_or_interrupted_feeds() {
@@ -2169,17 +2211,7 @@ mod update_transport_tests {
                         std::thread::sleep(Duration::from_millis(5));
                         continue;
                     };
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(2)))
-                        .unwrap();
-                    let mut request = Vec::new();
-                    let mut byte = [0u8; 1];
-                    while !request.ends_with(b"\r\n\r\n") && request.len() < 16384 {
-                        if stream.read(&mut byte).unwrap_or(0) == 0 {
-                            break;
-                        }
-                        request.push(byte[0]);
-                    }
+                    let request = read_request(&mut stream);
                     let archive = String::from_utf8_lossy(&request).starts_with("GET /app.tar.gz ");
                     let (status, bytes) = if scenario == "missing" {
                         ("404 Not Found", b"missing".to_vec())
@@ -2196,8 +2228,8 @@ mod update_transport_tests {
                         } else {
                             0
                         };
-                    let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {size}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n");
-                    let _ = stream.write_all(&bytes);
+                    write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {size}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n").unwrap();
+                    stream.write_all(&bytes).unwrap();
                     remaining -= 1;
                 }
                 assert_eq!(remaining, 0);
