@@ -743,10 +743,10 @@ struct PasteboardOwnership {
     text: String,
 }
 
-/// Result of a fresh Cmd+C capture. The previous pasteboard is restored only
-/// after the copied text is verified against the captured AX control. If that
-/// verification fails, leaving the fresh copy in place is safer than guessing
-/// that a concurrent user copy belonged to Selara.
+/// Result of a fresh Cmd+C capture. The previous pasteboard is restored after
+/// the capture is accepted or rejected. The restore is guarded by the capture's
+/// change count and copied text, so a concurrent user copy wins and is left
+/// untouched.
 struct ClipboardCapture {
     snapshot: pasteboard::PasteboardSnapshot,
     change_count: i64,
@@ -1173,6 +1173,7 @@ impl SelectionService for MacosSelection {
                     if range.is_none()
                         || read_ax_selected_text(&el).ok().as_deref() != Some(text.as_str())
                     {
+                        capture.restore();
                         return Ok(None);
                     }
                     let same_target = frontmost_pid() == pid
@@ -1419,6 +1420,37 @@ mod tests {
         );
         assert_eq!(
             snapshot_pasteboard().expect("restored formats").items,
+            before.items
+        );
+    }
+
+    #[test]
+    fn rejected_clipboard_capture_restores_the_previous_pasteboard() {
+        let _exclusive = exclusive();
+        let _guard = RestoreOnDrop(snapshot_pasteboard().expect("initial snapshot"));
+        let before = PasteboardSnapshot {
+            change_count: 0,
+            items: vec![vec![
+                (TEXT_TYPE.to_string(), b"original copy".to_vec()),
+                (CUSTOM_TYPE.to_string(), CUSTOM_BYTES.to_vec()),
+            ]],
+        };
+        restore_pasteboard(&before).expect("write original snapshot");
+        let ours = write_text("clipboard fallback selection").expect("write copied selection");
+
+        // This is the range-less/revalidation-failed path in read_selection.
+        // It must restore all original formats while Selara still owns the copy.
+        super::ClipboardCapture {
+            snapshot: before.clone(),
+            change_count: ours,
+            text: "clipboard fallback selection".into(),
+        }
+        .restore();
+
+        assert_eq!(
+            snapshot_pasteboard()
+                .expect("snapshot after rejected capture")
+                .items,
             before.items
         );
     }

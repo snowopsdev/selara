@@ -666,12 +666,32 @@ fn refresh_command_menu_main(app: &AppHandle) {
     for command in cfg.commands {
         let id = format!("command:{}", command.id);
         let accelerator = configured_menu_accelerator(command.hotkey.as_deref());
-        let item = match MenuItem::with_id(app, id, command.label, enabled, accelerator.as_deref())
-        {
+        let label = command.label;
+        let item = match MenuItem::with_id(
+            app,
+            id.clone(),
+            label.clone(),
+            enabled,
+            accelerator.as_deref(),
+        ) {
             Ok(item) => item,
+            Err(error) if accelerator.is_some() => {
+                app.state::<Supervisor>().push_log(format!(
+                    "[menu] shortcut rejected for `{id}` ({error}); adding it without a menu shortcut"
+                ));
+                match MenuItem::with_id(app, id.clone(), label, enabled, None::<&str>) {
+                    Ok(item) => item,
+                    Err(fallback_error) => {
+                        app.state::<Supervisor>().push_log(format!(
+                            "[menu] could not add command `{id}` without a shortcut: {fallback_error}"
+                        ));
+                        continue;
+                    }
+                }
+            }
             Err(error) => {
                 app.state::<Supervisor>()
-                    .push_log(format!("[menu] could not add command: {error}"));
+                    .push_log(format!("[menu] could not add command `{id}`: {error}"));
                 continue;
             }
         };

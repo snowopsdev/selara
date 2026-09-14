@@ -8,7 +8,7 @@ Implementation and automated verification are complete. Release remains blocked 
 
 | Check | Result |
 | --- | --- |
-| `rustup run 1.95.0 cargo test --workspace` | Passed: 253 tests; 2 existing tests ignored (native runtime handshake and live OpenRouter model listing) |
+| `rustup run 1.95.0 cargo test --workspace` | Passed: 254 tests; 2 existing tests ignored (native runtime handshake and live OpenRouter model listing) |
 | `rustup run 1.95.0 cargo clippy --workspace --all-targets -- -D warnings` | Passed |
 | `rustup run 1.95.0 cargo fmt --all -- --check` | Passed |
 | `npm test` in `apps/selara-desktop` | Passed: 51 tests, including command editing and Models regressions |
@@ -19,7 +19,7 @@ Implementation and automated verification are complete. Release remains blocked 
 
 Regression coverage includes schema and command-pack normalization, historical entries, formatting-preserving output cleaning, reserved shortcuts, protocol framing and run IDs, stale completion/cancellation decisions, quiescing, app filters, instruction recall and saving, warning thresholds, empty input, UTF-16 ranges, clipboard ownership and guarded restoration, concurrent config updates, and lock recovery after a killed writer.
 
-Independent read-only review covered the final selection, clipboard, hotkey, protocol, service lifecycle, and migration changes. Final PR review caught and verified a fix for menu dispatch stripping repeated `command:` prefixes from configured IDs; a regression now preserves those IDs exactly. No actionable P1/P2 findings remained. This review does not substitute for live editor testing.
+Independent read-only review covered the final selection, clipboard, hotkey, protocol, service lifecycle, and migration changes. Final PR review caught and verified fixes for rejected clipboard captures and unsupported menu accelerators; regressions now cover restoring the prior pasteboard and preserving usable commands without an accelerator. A separate regression preserves IDs with repeated `command:` prefixes. No actionable P1/P2 findings remained. This review does not substitute for live editor testing.
 
 ## Live observations
 
