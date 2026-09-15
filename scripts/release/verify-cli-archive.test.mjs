@@ -42,37 +42,49 @@ function fixture(t, missing, {withOrb = true} = {}) {
   return {temp,root,content,archive,pack,provenance,calls,run};
 }
 
-test('complete CLI archive validates version, runtime provenance, and both signatures',t=>{
+test('complete CLI archive validates version, runtime provenance, and both signatures',
+  /** Verifies a complete archive and all of its code signatures. */
+  t=>{
  const f=fixture(t);verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run);
  assert.equal(f.calls.filter(x=>x==='codesign').length,4);
 });
-test('incomplete or malformed recovered archive cannot reach checksum publication',t=>{
+test('incomplete or malformed recovered archive cannot reach checksum publication',
+  /** Verifies that invalid archives fail before publication. */
+  t=>{
  const f=fixture(t,'selara-codex');
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run),/Missing CLI archive file/);
  assert.equal(f.calls.includes('codesign'),false);
  writeFileSync(f.archive,'malformed archive');
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run));
 });
-test('wrong version, provenance, or code signature rejects a recovered CLI',t=>{
+test('wrong version, provenance, or code signature rejects a recovered CLI',
+  /** Verifies each release identity and integrity guard. */
+  t=>{
  const f=fixture(t);
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',(p,a)=>basename(p)==='selara'?'selara 0.4.0':f.run(p,a)),/version does not match/);
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',(p,a)=>{if(p==='codesign')throw Error('invalid signature');return f.run(p,a);}),/invalid signature/);
  f.provenance.patches_sha256='wrong';writeFileSync(join(f.content,'selara-codex.provenance.json'),JSON.stringify(f.provenance));f.pack();
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run),/provenance mismatch/);
 });
-test('missing expected team rejects recovered CLI before extraction or execution',t=>{
+test('missing expected team rejects recovered CLI before extraction or execution',
+  /** Verifies that an invalid team identifier stops verification immediately. */
+  t=>{
  const f=fixture(t);
  for(const teamId of ['',undefined,'0123456789\n']) assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1',teamId,f.run),/APPLE_TEAM_ID/);
  assert.deepEqual(f.calls,[]);
 });
 
-test('orb-enabled CLI source requires its license before signature checks or execution',t=>{
+test('orb-enabled CLI source requires its license before signature checks or execution',
+  /** Verifies that orb-enabled archives contain their required license. */
+  t=>{
  const f=fixture(t,'thinking-orbs.LICENSE');
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run),/Missing CLI archive file: thinking-orbs\.LICENSE/);
  assert.equal(f.calls.includes('codesign'),false);
  assert.equal(f.calls.some(p=>basename(p)==='selara'),false);
 });
-test('recovered releases whose source predates the orb keep their original requirements',t=>{
+test('recovered releases whose source predates the orb keep their original requirements',
+  /** Verifies compatibility with release sources that predate the orb. */
+  t=>{
  const f=fixture(t,undefined,{withOrb:false});
  verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run);
  assert.equal(f.calls.filter(x=>x==='codesign').length,4);
