@@ -8,4 +8,4 @@ xcrun swiftc -swift-version 5 -O -module-name SelaraProgressTests \
   "$native_dir"/ThinkingOrbsKit/Sources/ThinkingOrbsKit/*.swift \
   "$native_dir/Progress.swift" "$native_dir/Tests/main.swift" \
   -o "$build_dir/native-progress-tests"
-exec "$build_dir/native-progress-tests"
+exec "$build_dir/native-progress-tests" "$@"

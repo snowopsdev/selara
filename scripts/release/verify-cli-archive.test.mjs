@@ -7,19 +7,26 @@ import {tmpdir} from 'node:os';
 import {join, basename, resolve} from 'node:path';
 import {verifyCliArchive} from './verify-cli-archive.mjs';
 
-function fixture(t, missing) {
+/** Creates an isolated CLI archive fixture and records its verification commands. */
+function fixture(t, missing, {withOrb = true} = {}) {
   const temp=mkdtempSync(join(tmpdir(),'selara-cli-fixture-'));
   t.after(()=>rmSync(temp,{recursive:true,force:true}));
-  const root=fileURLToPath(new URL('../../',import.meta.url));
+  const repository=fileURLToPath(new URL('../../',import.meta.url));
+  const root=join(temp,'source');
+  mkdirSync(join(root,'vendor/codex-runtime'),{recursive:true});
+  writeFileSync(join(root,'vendor/codex-runtime/runtime.toml'),readFileSync(join(repository,'vendor/codex-runtime/runtime.toml')));
+  if(withOrb)mkdirSync(join(root,'apps/selara/native/ThinkingOrbsKit'),{recursive:true});
   const content=join(temp,'selara-0.4.1-macos-arm64'); mkdirSync(content);
   const lock=readFileSync(join(root,'vendor/codex-runtime/runtime.toml'),'utf8');
   const provenance=Object.fromEntries(['source_revision','patches_sha256','target','minimum_macos'].map(key=>[key,lock.match(new RegExp(`^${key} = "([^"]+)"`,'m'))[1]]));
-  for(const name of ['selara','selara-codex','selara-codex.LICENSE','selara-codex.NOTICE']) if(name!==missing)writeFileSync(join(content,name),'fixture');
+  for(const name of ['selara','selara-codex','selara-codex.LICENSE','selara-codex.NOTICE',...(withOrb?['thinking-orbs.LICENSE']:[])]) if(name!==missing)writeFileSync(join(content,name),'fixture');
   writeFileSync(join(content,'selara-codex.provenance.json'),JSON.stringify(provenance));
   const archive=join(temp,'archive.tar.gz');
+  /** Rebuilds the archive after a fixture mutation. */
   const pack=()=>execFileSync('tar',['-czf',archive,'-C',temp,basename(content)], {env:{...process.env,COPYFILE_DISABLE:'1'}});
   pack();
   const calls=[];
+  /** Simulates the platform verification commands while recording each invocation. */
   const run=(program,args)=>{
     calls.push(program);
     if(program==='python3')return execFileSync(program,args,{encoding:'utf8',stdio:'pipe'});
@@ -35,26 +42,50 @@ function fixture(t, missing) {
   return {temp,root,content,archive,pack,provenance,calls,run};
 }
 
-test('complete CLI archive validates version, runtime provenance, and both signatures',t=>{
+test('complete CLI archive validates version, runtime provenance, and both signatures',
+  /** Verifies a complete archive and all of its code signatures. */
+  t=>{
  const f=fixture(t);verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run);
  assert.equal(f.calls.filter(x=>x==='codesign').length,4);
 });
-test('incomplete or malformed recovered archive cannot reach checksum publication',t=>{
+test('incomplete or malformed recovered archive cannot reach checksum publication',
+  /** Verifies that invalid archives fail before publication. */
+  t=>{
  const f=fixture(t,'selara-codex');
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run),/Missing CLI archive file/);
  assert.equal(f.calls.includes('codesign'),false);
  writeFileSync(f.archive,'malformed archive');
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run));
 });
-test('wrong version, provenance, or code signature rejects a recovered CLI',t=>{
+test('wrong version, provenance, or code signature rejects a recovered CLI',
+  /** Verifies each release identity and integrity guard. */
+  t=>{
  const f=fixture(t);
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',(p,a)=>basename(p)==='selara'?'selara 0.4.0':f.run(p,a)),/version does not match/);
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',(p,a)=>{if(p==='codesign')throw Error('invalid signature');return f.run(p,a);}),/invalid signature/);
  f.provenance.patches_sha256='wrong';writeFileSync(join(f.content,'selara-codex.provenance.json'),JSON.stringify(f.provenance));f.pack();
  assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run),/provenance mismatch/);
 });
-test('missing expected team rejects recovered CLI before extraction or execution',t=>{
+test('missing expected team rejects recovered CLI before extraction or execution',
+  /** Verifies that an invalid team identifier stops verification immediately. */
+  t=>{
  const f=fixture(t);
  for(const teamId of ['',undefined,'0123456789\n']) assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1',teamId,f.run),/APPLE_TEAM_ID/);
  assert.deepEqual(f.calls,[]);
+});
+
+test('orb-enabled CLI source requires its license before signature checks or execution',
+  /** Verifies that orb-enabled archives contain their required license. */
+  t=>{
+ const f=fixture(t,'thinking-orbs.LICENSE');
+ assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run),/Missing CLI archive file: thinking-orbs\.LICENSE/);
+ assert.equal(f.calls.includes('codesign'),false);
+ assert.equal(f.calls.some(p=>basename(p)==='selara'),false);
+});
+test('recovered releases whose source predates the orb keep their original requirements',
+  /** Verifies compatibility with release sources that predate the orb. */
+  t=>{
+ const f=fixture(t,undefined,{withOrb:false});
+ verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run);
+ assert.equal(f.calls.filter(x=>x==='codesign').length,4);
 });
