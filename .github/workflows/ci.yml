@@ -5,9 +5,11 @@ on:
     branches: [main]
   # Every pull request, whatever its base branch, so stacked PRs that target
   # a parent branch still get checked. ready_for_review re-runs after the
-  # desktop-package draft gate below.
+  # desktop-package draft gate below; converted_to_draft starts a run that
+  # cancels the in-flight one via the concurrency group and then skips
+  # desktop-package.
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
 
 concurrency:
   # One group per PR so a new push cancels the stale run. Pushes to main get
@@ -58,6 +60,9 @@ jobs:
               - 'scripts/release/**'
               - 'scripts/codex-runtime/**'
               - 'vendor/codex-runtime/**'
+              # scripts/release/desktop-release.test.mjs reads the checked-in
+              # Homebrew templates; only desktop-package runs those tests.
+              - 'homebrew/**'
 
   check:
     name: fmt / clippy / test (Linux)
@@ -154,18 +159,20 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # Must stay AFTER rust-cache. scripts/codex-runtime/build.py compiles the
-      # pinned Codex runtime into target/codex-runtime (its own
-      # CARGO_TARGET_DIR, CARGO_INCREMENTAL=0). rust-cache's post-job cleanup
-      # prunes everything under target/ that is not a workspace-lockfile
-      # dependency, so this 14-minute compile was never cached even on a full
-      # key hit. Post steps run in reverse order: declaring this step after
-      # rust-cache saves the directory before rust-cache cleans it.
-      - name: Cache Codex runtime build
-        uses: actions/cache@v6
+      # scripts/codex-runtime/build.py compiles the pinned Codex runtime into
+      # target/codex-runtime (its own CARGO_TARGET_DIR, CARGO_INCREMENTAL=0).
+      # rust-cache's post-job cleanup prunes everything under target/ that is
+      # not a workspace-lockfile dependency, so this 14-minute compile was
+      # never cached even on a full key hit. Restore here, after rust-cache
+      # has unpacked target/, so its stale pruned remnants cannot overwrite
+      # the restored tree. The save is an explicit step at the end of the job
+      # (below), which runs before any post-job cleanup.
+      - name: Restore Codex runtime build
+        id: codex-cache
+        uses: actions/cache/restore@v6
         with:
           path: target/codex-runtime
-          key: codex-runtime-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('vendor/codex-runtime/**', 'scripts/codex-runtime/build.py', 'scripts/codex-runtime/build.sh') }}
+          key: codex-runtime-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('vendor/codex-runtime/**', 'scripts/codex-runtime/build.py', 'scripts/codex-runtime/build.sh') }}
 
       - name: Install Python
         uses: actions/setup-python@v7
@@ -218,6 +225,19 @@ jobs:
 
       - name: Test desktop and picker coordination
         run: cargo test -p selara-desktop -p selara
+
+      # Cache keys are immutable: the first save for a key wins and later
+      # saves are rejected. Only the ci leg builds the dev and test profiles
+      # of the runtime (in the runtime-test step above), so it is the sole
+      # producer; the faster local leg would otherwise win the race with a
+      # release-only tree and the ~10 min of dev/test rebuilds would never be
+      # cached.
+      - name: Save Codex runtime build
+        if: matrix.mode == 'ci' && steps.codex-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: target/codex-runtime
+          key: ${{ steps.codex-cache.outputs.cache-primary-key }}
 
   desktop-dist:
     name: desktop dist is up to date
