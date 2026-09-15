@@ -4,16 +4,65 @@ on:
   push:
     branches: [main]
   # Every pull request, whatever its base branch, so stacked PRs that target
-  # a parent branch still get checked.
+  # a parent branch still get checked. ready_for_review re-runs after the
+  # desktop-package draft gate below.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  # One group per PR so a new push cancels the stale run. Pushes to main get
+  # a unique group per commit and are never cancelled or queued behind each
+  # other.
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Path filter for the two macOS jobs below. Linux jobs always run: they are
+  # cheap and are the required checks, and a job skipped by `if:` still
+  # reports (as skipped) whereas a path-filtered workflow never does.
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # dorny/paths-filter reads the PR file list via API
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      desktop: ${{ steps.filter.outputs.desktop }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            rust:
+              - '.github/workflows/ci.yml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'crates/**'
+              - 'apps/selara/**'
+            desktop:
+              - '.github/workflows/ci.yml'
+              - 'apps/selara-desktop/**'
+              - 'scripts/release/**'
+              - 'scripts/codex-runtime/**'
+              - 'vendor/codex-runtime/**'
+
   check:
     name: fmt / clippy / test (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -43,6 +92,10 @@ jobs:
   macos:
     name: build / clippy (macOS shell)
     runs-on: macos-latest
+    timeout-minutes: 20
+    needs: changes
+    # Pushes to main always run everything; PRs run this only on Rust changes.
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -74,6 +127,16 @@ jobs:
   desktop-package:
     name: package desktop (macOS)
     runs-on: macos-latest
+    # 30 min today with a cold Codex runtime cache; ~10 min warm.
+    timeout-minutes: 60
+    needs: changes
+    # Pushes to main always run everything. PRs run this only when Rust or
+    # desktop/packaging inputs changed, and never while the PR is a draft.
+    if: >-
+      (github.event_name == 'push' ||
+       needs.changes.outputs.rust == 'true' ||
+       needs.changes.outputs.desktop == 'true') &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     strategy:
       fail-fast: false
       matrix:
@@ -85,10 +148,24 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Rust stable
+        id: toolchain
         uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      # Must stay AFTER rust-cache. scripts/codex-runtime/build.py compiles the
+      # pinned Codex runtime into target/codex-runtime (its own
+      # CARGO_TARGET_DIR, CARGO_INCREMENTAL=0). rust-cache's post-job cleanup
+      # prunes everything under target/ that is not a workspace-lockfile
+      # dependency, so this 14-minute compile was never cached even on a full
+      # key hit. Post steps run in reverse order: declaring this step after
+      # rust-cache saves the directory before rust-cache cleans it.
+      - name: Cache Codex runtime build
+        uses: actions/cache@v6
+        with:
+          path: target/codex-runtime
+          key: codex-runtime-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('vendor/codex-runtime/**', 'scripts/codex-runtime/build.py', 'scripts/codex-runtime/build.sh') }}
 
       - name: Install Python
         uses: actions/setup-python@v7
@@ -145,6 +222,7 @@ jobs:
   desktop-dist:
     name: desktop dist is up to date
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -181,6 +259,7 @@ jobs:
   skill-tests:
     name: e2e-qa-orchestrator skill tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7

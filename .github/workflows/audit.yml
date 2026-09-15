@@ -36,14 +36,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
+      # Prebuilt binary; nothing to compile or cache. ubuntu-latest ships cargo,
+      # which is all `cargo audit` needs to dispatch to the subcommand.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
 
       - name: Audit Cargo.lock against RustSec
         run: cargo audit
