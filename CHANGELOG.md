@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/snowopsdev/selara/compare/v0.5.0...v0.6.0) (2026-09-15)
+
+
+### Features
+
+* **desktop:** Improve providers, shortcuts, and command feedback ([#118](https://github.com/snowopsdev/selara/issues/118)) ([385d3e0](https://github.com/snowopsdev/selara/commit/385d3e0eda33ddcb95631673ed793b5ecea81d5d))
+* **desktop:** Replace selected text directly and simplify Settings ([#108](https://github.com/snowopsdev/selara/issues/108)) ([631a97e](https://github.com/snowopsdev/selara/commit/631a97eb6fd8a5e1d20fa146d380599480358a80))
+
+
+### Bug fixes
+
+* **desktop:** Wait for complete updater fixture requests ([#117](https://github.com/snowopsdev/selara/issues/117)) ([cd572ee](https://github.com/snowopsdev/selara/commit/cd572ee724d6f5433861d6e0cba6acf76f68b049))
+* **release:** Notarize the DMG before publishing ([#106](https://github.com/snowopsdev/selara/issues/106)) ([d5e6349](https://github.com/snowopsdev/selara/commit/d5e63490d837415f25ce6f6d02ae9499ad6b534a))
+
 ## [0.5.0](https://github.com/snowopsdev/selara/compare/v0.4.1...v0.5.0) (2026-09-11)
 
 
