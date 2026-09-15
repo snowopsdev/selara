@@ -1,7 +1,7 @@
 // Native geometry and lifecycle regressions: compile with Progress.swift and the orb sources.
 import AppKit
 
-// Swift assertions disappear under -O; keep checks active with readable failures.
+/// Enforces a test condition even when Swift assertions are disabled under `-O`.
 func expect(_ condition: @autoclosure () -> Bool, _ message: String = "", line: UInt = #line) {
     guard condition() else {
         fputs("FAIL at line \(line): \(message)\n", stderr)
@@ -9,10 +9,11 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String = "", line: 
     }
 }
 
-// Golden samples captured from thinking-orbs v0.3.1's JavaScript working64
-// preset (bd204b73c9b6660fad7210b1ad48d9dc2adbb89d), retained from PR #119.
-// Exercise the shipped Swift engine and preset, including its clock multiplier.
-// Use the upstream Swift port's 1e-4 tolerance for cross-platform trig differences.
+/// Checks the shipped working-orb engine against thinking-orbs v0.3.1 golden samples.
+///
+/// The samples cover the `working64` preset at revision
+/// bd204b73c9b6660fad7210b1ad48d9dc2adbb89d, including its clock multiplier.
+/// They use the upstream Swift port's 1e-4 tolerance for platform trig differences.
 func checkWorkingOrbGeometry() {
     let preset = resolvePreset(.working, .px64)
     let samples: [(Double, [(Int, [Double])])] = [
@@ -58,6 +59,7 @@ if CommandLine.arguments.contains("--geometry-only") { exit(0) }
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let sourcePID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+/// Processes AppKit events for the requested test interval.
 func pump(_ seconds: TimeInterval) {
     let until = Date().addingTimeInterval(seconds)
     while Date() < until {
@@ -67,10 +69,13 @@ func pump(_ seconds: TimeInterval) {
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
     }
 }
+/// Returns the visible Selara progress panel, when one exists.
 func visiblePanel() -> NSWindow? { app.windows.first { $0.title == "Selara" && $0.isVisible } }
+/// Shows a progress handle with the supplied command title.
 func show(_ handle: UnsafeMutableRawPointer, _ title: String = "RewritePro") {
     title.withCString { progressShow(handle, $0) }
 }
+/// Finds the first button in a native view hierarchy.
 func findButton(_ view: NSView?) -> NSButton? {
     guard let view else { return nil }
     if let button = view as? NSButton { return button }
@@ -104,6 +109,7 @@ let cancel = findButton(shown.contentView)!
 expect(cancel.image == nil, "cancel affordance should be quiet until hovered")
 let originalPointer = NSEvent.mouseLocation
 let primaryTop = NSScreen.screens[0].frame.maxY
+/// Posts a synthetic mouse event at an AppKit screen coordinate.
 func mouse(_ type: CGEventType, _ point: NSPoint) {
     CGEvent(mouseEventSource: nil, mouseType: type,
             mouseCursorPosition: CGPoint(x: point.x, y: primaryTop - point.y),

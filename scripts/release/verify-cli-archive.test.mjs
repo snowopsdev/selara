@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os';
 import {join, basename, resolve} from 'node:path';
 import {verifyCliArchive} from './verify-cli-archive.mjs';
 
+/** Creates an isolated CLI archive fixture and records its verification commands. */
 function fixture(t, missing, {withOrb = true} = {}) {
   const temp=mkdtempSync(join(tmpdir(),'selara-cli-fixture-'));
   t.after(()=>rmSync(temp,{recursive:true,force:true}));
@@ -21,9 +22,11 @@ function fixture(t, missing, {withOrb = true} = {}) {
   for(const name of ['selara','selara-codex','selara-codex.LICENSE','selara-codex.NOTICE',...(withOrb?['thinking-orbs.LICENSE']:[])]) if(name!==missing)writeFileSync(join(content,name),'fixture');
   writeFileSync(join(content,'selara-codex.provenance.json'),JSON.stringify(provenance));
   const archive=join(temp,'archive.tar.gz');
+  /** Rebuilds the archive after a fixture mutation. */
   const pack=()=>execFileSync('tar',['-czf',archive,'-C',temp,basename(content)], {env:{...process.env,COPYFILE_DISABLE:'1'}});
   pack();
   const calls=[];
+  /** Simulates the platform verification commands while recording each invocation. */
   const run=(program,args)=>{
     calls.push(program);
     if(program==='python3')return execFileSync(program,args,{encoding:'utf8',stdio:'pipe'});

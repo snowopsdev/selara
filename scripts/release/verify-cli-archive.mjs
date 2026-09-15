@@ -4,8 +4,18 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { developerIdRequirement } from "./apple-signature.mjs";
+/** Executes a verification command with bounded, captured output. */
 const command = (program, args) => execFileSync(program, args, { encoding: "utf8", stdio: "pipe", timeout: 60_000 });
 
+/**
+ * Verifies the contents, signatures, versions, and provenance of a recovered CLI archive.
+ *
+ * @param {string} archive - Path to the archive under verification.
+ * @param {string} root - Path to the matching release source tree.
+ * @param {string} tag - Release tag whose version the archive must contain.
+ * @param {string} teamId - Expected Apple Developer Team identifier.
+ * @param {(program: string, args: string[]) => string} run - Command runner used for verification.
+ */
 export function verifyCliArchive(archive, root, tag, teamId, run = command) {
   const requirement = developerIdRequirement(teamId);
   const cli = `selara-${tag.slice(1)}-macos-arm64.tar.gz`;
