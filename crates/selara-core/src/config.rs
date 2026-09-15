@@ -48,6 +48,10 @@ pub struct AppConfig {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub provider: ProviderConfig,
+    /// Saved connection settings, keyed by kind and authentication mode.
+    /// `provider` remains the active connection for existing CLI/config users.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub provider_connections: std::collections::BTreeMap<String, ProviderConfig>,
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
     /// Preferred content/UI language code (e.g. "en", "es").
@@ -71,6 +75,9 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub kind: ProviderKind,
+    /// Disabled connections keep their settings but cannot start requests.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// OpenAI-compatible base URL, e.g. https://api.openai.com/v1 or http://localhost:11434/v1
     pub base_url: String,
     pub model: String,
@@ -84,6 +91,17 @@ pub struct ProviderConfig {
     /// Optional Codex home directory used by the app-server runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_home: Option<PathBuf>,
+    /// CLI executable name or absolute path. Empty uses provider discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_binary: Option<PathBuf>,
+}
+
+impl ProviderConfig {
+    pub fn connection_key(&self) -> String {
+        let kind = serde_json::to_value(self.kind).expect("provider kind serializes");
+        let auth = serde_json::to_value(self.auth).expect("provider auth serializes");
+        format!("{}:{}", kind.as_str().unwrap(), auth.as_str().unwrap())
+    }
 }
 
 /// Gentle defaults — accident protection, not rationing. Users with fat API budgets
@@ -192,12 +210,15 @@ impl Default for AppConfig {
             schema_version: CURRENT_SCHEMA_VERSION,
             provider: ProviderConfig {
                 kind: ProviderKind::OpenAiCompatible,
+                enabled: true,
                 base_url: "https://api.openai.com/v1".into(),
                 model: "gpt-4o-mini".into(),
                 api_key: None,
                 auth: ProviderAuth::ApiKey,
                 codex_home: None,
+                cli_binary: None,
             },
+            provider_connections: Default::default(),
             hotkey: default_hotkey(),
             language: default_language(),
             commands: builtin_commands(),
@@ -293,7 +314,7 @@ impl AppConfig {
     }
 
     /// Replace one section of the config from JSON and leave the rest untouched.
-    /// `section` is `general`, `provider`, `commands`, or `limits`; `value` is the
+    /// `section` is `general`, `provider`, `provider_enabled`, `commands`, or `limits`; `value` is the
     /// JSON the Settings UI holds for that tab. Used for partial saves so two
     /// writers (the Settings app and `serve`) do not clobber each other's fields.
     pub fn apply_section(
@@ -323,7 +344,45 @@ impl AppConfig {
                         .collect();
                 }
             }
-            "provider" => self.provider = serde_json::from_value(value).map_err(bad)?,
+            "provider" => {
+                let mut next: ProviderConfig = serde_json::from_value(value).map_err(bad)?;
+                if next.kind.is_cli() {
+                    next.api_key = None;
+                    next.base_url.clear();
+                    next.auth = ProviderAuth::ApiKey;
+                }
+                self.provider_connections.insert(self.provider.connection_key(), self.provider.clone());
+                self.provider_connections.insert(next.connection_key(), next.clone());
+                self.provider = next;
+            }
+            "provider_enabled" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Change {
+                    kind: ProviderKind,
+                    #[serde(default)]
+                    auth: ProviderAuth,
+                    enabled: bool,
+                }
+                let change: Change = serde_json::from_value(value).map_err(bad)?;
+                if change.auth == ProviderAuth::ChatGpt && change.kind != ProviderKind::OpenAiCompatible {
+                    return Err(CoreError::Config("ChatGPT authentication requires the Codex connection.".into()));
+                }
+                let seed = ProviderConfig {
+                    kind: change.kind,
+                    auth: change.auth,
+                    enabled: change.enabled,
+                    base_url: change.kind.default_base_url().into(),
+                    model: String::new(), api_key: None, codex_home: None, cli_binary: None,
+                };
+                let key = seed.connection_key();
+                if self.provider.connection_key() == key {
+                    self.provider.enabled = change.enabled;
+                    self.provider_connections.insert(key, self.provider.clone());
+                } else {
+                    self.provider_connections.entry(key).or_insert(seed).enabled = change.enabled;
+                }
+            }
             "commands" => {
                 self.commands = serde_json::from_value(value).map_err(bad)?;
                 normalize_commands(&mut self.commands);
@@ -331,11 +390,25 @@ impl AppConfig {
             "limits" => self.limits = serde_json::from_value(value).map_err(bad)?,
             other => {
                 return Err(CoreError::Config(format!(
-                    "unknown config section `{other}` (expected general, provider, commands, or limits)"
+                    "unknown config section `{other}` (expected general, provider, provider_enabled, commands, or limits)"
                 )))
             }
         }
         Ok(())
+    }
+
+    /// Remove plaintext copies after moving this provider's key to the keychain.
+    pub fn clear_plaintext_keys(&mut self, kind: ProviderKind) {
+        if self.provider.kind == kind {
+            self.provider.api_key = None;
+        }
+        for connection in self
+            .provider_connections
+            .values_mut()
+            .filter(|p| p.kind == kind)
+        {
+            connection.api_key = None;
+        }
     }
 
     /// Environment first, then the OS keychain entry for this provider kind,
@@ -382,6 +455,19 @@ impl AppConfig {
         ApiKeySource::None
     }
 
+    /// Consult current saved state without replacing an already selected connection's settings.
+    pub fn connection_is_enabled(&self, connection: &ProviderConfig) -> bool {
+        let key = connection.connection_key();
+        if self.provider.connection_key() == key {
+            self.provider.enabled
+        } else {
+            self.provider_connections
+                .get(&key)
+                .unwrap_or(connection)
+                .enabled
+        }
+    }
+
     /// Build the LLM provider for the current config.
     /// When `provider.auth = "chatgpt"` and kind is OpenAI-compatible, uses the
     /// experimental ChatGPT Codex backend (tokens from `~/.codex/auth.json`).
@@ -409,6 +495,16 @@ impl AppConfig {
     }
 
     fn build_provider_with_model(&self, model: &str) -> Result<Box<dyn LlmProvider>, CoreError> {
+        if !self.provider.enabled {
+            return Err(CoreError::Config("The active provider is disabled. Enable it in Providers, or save and use another provider.".into()));
+        }
+        if self.provider.kind.is_cli() {
+            return Ok(Box::new(crate::cli_provider::CliProvider::new(
+                self.provider.kind,
+                model.to_string(),
+                self.provider.cli_binary.clone(),
+            )));
+        }
         let use_chatgpt = matches!(self.provider.auth, ProviderAuth::ChatGpt)
             && matches!(self.provider.kind, ProviderKind::OpenAiCompatible);
         if use_chatgpt {
@@ -1400,5 +1496,171 @@ auth = "chatgpt"
             Some("Terminal"),
             Some("com.apple.Terminal")
         ));
+    }
+    #[test]
+    fn provider_connections_retain_settings_when_switching_and_round_trip() {
+        let mut cfg = AppConfig::default();
+        let original = cfg.provider.connection_key();
+        cfg.apply_section(
+            "provider",
+            serde_json::json!({
+                "kind": "claude_cli", "auth": "api_key", "model": "sonnet", "base_url": "",
+                "cli_binary": "/Applications/CLI Tools/claude", "api_key": "must-not-be-kept"
+            }),
+        )
+        .unwrap();
+        assert!(cfg.provider.api_key.is_none());
+        assert!(cfg.provider_connections.contains_key(&original));
+        assert!(
+            cfg.build_provider().is_ok(),
+            "CLI providers do not require a Selara API key"
+        );
+        cfg.apply_section(
+            "provider",
+            serde_json::json!({
+                "kind": "cursor_cli", "model": "", "base_url": ""
+            }),
+        )
+        .unwrap();
+        let restored: AppConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(restored.provider.kind, ProviderKind::CursorCli);
+        let claude = &restored.provider_connections["claude_cli:api_key"];
+        assert_eq!(claude.model, "sonnet");
+        assert_eq!(
+            claude.cli_binary.as_deref(),
+            Some(Path::new("/Applications/CLI Tools/claude"))
+        );
+        assert!(claude.api_key.is_none());
+    }
+
+    #[test]
+    fn enabling_connections_preserves_settings_and_does_not_activate_them() {
+        let mut cfg = AppConfig::default();
+        let original = serde_json::to_value(&cfg.provider).unwrap();
+        cfg.apply_section(
+            "provider_enabled",
+            serde_json::json!({"kind":"claude_cli", "enabled":true}),
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_value(&cfg.provider).unwrap(), original);
+        assert!(cfg.provider_connections["claude_cli:api_key"].enabled);
+        cfg.provider_connections
+            .get_mut("claude_cli:api_key")
+            .unwrap()
+            .cli_binary = Some("/custom/claude".into());
+        cfg.apply_section(
+            "provider_enabled",
+            serde_json::json!({"kind":"claude_cli", "enabled":false}),
+        )
+        .unwrap();
+        let restored: AppConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        let claude = &restored.provider_connections["claude_cli:api_key"];
+        assert!(!claude.enabled);
+        assert_eq!(
+            claude.cli_binary.as_deref(),
+            Some(Path::new("/custom/claude"))
+        );
+        assert!(restored.provider.enabled);
+    }
+
+    #[test]
+    fn disabling_active_provider_blocks_requests_and_retains_credentials() {
+        let mut cfg = AppConfig::default();
+        cfg.provider.kind = ProviderKind::ClaudeCli;
+        cfg.provider.model = "sonnet".into();
+        cfg.provider.cli_binary = Some("/custom/claude".into());
+        cfg.apply_section(
+            "provider_enabled",
+            serde_json::json!({"kind":"claude_cli", "enabled":false}),
+        )
+        .unwrap();
+        assert!(!cfg.provider.enabled);
+        assert!(!cfg.provider_connections["claude_cli:api_key"].enabled);
+        assert!(
+            matches!(cfg.build_provider(), Err(CoreError::Config(message)) if message.contains("disabled"))
+        );
+        assert!(cfg.build_provider_for(&cfg.commands[0]).is_err());
+        assert_eq!(cfg.provider.model, "sonnet");
+        assert_eq!(
+            cfg.provider.cli_binary.as_deref(),
+            Some(Path::new("/custom/claude"))
+        );
+        cfg.apply_section(
+            "provider_enabled",
+            serde_json::json!({"kind":"claude_cli", "enabled":true}),
+        )
+        .unwrap();
+        assert!(cfg.build_provider().is_ok());
+    }
+
+    #[test]
+    fn pending_connection_observes_disabling_even_after_active_provider_changes() {
+        let mut cfg = AppConfig::default();
+        let frozen = cfg.provider.clone();
+        cfg.apply_section(
+            "provider_enabled",
+            serde_json::json!({"kind":"open_ai_compatible", "enabled":false}),
+        )
+        .unwrap();
+        assert!(
+            frozen.enabled,
+            "pending request keeps its original settings"
+        );
+        assert!(!cfg.connection_is_enabled(&frozen));
+        cfg.apply_section(
+            "provider",
+            serde_json::json!({"kind":"claude_cli", "model":"", "base_url":""}),
+        )
+        .unwrap();
+        assert!(
+            !cfg.connection_is_enabled(&frozen),
+            "a different active provider does not bypass disabling the pending connection"
+        );
+        assert!(cfg.connection_is_enabled(&cfg.provider));
+    }
+
+    #[test]
+    fn legacy_provider_defaults_enabled_and_auth_modes_toggle_independently() {
+        let mut cfg = AppConfig::default();
+        cfg.apply_section("provider", serde_json::json!({"kind":"open_ai_compatible", "auth":"api_key", "model":"saved", "base_url":"", "api_key":"kept"})).unwrap();
+        assert!(cfg.provider.enabled);
+        cfg.apply_section(
+            "provider_enabled",
+            serde_json::json!({"kind":"open_ai_compatible", "auth":"chatgpt", "enabled":false}),
+        )
+        .unwrap();
+        assert!(cfg.provider.enabled);
+        assert_eq!(cfg.provider.api_key.as_deref(), Some("kept"));
+        assert!(!cfg.provider_connections["open_ai_compatible:chatgpt"].enabled);
+        assert!(cfg
+            .apply_section(
+                "provider_enabled",
+                serde_json::json!({"kind":"claude_cli", "auth":"chatgpt", "enabled":true})
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn moving_a_key_to_keychain_clears_active_and_archived_plaintext() {
+        let mut cfg = AppConfig::default();
+        cfg.provider.api_key = Some("old-key".into());
+        cfg.provider_connections
+            .insert(cfg.provider.connection_key(), cfg.provider.clone());
+        let mut other = cfg.provider.clone();
+        other.kind = ProviderKind::Anthropic;
+        other.api_key = Some("other-key".into());
+        cfg.provider_connections
+            .insert(other.connection_key(), other);
+        cfg.clear_plaintext_keys(ProviderKind::OpenAiCompatible);
+        assert!(cfg.provider.api_key.is_none());
+        assert!(cfg.provider_connections["open_ai_compatible:api_key"]
+            .api_key
+            .is_none());
+        assert_eq!(
+            cfg.provider_connections["anthropic:api_key"]
+                .api_key
+                .as_deref(),
+            Some("other-key")
+        );
     }
 }

@@ -42,6 +42,9 @@ function makeHarness(options = {}) {
   const saveQueue = [...(options.saveQueue || [])];
   const importQueue = [...(options.importQueue || [])];
   const storeQueue = [...(options.storeQueue || [])];
+  const updateQueue = [...(options.updateQueue || [])];
+  const usageQueue = [...(options.usageQueue || [])];
+  const clearUsageQueue = [...(options.clearUsageQueue || [])];
   const login = options.login || null;
   const cancelLogin = options.cancelLogin || Promise.resolve();
   const logout = options.logout || { state: "signed_out", logged_in: false, via_chatgpt: false, message: "No ChatGPT account is signed in" };
@@ -67,14 +70,20 @@ function makeHarness(options = {}) {
       case "accessibility_status": return next(axQueue, options.ax || "unknown");
       case "api_key_source": return Promise.resolve("none");
       case "app_version": return Promise.resolve("0.4.1");
+      case "cli_provider_status": return options.cliStatus ? options.cliStatus(args) : Promise.resolve({ installed: true, version: "1.2.3", binary: "/usr/local/bin/cli", message: "CLI available. Sign in through the CLI before writing." });
+      case "bundled_codex_version": return Promise.resolve(options.runtimeVersion || "0.153.4");
       case "update_status": return Promise.resolve(options.updateStatus || null);
+      case "check_for_updates": return next(updateQueue, { state: "up_to_date" });
+      case "install_update": return options.installUpdate ? options.installUpdate.promise : Promise.resolve();
       case "serve_status": return Promise.resolve({ running: false, pid: null, pidfile: "/tmp/selara.pid" });
       case "serve_supervisor_status": return Promise.resolve({ managed: false, external: false, pid: null, child_status: null, last_error: null });
       case "serve_log": return Promise.resolve([]);
-      case "usage_summary": return Promise.resolve({ today: {}, last_30_days: {}, all_time: {} });
+      case "usage_summary": return next(usageQueue, options.usage || { today: {}, last_30_days: {}, all_time: {}, models: [] });
+      case "clear_usage": return next(clearUsageQueue, { today: {}, last_30_days: {}, all_time: {}, models: [] });
       case "history_list": return Promise.resolve(options.history || []);
       case "plugin:autostart|is_enabled": return Promise.resolve(false);
       case "save_config_section": return next(saveQueue, configResult);
+      case "set_shortcut_recording": return options.recordShortcut ? options.recordShortcut(args) : Promise.resolve();
       case "import_commands": return next(importQueue, null);
       case "clear_api_key": return Promise.resolve("none");
       case "store_api_key": return next(storeQueue, "keychain");
@@ -1135,5 +1144,688 @@ test("reports failed provider saves while retaining the complete draft", async (
     assert.equal(document.querySelector("#api_key").value, "draft-key");
     assert.equal(document.querySelector("#codex_home").value, "/Users/test/draft-codex");
     assert.equal(document.querySelector("#save-models").disabled, false, "failed saves leave the action available for retry");
+  } finally { harness.close(); }
+});
+
+
+test("checks for updates from the window footer across tabs without disturbing settings drafts or feedback", async () => {
+  const check = deferred();
+  const harness = makeHarness({ updateStatus: { state: "up_to_date" }, updateQueue: [check] });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    const footer = document.querySelector(".app-footer");
+    assert.equal(footer.parentElement.id, "app");
+    assert.equal(footer.closest("aside"), null);
+    assert.equal(footer.querySelector("#app-version").textContent, "v0.4.1");
+    assert.equal(document.querySelector("#section-status #status-updates"), null);
+    document.querySelector('[data-section="models"]').click();
+    const model = value(harness.dom, "model", "unsaved-model");
+    const feedback = document.querySelector("#save-status").textContent;
+    footer.querySelector("#status-check-update").click();
+    assert.equal(footer.querySelector("#status-check-update").disabled, true);
+    assert.match(footer.querySelector("#status-updates-state").textContent, /Checking/);
+    document.querySelector('[data-section="general"]').click();
+    await harness.listeners.get("update-changed")({ payload: { state: "up_to_date" } });
+    footer.querySelector("#status-check-update").click();
+    assert.equal(callsFor(harness, "check_for_updates").length, 1);
+    check.resolve({ state: "available", version: "0.5.0", notes: "A better sidebar" });
+    await harness.idle();
+    assert.match(footer.textContent, /v0.5.0 available/);
+    assert.equal(footer.querySelector("#status-install-update").disabled, false);
+    assert.match(footer.textContent, /Release notes/);
+    assert.equal(document.querySelector(".section.active").id, "section-general");
+    assert.equal(document.querySelector("#model"), model);
+    assert.equal(model.value, "unsaved-model");
+    assert.equal(document.querySelector("#save-status").textContent, feedback);
+  } finally { harness.close(); }
+});
+
+test("keeps footer update actions disabled through installation events and enables retry after failure", async () => {
+  const install = deferred();
+  const harness = makeHarness({ updateStatus: { state: "available", version: "0.5.0" }, installUpdate: install });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    document.querySelector('[data-section="general"]').click();
+    document.querySelector("#status-install-update").click();
+    assert.equal(callsFor(harness, "install_update").length, 1);
+    assert.equal(document.querySelector("#status-check-update").disabled, true);
+    const update = harness.listeners.get("update-changed");
+    await update({ payload: { state: "downloading", downloaded: 250, total: 1000 } });
+    assert.equal(document.querySelector("#status-update-progress").value, 250);
+    await update({ payload: { state: "waiting", version: "0.5.0" } });
+    assert.match(document.querySelector("#status-update-result").textContent, /Finishing active work/);
+    assert.equal(document.querySelector("#status-check-update").disabled, true);
+    install.reject(new Error("signature verification failed"));
+    await harness.idle();
+    assert.match(document.querySelector("#status-update-result").textContent, /signature verification failed/);
+    assert.equal(document.querySelector("#status-check-update").disabled, false);
+    assert.equal(document.querySelector("#status-check-update").textContent, "Retry");
+    const details = document.querySelector("#update-details");
+    assert.equal(details.hidden, false);
+    document.querySelector("#update-details-toggle").click();
+    assert.equal(details.open, true);
+    document.dispatchEvent(new harness.dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    assert.equal(details.open, false);
+    assert.equal(document.activeElement.id, "update-details-toggle");
+    document.querySelector("#status-check-update").click();
+    await harness.idle();
+    assert.match(document.querySelector("#status-updates-state").textContent, /Up to date/);
+    assert.equal(document.querySelector(".section.active").id, "section-general");
+  } finally { harness.close(); }
+});
+
+
+const usageFixture = {
+  today: { requests: 1, input: 100, output: 50, cost_usd: 0.01, unpriced: 0 },
+  last_30_days: { requests: 3, input: 700, output: 200, cost_usd: 0.03, unpriced: 1 },
+  all_time: { requests: 4, input: 1000, output: 500, cost_usd: 0.03, unpriced: 2 },
+  models: [
+    { kind: "anthropic", model: "model-a", requests: 1, input: 300, output: 100, cost_usd: 0.03, unpriced: 0 },
+    { kind: "chatgpt_codex", model: "model-b", requests: 3, input: 700, output: 400, cost_usd: null, unpriced: 3 },
+  ],
+};
+
+test("opens a dedicated Usage page with period totals and all-time model/provider detail", async () => {
+  const harness = makeHarness({ usage: usageFixture });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    assert.equal(document.querySelector("#section-status #status-usage"), null);
+    assert.equal(callsFor(harness, "usage_summary").length, 0, "status does not fetch usage");
+    document.querySelector('[data-section="usage"]').click();
+    await harness.idle();
+    assert.equal(document.querySelector(".section.active").id, "section-usage");
+    const rows = document.querySelectorAll("#status-usage tbody tr");
+    assert.equal(rows.length, 3);
+    assert.match(rows[2].textContent, /All time41,000500~\$0.03 \+2 unpriced/);
+    const models = document.querySelectorAll(".usage-models tbody tr");
+    assert.match(models[0].textContent, /model-bChatGPT3700400n\/a/);
+    assert.match(models[1].textContent, /model-aAnthropic1300100~\$0.03/);
+    assert.match(document.querySelector(".usage-breakdown").textContent, /All-time totals/);
+    assert.ok(document.querySelector(".app-footer #status-check-update"));
+  } finally { harness.close(); }
+});
+
+test("serializes usage refreshes, retains totals on failure, and recovers to the empty state", async () => {
+  const refresh = deferred();
+  const harness = makeHarness({ usageQueue: [usageFixture, refresh, { today: {}, last_30_days: {}, all_time: {}, models: [] }] });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    document.querySelector('[data-section="usage"]').click();
+    await harness.idle();
+    document.querySelector("#usage-refresh").click();
+    document.querySelector('[data-section="status"]').click();
+    document.querySelector('[data-section="usage"]').click();
+    assert.equal(callsFor(harness, "usage_summary").length, 2);
+    assert.equal(document.querySelector("#usage-clear").disabled, true);
+    refresh.reject(new Error("Could not read usage"));
+    await harness.idle();
+    assert.match(document.querySelector('#section-usage [role="alert"]').textContent, /Could not read usage.*last loaded totals/);
+    assert.equal(document.querySelectorAll(".usage-models tbody tr").length, 2);
+    document.querySelector("#usage-refresh").click();
+    await harness.idle();
+    assert.equal(document.querySelector('#section-usage [role="alert"]'), null);
+    assert.match(document.querySelector("#status-usage").textContent, /No usage recorded yet/);
+    assert.equal(document.querySelector("#usage-clear").disabled, true);
+  } finally { harness.close(); }
+});
+
+test("requires confirmation to clear usage, blocks duplicate clears, and retains totals on failure", async () => {
+  const clear = deferred();
+  const harness = makeHarness({ usage: usageFixture, clearUsageQueue: [clear] });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    document.querySelector('[data-section="usage"]').click();
+    await harness.idle();
+    harness.dom.window.confirm = () => false;
+    document.querySelector("#usage-clear").click();
+    assert.equal(callsFor(harness, "clear_usage").length, 0);
+    harness.dom.window.confirm = () => true;
+    document.querySelector("#usage-clear").click();
+    document.querySelector("#usage-clear").click();
+    document.querySelector("#usage-refresh").click();
+    assert.equal(callsFor(harness, "clear_usage").length, 1);
+    assert.equal(callsFor(harness, "usage_summary").length, 1);
+    clear.reject(new Error("Could not clear usage"));
+    await harness.idle();
+    assert.match(document.querySelector('#section-usage [role="alert"]').textContent, /Could not clear usage/);
+    assert.equal(document.querySelectorAll(".usage-models tbody tr").length, 2);
+    document.querySelector("#usage-clear").click();
+    await harness.idle();
+    assert.match(document.querySelector("#status-usage").textContent, /No usage recorded yet/);
+    assert.equal(callsFor(harness, "save_config_section").length, 0);
+    assert.equal(callsFor(harness, "history_clear").length, 0);
+  } finally { harness.close(); }
+});
+
+
+test("presents Providers with bundled Codex version and preserves drafts across connection selection", async () => {
+  const harness = makeHarness({ config: config({ provider: { kind: "open_ai_compatible", auth: "api_key", model: "api-model", base_url: "https://api.example/v1" } }) });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    assert.equal(document.querySelector('[data-section="models"]').textContent.trim(), "Providers");
+    assert.equal(document.querySelector("#section-models h1").textContent, "Providers");
+    assert.match(document.querySelector('[data-provider-choice="codex"]').textContent, /v0.153.4.*Bundled/);
+    assert.ok(document.querySelector('[data-provider-choice="openai"] .status-dot.ok'));
+    document.querySelector('[data-section="models"]').click();
+    value(harness.dom, "model", "unsaved-api-model");
+    value(harness.dom, "base_url", "https://unsaved.example/v1");
+    document.querySelector('[data-provider-choice="codex"]').click();
+    assert.equal(document.querySelector("#provider-detail-title").textContent, "Codex");
+    assert.equal(document.querySelector("#provider-runtime-version").textContent, "v0.153.4");
+    assert.equal(document.querySelector("#provider-auth").value, "chatgpt");
+    assert.equal(document.querySelector('[data-provider-choice="codex"]').getAttribute("aria-pressed"), "true");
+    document.querySelector('[data-provider-choice="anthropic"]').click();
+    assert.equal(document.querySelector("#provider-kind").value, "anthropic");
+    assert.equal(document.querySelector("#provider-auth").value, "api_key");
+    assert.equal(document.querySelector("#provider-detail-title").textContent, "Anthropic");
+    assert.equal(document.querySelector("#provider-runtime-version").textContent, "API");
+    value(harness.dom, "model", "claude-draft");
+    document.querySelector('[data-provider-choice="openai"]').click();
+    assert.equal(document.querySelector("#model").value, "unsaved-api-model");
+    assert.equal(document.querySelector("#base_url").value, "https://unsaved.example/v1");
+    document.querySelector('[data-provider-choice="anthropic"]').click();
+    assert.equal(document.querySelector("#model").value, "claude-draft");
+    document.querySelector('[data-provider-choice="openrouter"]').click();
+    assert.equal(document.querySelector("#provider-kind").value, "open_router");
+    assert.equal(document.querySelector("#provider-detail-title").textContent, "OpenRouter");
+    assert.equal(callsFor(harness, "save_config_section").length, 0, "browsing connections does not activate them");
+    assert.equal(callsFor(harness, "chatgpt_login").length, 0);
+    await harness.idle();
+  } finally { harness.close(); }
+});
+
+test("saves the selected provider through the existing config command and updates the active indicator", async () => {
+  const saved = config({ provider: { kind: "anthropic", auth: "api_key", model: "claude-selected", base_url: "https://api.anthropic.com", api_key: null, codex_home: null } });
+  const harness = makeHarness({ saveQueue: [saved] });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    document.querySelector('[data-provider-choice="anthropic"]').click();
+    value(harness.dom, "model", "claude-selected");
+    document.querySelector("#save-models").click();
+    await harness.idle(6);
+    const saves = callsFor(harness, "save_config_section");
+    assert.equal(saves.length, 1);
+    assert.equal(saves[0].args.section, "provider");
+    assert.equal(saves[0].args.value.kind, "anthropic");
+    assert.equal(saves[0].args.value.model, "claude-selected");
+    assert.ok(document.querySelector('[data-provider-choice="anthropic"] .status-dot.ok'));
+    assert.equal(document.querySelector('[data-provider-choice="openai"] .status-dot.ok'), null);
+  } finally { harness.close(); }
+});
+
+
+test("restores saved CLI connections and saves executable/model without API credentials", async () => {
+  const cfg = config({ provider_connections: { "claude_cli:api_key": { kind: "claude_cli", auth: "api_key", model: "sonnet", cli_binary: "/Applications/CLI Tools/claude", base_url: "" } } });
+  const saved = { ...cfg, provider: cfg.provider_connections["claude_cli:api_key"] };
+  const harness = makeHarness({ config: cfg, saveQueue: [saved] });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    document.querySelector('[data-provider-choice="claude"]').click();
+    assert.equal(document.querySelector("#model").value, "sonnet");
+    assert.equal(document.querySelector("#cli-binary").value, "/Applications/CLI Tools/claude");
+    assert.equal(document.querySelector("#cli-fields").hidden, false);
+    assert.equal(document.querySelector("#byok-key-wrap").hidden, true);
+    assert.equal(document.querySelector("#load-models").hidden, true);
+    assert.equal(document.querySelector("#chatgpt-fields").style.display, "none");
+    value(harness.dom, "model", "");
+    value(harness.dom, "cli-binary", "/custom/claude");
+    document.querySelector('[data-provider-choice="cursor"]').click();
+    assert.equal(document.querySelector("#cli-binary").value, "");
+    document.querySelector('[data-provider-choice="claude"]').click();
+    assert.equal(document.querySelector("#cli-binary").value, "/custom/claude");
+    document.querySelector("#save-models").click();
+    await harness.idle(6);
+    const save = callsFor(harness, "save_config_section")[0].args.value;
+    assert.equal(save.kind, "claude_cli");
+    assert.equal(save.cli_binary, "/custom/claude");
+    assert.equal(save.model, "", "CLI default model may be saved");
+    assert.equal(save.api_key, null);
+    assert.equal(callsFor(harness, "store_api_key").length, 0);
+    assert.equal(callsFor(harness, "chatgpt_login").length, 0);
+  } finally { harness.close(); }
+});
+
+test("keeps stale CLI inspection results separate from the selected executable", async () => {
+  const pending = deferred();
+  const harness = makeHarness({ cliStatus: ({ binary }) => binary === "/slow/cli" ? pending.promise : Promise.resolve({ installed: true, version: "1.2.3", message: "CLI available; account access has not been checked." }) });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    document.querySelector('[data-provider-choice="opencode"]').click();
+    value(harness.dom, "cli-binary", "/slow/cli");
+    document.querySelector("#cli-refresh").click();
+    assert.equal(document.querySelector("#cli-refresh").disabled, true);
+    value(harness.dom, "cli-binary", "/different/cli");
+    assert.equal(document.querySelector("#cli-refresh").disabled, false);
+    assert.equal(document.querySelector("#provider-runtime-version").textContent, "Not checked");
+    pending.resolve({ installed: true, version: "old-version", message: "Old executable" });
+    await harness.idle();
+    assert.equal(document.querySelector("#provider-runtime-version").textContent, "Not checked");
+    assert.doesNotMatch(document.querySelector("#cli-runtime-status").textContent, /Old executable/);
+    document.querySelector("#cli-refresh").click();
+    await harness.idle();
+    assert.equal(document.querySelector("#provider-runtime-version").textContent, "1.2.3");
+    assert.match(document.querySelector("#cli-runtime-status").textContent, /account access has not been checked/);
+  } finally { harness.close(); }
+});
+
+test("counts requests with unavailable token metadata and labels their tokens n/a", async () => {
+  const bucket = { requests: 1, input: 0, output: 0, cost_usd: null, unpriced: 1, tokens_missing: 1 };
+  const harness = makeHarness({ usage: { today: bucket, last_30_days: bucket, all_time: bucket, models: [{ kind: "cursor_cli", model: "", ...bucket }] } });
+  try {
+    await harness.ready();
+    harness.dom.window.document.querySelector('[data-section="usage"]').click();
+    await harness.idle();
+    const { document } = harness.dom.window;
+    const row = document.querySelector(".usage-models tbody tr");
+    assert.match(row.textContent, /CLI defaultCursor/);
+    assert.deepEqual([...row.querySelectorAll("td")].map((td) => td.textContent), ["1", "n/a", "n/a", "n/a"]);
+    assert.match(document.querySelector(".usage-note").textContent, /exclude 1 request without token metadata/);
+  } finally { harness.close(); }
+});
+
+test("provider switches save independently, serialize writes, and preserve unsaved fields", async () => {
+  const pending = deferred();
+  const initial = config();
+  const enabled = { ...initial, provider_connections: { "claude_cli:api_key": { kind: "claude_cli", enabled: true } } };
+  const harness = makeHarness({ config: initial, saveQueue: [pending] });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    const toggle = (id) => document.querySelector(`[data-provider-enabled="${id}"]`);
+    assert.equal(document.querySelectorAll('[role="switch"][data-provider-enabled]').length, 7);
+    assert.equal(toggle("openai").getAttribute("aria-checked"), "true", "existing active connection remains enabled");
+    assert.equal(toggle("claude").getAttribute("aria-checked"), "false");
+    assert.equal(toggle("claude").closest("[data-provider-choice]"), null, "switch is a separate control");
+    value(harness.dom, "model", "unsaved-model");
+    value(harness.dom, "api_key", "unsaved-key");
+    toggle("claude").click();
+    assert.ok(toggle("cursor").disabled);
+    assert.ok(document.querySelector("#save-models").disabled);
+    toggle("cursor").click();
+    document.querySelector("#save-models").click();
+    assert.equal(callsFor(harness, "save_config_section").length, 1);
+    const request = callsFor(harness, "save_config_section")[0].args;
+    assert.equal(request.section, "provider_enabled");
+    assert.deepEqual(JSON.parse(JSON.stringify(request.value)), { kind: "claude_cli", auth: "api_key", enabled: true });
+    pending.resolve(enabled);
+    await harness.idle();
+    assert.equal(toggle("claude").getAttribute("aria-checked"), "true");
+    assert.equal(document.querySelector("#model").value, "unsaved-model");
+    assert.equal(document.querySelector("#api_key").value, "unsaved-key");
+    assert.ok(document.querySelector('[data-provider-choice="openai"] .status-dot.ok'));
+    assert.equal(document.querySelector('[data-provider-choice="claude"] .status-dot'), null);
+    assert.equal(callsFor(harness, "store_api_key").length, 0);
+    assert.equal(document.querySelector("#save-models").textContent, "Save and use");
+  } finally { harness.close(); }
+});
+
+test("failed provider toggles retain saved state and recover after navigation", async () => {
+  const pending = deferred();
+  const harness = makeHarness({ saveQueue: [pending] });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    document.querySelector('[data-provider-enabled="openai"]').click();
+    document.querySelector('[data-provider-choice="claude"]').click();
+    value(harness.dom, "cli-binary", "/my/claude");
+    assert.ok(document.querySelector('[data-provider-enabled="claude"]').disabled);
+    pending.reject(new Error("Could not write config"));
+    await harness.idle();
+    assert.equal(document.querySelector('[data-provider-enabled="openai"]').getAttribute("aria-checked"), "true");
+    assert.equal(document.querySelector("#cli-binary").value, "/my/claude");
+    assert.equal(document.querySelector('[data-provider-choice="claude"]').getAttribute("aria-pressed"), "true");
+    assert.equal(document.querySelector('[data-provider-enabled="claude"]').disabled, false);
+    assert.match(document.querySelector("#save-status").textContent, /Could not write config/);
+  } finally { harness.close(); }
+});
+
+test("disabled active providers show disabled status and Save and use explicitly enables them", async () => {
+  const initial = config({ provider: { kind: "claude_cli", auth: "api_key", model: "sonnet", enabled: false } });
+  const harness = makeHarness({ config: initial });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    assert.equal(document.querySelector('[data-provider-enabled="claude"]').getAttribute("aria-checked"), "false");
+    assert.match(document.querySelector('[data-provider-choice="claude"]').textContent, /Active · Disabled/);
+    assert.match(document.querySelector("#status-provider").textContent, /Disabled/);
+    assert.ok(document.querySelector("#status-check-provider").disabled);
+    document.querySelector("#save-models").click();
+    await harness.idle(6);
+    const request = callsFor(harness, "save_config_section")[0].args;
+    assert.equal(request.section, "provider");
+    assert.equal(request.value.enabled, true);
+  } finally { harness.close(); }
+});
+
+test("restores saved connection fields when switching between ChatGPT and API modes", async () => {
+  const connected = { state: "connected", logged_in: true, via_chatgpt: true, email: "user@example.test", plan: "pro", message: "ChatGPT account connected" };
+  const chatgpt = { kind: "open_ai_compatible", auth: "chatgpt", model: "chat-saved", base_url: "https://chat.example/v1", api_key: null, codex_home: "/codex-chat", enabled: true };
+  const api = { kind: "open_ai_compatible", auth: "api_key", model: "api-saved", base_url: "https://saved-provider.example/v1", api_key: "fixture-key", codex_home: "/codex-api", enabled: true };
+  const persisted = config({ provider: chatgpt, provider_connections: { "open_ai_compatible:chatgpt": chatgpt, "open_ai_compatible:api_key": api } });
+  const savedApi = config({ provider: api, provider_connections: { "open_ai_compatible:chatgpt": chatgpt, "open_ai_compatible:api_key": api } });
+  const harness = makeHarness({ config: persisted, auth: connected, saveQueue: [savedApi] });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    assert.equal(document.querySelector("#provider-auth").value, "chatgpt");
+    assert.equal(document.querySelector("#model-select").value, "chat-saved");
+    assert.equal(document.querySelector("#codex_home").value, "/codex-chat");
+
+    document.querySelector('[data-provider-choice="openai"]').click();
+    await harness.idle(2);
+    assert.equal(document.querySelector("#provider-auth").value, "api_key");
+    assert.equal(document.querySelector("#model").value, "api-saved");
+    assert.equal(document.querySelector("#base_url").value, "https://saved-provider.example/v1");
+    assert.equal(document.querySelector("#api_key").value, "fixture-key");
+    assert.equal(document.querySelector("#codex_home").value, "/codex-api");
+
+    const keychain = document.querySelector("#store-keychain");
+    keychain.checked = false;
+    keychain.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+    document.querySelector("#save-models").click();
+    await harness.idle(8);
+    const request = callsFor(harness, "save_config_section").at(-1).args.value;
+    assert.equal(request.kind, "open_ai_compatible");
+    assert.equal(request.auth, "api_key");
+    assert.equal(request.model, "api-saved");
+    assert.equal(request.base_url, "https://saved-provider.example/v1");
+    assert.equal(request.api_key, "fixture-key");
+    assert.equal(request.codex_home, "/codex-api");
+
+    document.querySelector('[data-provider-choice="codex"]').click();
+    await harness.idle(2);
+    assert.equal(document.querySelector("#provider-auth").value, "chatgpt");
+    assert.equal(document.querySelector("#model-select").value, "chat-saved");
+    assert.equal(document.querySelector("#codex_home").value, "/codex-chat");
+    assert.match(document.querySelector("#chatgpt-status-line").textContent, /Connected/);
+  } finally { harness.close(); }
+});
+
+test("keeps independent unsaved fields and keychain choices for provider connections", async () => {
+  const connected = { state: "connected", logged_in: true, via_chatgpt: true, email: "user@example.test", plan: "pro", message: "ChatGPT account connected" };
+  const chatgpt = { kind: "open_ai_compatible", auth: "chatgpt", model: "chat-saved", base_url: "https://chat.example/v1", api_key: null, codex_home: "/codex-chat", enabled: true };
+  const api = { kind: "open_ai_compatible", auth: "api_key", model: "api-saved", base_url: "https://saved-provider.example/v1", api_key: "fixture-key", codex_home: "/codex-api", enabled: true };
+  const anthropic = { kind: "anthropic", auth: "api_key", model: "anthropic-saved", base_url: "https://api.anthropic.com", api_key: "anthropic-key", codex_home: "/codex-anthropic", enabled: true };
+  const harness = makeHarness({
+    config: config({ provider: chatgpt, provider_connections: {
+      "open_ai_compatible:chatgpt": chatgpt,
+      "open_ai_compatible:api_key": api,
+      "anthropic:api_key": anthropic,
+    } }),
+    auth: connected,
+  });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    document.querySelector('[data-provider-choice="openai"]').click();
+    await harness.idle(2);
+    value(harness.dom, "model", "api-draft");
+    value(harness.dom, "base_url", "https://api-draft.example/v1");
+    value(harness.dom, "api_key", "api-draft-key");
+    value(harness.dom, "codex_home", "/codex-api-draft");
+    const apiKeychain = document.querySelector("#store-keychain");
+    apiKeychain.checked = false;
+    apiKeychain.dispatchEvent(new harness.dom.window.Event("change", { bubbles: true }));
+
+    document.querySelector('[data-provider-choice="codex"]').click();
+    await harness.idle(2);
+    assert.equal(document.querySelector("#model-select").value, "chat-saved");
+    assert.equal(document.querySelector("#codex_home").value, "/codex-chat");
+    const chatOption = document.createElement("option");
+    chatOption.value = "chat-draft";
+    chatOption.textContent = "chat-draft";
+    document.querySelector("#model-select").append(chatOption);
+    value(harness.dom, "model-select", "chat-draft");
+    value(harness.dom, "codex_home", "/codex-chat-draft");
+
+    document.querySelector('[data-provider-choice="anthropic"]').click();
+    await harness.idle(2);
+    assert.equal(document.querySelector("#model").value, "anthropic-saved");
+    assert.equal(document.querySelector("#base_url").value, "https://api.anthropic.com");
+    value(harness.dom, "model", "anthropic-draft");
+    value(harness.dom, "api_key", "anthropic-draft-key");
+
+    document.querySelector('[data-provider-choice="openai"]').click();
+    await harness.idle(2);
+    assert.equal(document.querySelector("#provider-auth").value, "api_key");
+    assert.equal(document.querySelector("#model").value, "api-draft");
+    assert.equal(document.querySelector("#base_url").value, "https://api-draft.example/v1");
+    assert.equal(document.querySelector("#api_key").value, "api-draft-key");
+    assert.equal(document.querySelector("#codex_home").value, "/codex-api-draft");
+    assert.equal(document.querySelector("#store-keychain").checked, false);
+
+    document.querySelector('[data-provider-choice="codex"]').click();
+    await harness.idle(2);
+    assert.equal(document.querySelector("#provider-auth").value, "chatgpt");
+    assert.equal(document.querySelector("#model-select").value, "chat-draft");
+    assert.equal(document.querySelector("#codex_home").value, "/codex-chat-draft");
+    document.querySelector('[data-provider-choice="anthropic"]').click();
+    await harness.idle(2);
+    assert.equal(document.querySelector("#model").value, "anthropic-draft");
+    assert.equal(document.querySelector("#api_key").value, "anthropic-draft-key");
+    assert.match(document.querySelector("#chatgpt-status-line").textContent, /Connected/);
+  } finally { harness.close(); }
+});
+
+test("does not clear a different auth draft after a pending keychain write", async () => {
+  const store = deferred();
+  const save = deferred();
+  const connected = { state: "connected", logged_in: true, via_chatgpt: true, email: "user@example.test", plan: "pro", message: "ChatGPT account connected" };
+  const chatgpt = { kind: "open_ai_compatible", auth: "chatgpt", model: "chat-saved", base_url: "https://chat.example/v1", api_key: null, codex_home: "/codex-chat", enabled: true };
+  const api = { kind: "open_ai_compatible", auth: "api_key", model: "api-saved", base_url: "https://saved-provider.example/v1", api_key: "api-key", codex_home: "/codex-api", enabled: true };
+  const persisted = config({ provider: api, provider_connections: { "open_ai_compatible:chatgpt": chatgpt, "open_ai_compatible:api_key": api } });
+  const harness = makeHarness({ config: persisted, auth: connected, storeQueue: [store], saveQueue: [save] });
+  try {
+    await harness.ready();
+    const { document } = harness.dom.window;
+    document.querySelector("#save-models").click();
+    await harness.idle(2);
+    assert.equal(callsFor(harness, "store_api_key").length, 1);
+
+    document.querySelector('[data-provider-choice="codex"]').click();
+    await harness.idle(2);
+    value(harness.dom, "api_key", "chat-draft-secret");
+    store.resolve("keychain");
+    await harness.idle(3);
+    assert.equal(document.querySelector("#api_key").value, "chat-draft-secret");
+
+    save.resolve(config({ provider: { ...api, api_key: null }, provider_connections: { "open_ai_compatible:chatgpt": chatgpt, "open_ai_compatible:api_key": { ...api, api_key: null } } }));
+    await harness.idle(8);
+    document.querySelector('[data-provider-choice="openai"]').click();
+    await harness.idle(2);
+    assert.equal(document.querySelector("#api_key").value, "", "the submitted API key is cleared only on the API connection");
+    document.querySelector('[data-provider-choice="codex"]').click();
+    await harness.idle(2);
+    assert.equal(document.querySelector("#api_key").value, "chat-draft-secret", "the ChatGPT draft key is retained independently");
+  } finally { harness.close(); }
+});
+
+
+test("history preserves incomplete rewrites with accurate recovery guidance", async () => {
+  const harness = makeHarness({ history: [
+    { ts: 1, label: "Rewrite", kind: "replace", original: "Original", result: "Saved rewrite", outcome: "not_applied" },
+    { ts: 2, label: "Rewrite", kind: "replace", original: "Original", result: "Unverified rewrite", outcome: "paste_unverified" },
+  ] });
+  try {
+    const { document } = harness.dom.window;
+    document.querySelector('[data-section="history"]').click();
+    await harness.idle(2);
+    const rows = document.querySelectorAll(".hist-item");
+    assert.match(rows[0].textContent, /Not applied/);
+    assert.match(rows[0].textContent, /Your selection was not changed/);
+    assert.match(rows[0].textContent, /Saved rewrite/);
+    assert.match(rows[1].textContent, /Paste unverified/);
+    assert.match(rows[1].textContent, /paste may have completed/);
+    assert.equal(rows[1].querySelector('[data-act="copy-result"]').disabled, false);
+  } finally { harness.close(); }
+});
+
+function pressShortcut(harness, init, type = "keydown") {
+  const event = new harness.dom.window.KeyboardEvent(type, { bubbles: true, cancelable: true, ...init });
+  harness.dom.window.document.querySelector("#cmd-hotkey").dispatchEvent(event);
+  return event;
+}
+
+async function openShortcutRecorder(harness, id = "rewrite") {
+  await harness.ready();
+  const document = harness.dom.window.document;
+  document.querySelector('[data-section="commands"]').click();
+  document.querySelector(`[data-id="${id}"]`).click();
+  const button = document.querySelector("#cmd-hotkey");
+  button.click();
+  await harness.idle();
+  assert.equal(document.activeElement, button, "pointer activation must focus the recorder in WebKit");
+  return button;
+}
+
+const shortcutCommand = { id: "rewrite", label: "Rewrite", prompt: "Rewrite this.", kind: "replace", hotkey: "cmd+shift+r", apps: [] };
+
+test("records a pressed command shortcut, waits for release, and saves its canonical chord", async () => {
+  const harness = makeHarness({ config: config({ commands: [shortcutCommand] }) });
+  try {
+    const button = await openShortcutRecorder(harness);
+    assert.equal(button.textContent, "Press shortcut…");
+    assert.equal(callsFor(harness, "set_shortcut_recording")[0].args.active, true);
+    const chord = { key: "P", code: "KeyP", metaKey: true, shiftKey: true };
+    assert.equal(pressShortcut(harness, chord).defaultPrevented, true);
+    assert.equal(button.value, "shift+cmd+p");
+    assert.equal(button.textContent, "⇧⌘P");
+    assert.equal(callsFor(harness, "save_config_section").length, 0);
+    assert.equal(callsFor(harness, "set_shortcut_recording").length, 1, "held keys keep global bindings paused");
+    pressShortcut(harness, chord, "keyup");
+    await harness.idle();
+    assert.equal(callsFor(harness, "set_shortcut_recording").at(-1).args.active, false);
+    assert.equal(button.getAttribute("aria-pressed"), "false");
+    harness.dom.window.document.querySelector("#cmd-save").click();
+    await harness.idle();
+    assert.equal(callsFor(harness, "save_config_section")[0].args.value[0].hotkey, "shift+cmd+p");
+  } finally { harness.close(); }
+});
+
+test("recording rejects duplicate and reserved chords without replacing the draft shortcut", async () => {
+  const harness = makeHarness({ config: config({ commands: [shortcutCommand, { ...shortcutCommand, id: "other", label: "Other", hotkey: " Command + Option + K " }] }) });
+  try {
+    const button = await openShortcutRecorder(harness);
+    const hint = () => harness.dom.window.document.querySelector("#cmd-hotkey-hint").textContent;
+    pressShortcut(harness, { key: "k", code: "KeyK", metaKey: true, altKey: true });
+    assert.match(hint(), /already assigned to “Other”/);
+    assert.equal(button.value, shortcutCommand.hotkey);
+    pressShortcut(harness, { key: " ", code: "Space", ctrlKey: true, shiftKey: true });
+    assert.match(hint(), /Custom instruction/);
+    pressShortcut(harness, { key: "z", code: "KeyZ", metaKey: true });
+    assert.match(hint(), /reserved/);
+    pressShortcut(harness, { key: "R", code: "KeyR", metaKey: true, shiftKey: true });
+    assert.equal(button.value, "shift+cmd+r", "the command can retain its own shortcut");
+  } finally { harness.close(); }
+});
+
+test("shortcut capture handles physical Option keys and ignores modifiers, repeats, and unsupported keys", async () => {
+  const harness = makeHarness({ config: config({ commands: [shortcutCommand] }) });
+  try {
+    const button = await openShortcutRecorder(harness);
+    for (const event of [
+      { key: "Meta", code: "MetaLeft", metaKey: true },
+      { key: "a", code: "KeyA" },
+      { key: "AudioVolumeUp", code: "AudioVolumeUp", metaKey: true },
+      { key: "p", code: "KeyP", metaKey: true, repeat: true },
+      { key: "Process", code: "KeyP", metaKey: true, isComposing: true },
+    ]) pressShortcut(harness, event);
+    assert.equal(button.value, shortcutCommand.hotkey);
+    pressShortcut(harness, { key: "π", code: "KeyP", altKey: true });
+    assert.equal(button.value, "alt+p", "Option-generated characters must use the physical key code");
+  } finally { harness.close(); }
+});
+
+test("Escape cancels recording without closing the sheet and Cmd-Enter records without saving", async () => {
+  const harness = makeHarness({ config: config({ commands: [shortcutCommand] }) });
+  try {
+    const button = await openShortcutRecorder(harness);
+    pressShortcut(harness, { key: "Enter", code: "Enter", metaKey: true });
+    assert.equal(button.value, "cmd+enter");
+    assert.equal(callsFor(harness, "save_config_section").length, 0);
+    pressShortcut(harness, { key: "Escape", code: "Escape" });
+    await harness.idle();
+    assert.equal(button.value, shortcutCommand.hotkey);
+    assert.ok(harness.dom.window.document.querySelector("#sheet-root"));
+    assert.equal(callsFor(harness, "set_shortcut_recording").at(-1).args.active, false);
+  } finally { harness.close(); }
+});
+
+test("Delete clears a recorded shortcut and Clear saves no shortcut", async () => {
+  const harness = makeHarness({ config: config({ commands: [shortcutCommand] }) });
+  try {
+    const button = await openShortcutRecorder(harness);
+    pressShortcut(harness, { key: "Backspace", code: "Backspace" });
+    pressShortcut(harness, { key: "Backspace", code: "Backspace" }, "keyup");
+    await harness.idle();
+    assert.equal(button.value, "");
+    assert.equal(button.textContent, "Record shortcut");
+    assert.match(harness.dom.window.document.querySelector("#cmd-hotkey-hint").textContent, /cleared/);
+    harness.dom.window.document.querySelector("#cmd-save").click();
+    await harness.idle();
+    assert.equal(callsFor(harness, "save_config_section")[0].args.value[0].hotkey, null);
+  } finally { harness.close(); }
+});
+
+test("Tab, focus loss, and closing the sheet release shortcut recording", async () => {
+  for (const end of ["tab", "blur", "close"]) {
+    const harness = makeHarness({ config: config({ commands: [shortcutCommand] }) });
+    try {
+      const button = await openShortcutRecorder(harness);
+      const document = harness.dom.window.document;
+      if (end === "tab") pressShortcut(harness, { key: "Tab", code: "Tab" });
+      if (end === "blur") document.querySelector("#cmd-label").focus();
+      if (end === "close") document.querySelector("#cmd-cancel").click();
+      await harness.idle();
+      assert.equal(callsFor(harness, "set_shortcut_recording").at(-1).args.active, false, end);
+      if (end !== "close") assert.equal(button.getAttribute("aria-pressed"), "false");
+    } finally { harness.close(); }
+  }
+});
+
+test("a late recorder start acknowledgement cannot reactivate a closed sheet", async () => {
+  const pending = deferred();
+  const harness = makeHarness({ config: config({ commands: [shortcutCommand] }), recordShortcut: ({ active }) => active ? pending.promise : Promise.resolve() });
+  try {
+    await openShortcutRecorder(harness);
+    const document = harness.dom.window.document;
+    assert.equal(document.querySelector("#cmd-hotkey").textContent, "Preparing…");
+    document.querySelector("#cmd-cancel").click();
+    pending.resolve();
+    await harness.idle(5);
+    assert.equal(document.querySelector("#sheet-root"), null);
+    assert.deepEqual(callsFor(harness, "set_shortcut_recording").map(({ args }) => args.active), [true, false]);
+  } finally { harness.close(); }
+});
+
+test("failed recorder preparation keeps the existing shortcut and explains the error", async () => {
+  const harness = makeHarness({ config: config({ commands: [shortcutCommand] }), recordShortcut: ({ active }) => active ? Promise.reject(new Error("Finish the active command first")) : Promise.resolve() });
+  try {
+    const button = await openShortcutRecorder(harness);
+    assert.equal(button.value, shortcutCommand.hotkey);
+    assert.equal(button.getAttribute("aria-pressed"), "false");
+    assert.match(harness.dom.window.document.querySelector("#cmd-hotkey-hint").textContent, /Finish the active command first/);
+  } finally { harness.close(); }
+});
+
+test("releasing Command finishes capture even when WebKit omits the letter keyup", async () => {
+  const harness = makeHarness({ config: config({ commands: [shortcutCommand] }) });
+  try {
+    const button = await openShortcutRecorder(harness);
+    pressShortcut(harness, { key: "k", code: "KeyK", metaKey: true });
+    pressShortcut(harness, { key: "Meta", code: "MetaLeft", metaKey: false }, "keyup");
+    await harness.idle();
+    assert.equal(button.value, "cmd+k");
+    assert.equal(button.getAttribute("aria-pressed"), "false");
+    assert.equal(callsFor(harness, "set_shortcut_recording").at(-1).args.active, false);
   } finally { harness.close(); }
 });

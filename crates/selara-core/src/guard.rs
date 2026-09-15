@@ -321,6 +321,9 @@ fn is_private_v6(ip: std::net::Ipv6Addr) -> bool {
 /// local; everything else (including the provider defaults used when
 /// `base_url` is blank) is hosted.
 pub fn provider_is_hosted(kind: ProviderKind, base_url: &str) -> bool {
+    if kind.is_cli() {
+        return true;
+    }
     let host = url_host(&kind.resolve_base_url(base_url));
     if host.is_empty() {
         return true;
@@ -717,5 +720,15 @@ mod tests {
             ProviderKind::OpenAiCompatible,
             "https://localai.example.com/v1"
         ));
+    }
+    #[test]
+    fn cli_connections_are_hosted_even_with_an_ignored_local_base_url() {
+        for kind in [
+            ProviderKind::ClaudeCli,
+            ProviderKind::CursorCli,
+            ProviderKind::OpenCodeCli,
+        ] {
+            assert!(provider_is_hosted(kind, "http://localhost:1234"));
+        }
     }
 }

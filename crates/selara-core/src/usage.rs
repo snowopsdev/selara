@@ -39,6 +39,9 @@ pub struct UsageEvent {
     pub endpoint: Option<String>,
     pub input: u64,
     pub output: u64,
+    /// The request completed, but its provider did not report token counts.
+    #[serde(default)]
+    pub tokens_missing: bool,
 }
 
 /// Totals for one time window (or one model).
@@ -52,6 +55,8 @@ pub struct UsageBucket {
     pub cost_usd: Option<f64>,
     /// Requests that carried no known price (local or unlisted models).
     pub unpriced: u64,
+    #[serde(default)]
+    pub tokens_missing: u64,
 }
 
 /// Per `(kind, model)` totals, all time.
@@ -136,14 +141,21 @@ fn url_host(url: &str) -> String {
 /// logged and otherwise ignored: usage accounting must never fail a
 /// completion.
 pub fn record(kind: &str, model: &str, base_url: &str, usage: TokenUsage) {
+    record_optional(kind, model, base_url, Some(usage));
+}
+
+/// Count a completed request even when the CLI omits token metadata.
+pub fn record_optional(kind: &str, model: &str, base_url: &str, usage: Option<TokenUsage>) {
     let host = url_host(base_url);
+    let tokens = usage.unwrap_or_default();
     let event = UsageEvent {
         ts: now_secs(),
         kind: kind.to_string(),
         model: model.to_string(),
         endpoint: (!host.is_empty()).then_some(host),
-        input: usage.input,
-        output: usage.output,
+        input: tokens.input,
+        output: tokens.output,
+        tokens_missing: usage.is_none(),
     };
     {
         let mut events = lock(&EVENTS);
@@ -278,8 +290,12 @@ pub fn summarize(path: &Path, events: &[UsageEvent], now: u64) -> UsageSummary {
 impl UsageBucket {
     fn add(&mut self, e: &UsageEvent, cost: Option<f64>) {
         self.requests += 1;
-        self.input += e.input;
-        self.output += e.output;
+        if e.tokens_missing {
+            self.tokens_missing += 1;
+        } else {
+            self.input += e.input;
+            self.output += e.output;
+        }
         match cost {
             Some(c) => self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + c),
             None => self.unpriced += 1,
@@ -308,7 +324,7 @@ fn endpoint_is_priced(e: &UsageEvent) -> bool {
 /// Estimated USD for one event, if the model is priced and the request went
 /// to that vendor's own API. `None` means the UI shows no cost for it.
 pub fn event_cost(e: &UsageEvent) -> Option<f64> {
-    if !endpoint_is_priced(e) {
+    if e.tokens_missing || !endpoint_is_priced(e) {
         return None;
     }
     let (input, output) = price_per_million(&e.model)?;
@@ -369,6 +385,7 @@ mod tests {
             endpoint: Some(host.into()),
             input,
             output,
+            tokens_missing: false,
         }
     }
 
@@ -560,6 +577,23 @@ mod tests {
         assert_eq!(
             usage_path(Path::new("/a/b/config.toml")),
             PathBuf::from("/a/b/usage.jsonl")
+        );
+    }
+    #[test]
+    fn missing_tokens_count_requests_without_implying_zero_usage_or_cost() {
+        let mut unknown = ev(100, "gpt-4o-mini", 0, 0);
+        unknown.tokens_missing = true;
+        let known = ev(100, "gpt-4o-mini", 10, 5);
+        let totals = summarize(Path::new("usage.jsonl"), &[unknown.clone(), known], 100);
+        assert_eq!(totals.all_time.requests, 2);
+        assert_eq!(totals.all_time.tokens_missing, 1);
+        assert_eq!(totals.all_time.input, 10);
+        assert!(event_cost(&unknown).is_none());
+        let old = r#"{"ts":100,"kind":"cursor_cli","model":"","input":0,"output":0}"#;
+        assert!(
+            !serde_json::from_str::<UsageEvent>(old)
+                .unwrap()
+                .tokens_missing
         );
     }
 }

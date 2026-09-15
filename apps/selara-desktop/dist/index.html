@@ -60,7 +60,7 @@ body {
 }
 input, textarea, select { user-select: text; -webkit-user-select: text; }
 
-#app { display: grid; grid-template-columns: 200px 1fr; height: 100%; }
+#app { display: grid; grid-template-columns: 200px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 38px; height: 100%; }
 
 /* Sidebar: transparent so the native vibrancy shows through. */
 .nav {
@@ -104,14 +104,56 @@ input, textarea, select { user-select: text; -webkit-user-select: text; }
   font-weight: 600;
 }
 .nav-item.active svg { color: var(--accent); }
-.nav-foot {
-  margin-top: auto;
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 10px; min-height: 2.5em;
-  font-size: 11.5px; color: var(--muted);
-  min-width: 0;
+.app-footer {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 20px;
+  position: relative; z-index: 3; padding: 0 16px;
+  border-top: 1px solid var(--hairline); background: var(--content-wash);
+  font-size: 11px; color: var(--muted); min-width: 0;
 }
-.nav-foot #save-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-updates { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.nav-update-header, .nav-update-summary { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.nav-version { display: flex; align-items: baseline; gap: 5px; flex-shrink: 0; white-space: nowrap; }
+.nav-version strong { color: var(--text); font-size: 11px; font-weight: 600; }
+.nav-version span { font-variant-numeric: tabular-nums; }
+.nav-update-state, .nav-feedback { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.nav-update-state { border-left: 1px solid var(--hairline-strong); padding-left: 10px; line-height: 1.4; }
+.nav-update-state span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-update-state.available { color: var(--accent); }
+.nav-update-state.error { color: var(--danger); }
+.nav-update-check {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px;
+  color: var(--muted); background: transparent; cursor: default;
+}
+.nav-update-check:hover:not(:disabled) { color: var(--text); background: var(--glass-hover); }
+.nav-update-check:disabled { opacity: 0.45; }
+.nav-update-check svg { width: 14px; height: 14px; }
+.nav-update-check[aria-busy="true"] svg { animation: update-spin 1s linear infinite; }
+@keyframes update-spin { to { transform: rotate(360deg); } }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.nav-updates .btn { flex-shrink: 0; font-size: 11px; padding: 3px 9px; min-height: 24px; white-space: nowrap; }
+.nav-updates .field-hint { font-size: 12px; line-height: 1.5; margin: 0; overflow-wrap: anywhere; }
+.nav-updates .field-hint:empty { display: none; }
+.nav-updates a { color: var(--accent); }
+.nav-updates progress { width: 70px; height: 5px; flex-shrink: 0; accent-color: var(--accent); }
+.update-details { flex-shrink: 0; }
+.update-details[hidden] { display: none; }
+.update-details > summary { padding: 5px 6px; border-radius: 5px; cursor: default; white-space: nowrap; }
+.update-details > summary:hover { color: var(--text); background: var(--glass); }
+.update-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.update-popover {
+  position: absolute; left: 16px; bottom: calc(100% + 8px); width: min(380px, calc(100vw - 32px));
+  max-height: min(320px, 60vh); overflow: auto; padding: 14px;
+  border: 1px solid var(--hairline-strong); border-radius: 10px; background: var(--glass-strong);
+  -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px); box-shadow: var(--shadow);
+}
+.update-popover > * + * { margin-top: 10px !important; }
+.nav-updates .serve-log { margin: 0; }
+.nav-updates .serve-log pre { max-height: 180px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.nav-feedback { margin-left: auto; justify-content: flex-end; flex: 0 1 35%; white-space: nowrap; }
+.nav-feedback #save-status { overflow: hidden; text-overflow: ellipsis; }
+.nav { min-height: 0; overflow-y: auto; }
+.nav > .nav-item { flex-shrink: 0; }
 
 /* Content column */
 .content {
@@ -183,6 +225,18 @@ label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
 .control-inline { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .control-inline select, .control-inline input { flex: 1; min-width: 0; }
 .control-inline .btn { flex-shrink: 0; }
+.shortcut-recorder {
+  flex: 1; min-width: 0; min-height: 34px; padding: 6px 12px;
+  border: 1px solid var(--hairline-strong); border-radius: var(--radius-control);
+  background: var(--glass-strong); color: var(--text); font: inherit;
+  text-align: center; cursor: default;
+}
+.shortcut-recorder:hover { background: var(--glass-hover); }
+.shortcut-recorder:focus-visible, .shortcut-recorder[data-recording="true"] {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.shortcut-recorder[data-recording="true"] { color: var(--accent); }
+.shortcut-recorder.has-shortcut { font-size: 15px; letter-spacing: 0.06em; }
 .field-hint, .hint {
   margin: 0; font-size: 12px; color: var(--muted); line-height: 1.4; max-width: 42em;
 }
@@ -511,6 +565,51 @@ button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
 .models-save .field-hint { flex: 1; min-width: 180px; }
 .models-save .command-error { flex-basis: 100%; margin: 0; max-height: 96px; overflow: auto; }
 
+
+/* Provider list and selected connection, within the existing Settings shell. */
+#section-models { max-width: 1100px; }
+.providers-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); border: 1px solid var(--hairline); border-radius: 14px; background: var(--glass); overflow: hidden; min-height: 520px; }
+.provider-list { border-right: 1px solid var(--hairline); background: color-mix(in srgb, var(--content-wash) 45%, transparent); padding: 8px; }
+.provider-list-label { padding: 8px 8px 10px; font-size: 10px; font-weight: 600; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; }
+.provider-choice-row { position: relative; margin-bottom: 4px; }
+.provider-choice-row .provider-choice { display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; height: 100%; padding-right: 46px; margin: 0; }
+.provider-toggle { position: absolute; right: 9px; top: 11px; width: 30px; height: 18px; padding: 2px; border: 1px solid var(--hairline-strong); border-radius: 10px; background: var(--glass-strong); cursor: pointer; }
+.provider-toggle::after { content: ""; display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); transition: transform .15s; }
+.provider-toggle[aria-checked="true"] { background: var(--accent); border-color: var(--accent); }
+.provider-toggle[aria-checked="true"]::after { transform: translateX(12px); background: white; }
+.provider-toggle:disabled { opacity: .45; cursor: default; }
+.provider-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.provider-enable-state { display: block; margin-top: 5px; color: var(--muted); font-size: 10.5px; }
+.provider-choice { display: block; width: 100%; padding: 12px 10px; margin: 0 0 4px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: default; }
+.provider-choice:hover { background: var(--glass); }
+.provider-choice[aria-pressed="true"] { background: var(--glass-strong); border-color: var(--hairline-strong); }
+.provider-choice:disabled { opacity: .55; }
+.provider-choice-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
+.provider-choice-title .status-dot { margin-left: auto; width: 6px; height: 6px; }
+.provider-choice-meta { display: block; margin-top: 5px; font-size: 10.5px; line-height: 1.4; color: var(--muted); overflow-wrap: anywhere; }
+.provider-detail { min-width: 0; padding: 18px; }
+.provider-detail-head { display: flex; align-items: start; justify-content: space-between; gap: 10px; padding-bottom: 14px; border-bottom: 1px solid var(--hairline); }
+.provider-detail-head h2 { margin: 0 0 5px; font-size: 15px; font-weight: 600; }
+.provider-detail-head p { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.provider-runtime { color: var(--muted); font-size: 10.5px; max-width: 42%; overflow-wrap: anywhere; text-align: right; padding-top: 3px; }
+.provider-detail [hidden] { display: none; }
+#cli-login-command { display: block; padding: 8px 10px; overflow-wrap: anywhere; user-select: text; }
+.provider-detail .panel { box-shadow: none; background: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; border-radius: 10px; }
+.provider-detail .models-fields { padding: 0 12px; }
+.provider-detail .models-fields .form-row, .provider-detail .models-advanced .form-row { grid-template-columns: minmax(0, 1fr); gap: 7px; }
+.provider-detail .models-fields .form-row > label, .provider-detail .models-advanced .form-row > label { padding-top: 0; }
+.provider-detail .models-fields .control-inline input, .provider-detail .models-fields .control-inline select { flex-basis: 130px; }
+.provider-detail .models-save { bottom: -32px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; box-shadow: none; padding: 10px 12px; }
+.provider-detail .models-save .field-hint { margin: 0; min-width: 100px; font-size: 11px; }
+.provider-detail .models-save .btn { margin-left: auto; }
+@media (max-width: 820px) {
+  .providers-layout { grid-template-columns: minmax(0, 1fr); }
+  .provider-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; border-right: 0; border-bottom: 1px solid var(--hairline); }
+  .provider-list-label { grid-column: 1 / -1; padding-bottom: 4px; }
+  .provider-choice { margin: 0; padding: 8px; }
+  .provider-detail { padding: 14px; }
+}
+
 /* Status tab: one glass card per check. */
 .status-toolbar {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
@@ -554,11 +653,23 @@ button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
   margin-top: 8px; font-size: 12.5px; font-weight: 500; color: var(--text);
 }
 .check-row input[type="checkbox"] { width: auto; height: auto; margin: 0; box-shadow: none; }
-.usage-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12.5px; }
-.usage-table th, .usage-table td { padding: 4px 0; text-align: right; white-space: nowrap; }
-.usage-table th:first-child, .usage-table td:first-child { text-align: left; }
-.usage-table th { font-weight: 500; color: var(--muted); }
-.usage-table td + td, .usage-table th + th { padding-left: 14px; }
+.usage-table-wrap { max-width: 100%; overflow-x: auto; margin-top: 10px; }
+.usage-table-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.usage-table th, .usage-table td { padding: 10px 0; text-align: right; white-space: nowrap; }
+.usage-table th:first-child { text-align: left; }
+.usage-table thead th { font-weight: 500; color: var(--muted); font-size: 11px; }
+.usage-table tbody th { font-weight: 500; }
+.usage-table tbody tr { border-top: 1px solid var(--hairline); }
+.usage-table td + td, .usage-table th + td, .usage-table th + th { padding-left: 14px; }
+.usage-models th:first-child { min-width: 125px; max-width: 180px; white-space: normal; overflow-wrap: anywhere; }
+.usage-provider { display: block; color: var(--muted); font-weight: 400; font-size: 11px; margin-top: 4px; }
+.usage-breakdown h2 { margin: 0; font-size: 13.5px; font-weight: 600; }
+.usage-breakdown > .field-hint { margin: 4px 0 0; }
+.usage-note { margin: 18px 2px; line-height: 1.5; }
+.usage-data-actions { display: flex; align-items: center; gap: 20px; border-top: 1px solid var(--hairline); padding-top: 16px; margin-top: 20px; }
+.usage-data-actions .field-hint { flex: 1; margin: 0; }
+.usage-data-actions .btn { flex-shrink: 0; }
 
 .serve-log { margin-top: 10px; font-size: 12px; color: var(--muted); }
 .serve-log summary { cursor: default; }
@@ -602,7 +713,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       </button>
       <button class="nav-item" data-section="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="2"/><rect x="6" y="6" width="4" height="4" rx="1"/><path d="M6 1.5v2M10 1.5v2M6 12.5v2M10 12.5v2M1.5 6h2M1.5 10h2M12.5 6h2M12.5 10h2"/></svg>
-        Models
+        Providers
       </button>
       <button class="nav-item" data-section="commands">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2.5"/><path d="M5 6l2.5 2L5 10M8.5 10h3"/></svg>
@@ -612,11 +723,14 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9"/><path d="M2 2.5v2.6h2.6"/><path d="M8 5v3.2l2.2 1.3"/></svg>
         History
       </button>
+      <button class="nav-item" data-section="usage">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 2v12h12M5 10V7M8.5 10V4M12 10V6"/></svg>
+        Usage
+      </button>
       <button class="nav-item" data-section="limits">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 11.5a5.5 5.5 0 1 1 11 0"/><path d="M8 11.5l2.6-3.6"/><circle cx="8" cy="11.5" r="1" fill="currentColor"/></svg>
         Limits
       </button>
-      <div class="nav-foot"><span class="status-dot" id="save-dot" aria-hidden="true"></span><span id="save-status">Starting…</span></div>
     </aside>
     <main class="content">
       <div class="drag-strip" data-tauri-drag-region></div>
@@ -628,8 +742,13 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       <section id="section-models" class="section"></section>
       <section id="section-commands" class="section"></section>
       <section id="section-history" class="section"></section>
+      <section id="section-usage" class="section"></section>
       <section id="section-limits" class="section"></section>
     </main>
+      <footer class="app-footer" aria-label="Application status">
+        <div class="nav-updates" id="status-updates" role="region" aria-label="App updates"></div>
+        <div class="nav-feedback" role="status"><span class="status-dot" id="save-dot" aria-hidden="true"></span><span id="save-status">Starting…</span></div>
+      </footer>
   </div>
   <script>
 (function () {
@@ -671,11 +790,14 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   let configLoadState = "loading";
   let configLoadError = "";
   let providerDraft = null;
-  // A provider switch is a local form operation. Keep each kind's unsaved
-  // endpoint/model/key together so switching to another provider cannot carry
-  // OpenAI values into (for example) Anthropic, while an account refresh still
-  // uses the current draft unchanged.
-  let providerDraftsByKind = Object.create(null);
+  // A provider switch is a local form operation. Keep each connection's
+  // unsaved fields together so switching between authentication modes or
+  // provider kinds cannot carry values from one connection into another.
+  let providerDraftsByConnection = Object.create(null);
+  // When a provider kind has more than one connection (currently OpenAI
+  // API-key and ChatGPT), returning to the kind should reopen the last mode
+  // the user viewed instead of inheriting the mode from another provider.
+  let lastProviderAuthByKind = Object.create(null);
   let generalDraft = null;
   let editingId = null;
   const $ = (sel) => document.querySelector(sel);
@@ -758,7 +880,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
   // @selara-helpers-end
   const statusEl = () => $("#save-status");
-  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*|Will start at login|Will not start at login|Update available|Installing update…)$/;
+  const OK_STATUS = /^(Saved|Loaded|Signed out|ChatGPT signed in|Status refreshed|Usage refreshed|Usage cleared|Models refreshed|Models loaded|Provider reachable|Exported commands|Imported: .*|Will start at login|Will not start at login|Update available|Installing update…)$/;
   const BAD_STATUS = /error|failed|required|before saving|not available|could not|enoent/i;
 
   function configIsReady() { return configLoadState === "ready"; }
@@ -808,6 +930,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   function setStatus(msg) {
     const text = msg || "";
     statusEl().textContent = text;
+    statusEl().title = text;
     const dot = $("#save-dot");
     if (!dot) return;
     dot.classList.remove("ok", "bad", "pulse");
@@ -849,6 +972,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       modelPlaceholder: "claude-opus-5",
       keyHint: "Create a key at console.anthropic.com.",
     },
+    claude_cli: { label: "Claude Code", cli: true, binary: "claude", login: "claude auth login", baseUrl: "", modelPlaceholder: "Default, or a Claude model ID" },
+    cursor_cli: { label: "Cursor", cli: true, binary: "cursor-agent", login: "cursor-agent login", baseUrl: "", modelPlaceholder: "Default, or a Cursor model ID" },
+    open_code_cli: { label: "OpenCode", cli: true, binary: "opencode", login: "opencode auth login", baseUrl: "", modelPlaceholder: "provider/model" },
     open_router: {
       label: "OpenRouter",
       baseUrl: "https://openrouter.ai/api/v1",
@@ -857,6 +983,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       keyHint: "Create a key at openrouter.ai/keys. Model ids look like vendor/model.",
     },
   };
+  function isCliProvider(kind) { return !!(PROVIDERS[kind] && PROVIDERS[kind].cli); }
   function providerMeta(kind) { return PROVIDERS[kind] || PROVIDERS.open_ai_compatible; }
   // Which OpenAI-compatible preset a base URL belongs to. Blank means the
   // OpenAI default (core falls back to it); anything unknown is "custom".
@@ -953,6 +1080,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.addEventListener("click", async () => {
       showSection(btn.dataset.section);
+      if (btn.dataset.section === "usage") await refreshUsageData();
       if (btn.dataset.section === "history" && config) {
         await refreshHistoryData();
         renderHistory();
@@ -968,11 +1096,16 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   let serveLogLines = [];
   let axTrust = "unknown";
   let appVersion = "";
+  let codexRuntimeVersion = "";
   // Last result of check_for_updates (also pushed by the background check
   // through the `update-changed` event). Never triggers a network check by
   // itself; the user presses the button for that.
   let updateStatus = null;
+  let updateCheckPending = false;
+  let updateInstallPending = false;
   let usageSummary = null;
+  let usageBusy = false;
+  let usageError = "";
   let providerStatusRequestId = 0;
 
   function normalizeAxTrust(value) {
@@ -987,6 +1120,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   async function refreshStatusData() {
+    try {
+      codexRuntimeVersion = String(await invoke("bundled_codex_version") || "");
+    } catch (_) { codexRuntimeVersion = ""; }
     try {
       appVersion = String(await invoke("app_version") || "");
     } catch (_) {
@@ -1023,11 +1159,6 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     } catch (_) {
       axTrust = "unknown";
     }
-    try {
-      usageSummary = await invoke("usage_summary");
-    } catch (e) {
-      usageSummary = { error: String(e) };
-    }
   }
 
   function fmtTokens(n) {
@@ -1050,13 +1181,77 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     return bucket.unpriced ? base + " +" + bucket.unpriced + " unpriced" : base;
   }
 
-  function usageRow(label, bucket) {
+  function usageRow(label, bucket, provider) {
     const b = bucket || {};
-    return "<tr><td>" + escapeHtml(label) + "</td>" +
+    return "<tr><th scope=\"row\">" + escapeHtml(label) +
+      (provider ? '<span class="usage-provider">' + escapeHtml(provider) + '</span>' : '') + "</th>" +
       "<td>" + fmtTokens(b.requests) + "</td>" +
-      "<td>" + fmtTokens(b.input) + "</td>" +
-      "<td>" + fmtTokens(b.output) + "</td>" +
+      "<td>" + (b.tokens_missing && b.tokens_missing === b.requests ? "n/a" : fmtTokens(b.input)) + "</td>" +
+      "<td>" + (b.tokens_missing && b.tokens_missing === b.requests ? "n/a" : fmtTokens(b.output)) + "</td>" +
       "<td>" + escapeHtml(fmtCost(b)) + "</td></tr>";
+  }
+
+  async function refreshUsageData() {
+    if (usageBusy) return;
+    usageBusy = true;
+    usageError = "";
+    renderUsage();
+    try {
+      usageSummary = await invoke("usage_summary");
+      if (!usageSummary) throw new Error("Usage data is unavailable.");
+      setStatus("Usage refreshed");
+    } catch (e) {
+      usageError = String(e);
+    } finally {
+      usageBusy = false;
+      renderUsage();
+    }
+  }
+
+  async function clearUsageData() {
+    if (usageBusy || !usageSummary || !usageSummary.all_time || !usageSummary.all_time.requests) return;
+    if (!confirm("Clear all usage data on this device? This removes request, token, and cost totals. Your settings and writing history will stay intact.")) return;
+    usageBusy = true;
+    usageError = "";
+    renderUsage();
+    try {
+      usageSummary = await invoke("clear_usage");
+      setStatus("Usage cleared");
+    } catch (e) {
+      usageError = String(e);
+    } finally {
+      usageBusy = false;
+      renderUsage();
+    }
+  }
+
+  function renderUsage() {
+    const u = usageSummary;
+    const all = (u && u.all_time) || {};
+    const models = u && Array.isArray(u.models) ? [...u.models].sort((a, b) => (b.requests || 0) - (a.requests || 0)) : [];
+    const providerLabels = { claude_cli: "Claude Code", cursor_cli: "Cursor", open_code_cli: "OpenCode", chatgpt_codex: "ChatGPT", openai_compatible: "OpenAI-compatible", open_ai_compatible: "OpenAI-compatible", openrouter: "OpenRouter", anthropic: "Anthropic" };
+    const headers = '<th scope="col">Requests</th><th scope="col">Input tokens</th><th scope="col">Output tokens</th><th scope="col">Est. cost</th>';
+    const overview = u
+      ? '<div class="usage-table-wrap" tabindex="0" role="region" aria-label="Usage by time period"><table class="usage-table"><thead><tr><th scope="col">Period</th>' + headers + '</tr></thead><tbody>' +
+        usageRow("Today", u.today) + usageRow("Last 30 days", u.last_30_days) + usageRow("All time", all) + '</tbody></table></div>' +
+        (!all.requests ? '<p class="field-hint">No usage recorded yet. Run a writing command to see your activity here.</p>' : '')
+      : '<p class="field-hint" role="status">' + (usageError ? "Usage could not be loaded. Try refreshing." : "Loading your activity…") + '</p>';
+    const breakdown = u && models.length
+      ? '<div class="card usage-breakdown"><h2>By model</h2><p class="field-hint">All-time totals, ordered by requests.</p>' +
+        '<div class="usage-table-wrap" tabindex="0" role="region" aria-label="All-time usage by model"><table class="usage-table usage-models"><thead><tr><th scope="col">Model / provider</th>' + headers + '</tr></thead><tbody>' +
+        models.map((model) => usageRow(model.model || (isCliProvider(model.kind) ? "CLI default" : "Unknown model"), model, providerLabels[model.kind] || model.kind || "Unknown provider")).join("") + '</tbody></table></div></div>'
+      : '';
+    $("#section-usage").innerHTML = '<h1>Usage</h1><div class="status-toolbar"><p class="lead">Requests, tokens, and estimated costs for your activity on this device.</p>' +
+      '<button type="button" class="btn secondary" id="usage-refresh"' + (usageBusy ? ' disabled' : '') + '>' + (usageBusy ? 'Loading…' : 'Refresh') + '</button></div>' +
+      (usageError ? '<p class="field-hint error" role="alert">' + escapeHtml(usageError) + (u ? ' Showing the last loaded totals.' : '') + '</p>' : '') +
+      statusCard("usage", "Overview", "", all.requests ? fmtTokens(all.requests) + (all.requests === 1 ? " request" : " requests") : "", overview) + breakdown +
+      '<p class="field-hint usage-note">Input tokens are the text sent to a model; output tokens are its response. Costs are estimates in USD, not a bill. ' +
+      '“n/a” means the provider did not report tokens or no cost estimate is available. Subscription and unpriced requests are excluded from cost totals.' +
+      (all.tokens_missing ? ' Token totals exclude ' + fmtTokens(all.tokens_missing) + (all.tokens_missing === 1 ? ' request' : ' requests') + ' without token metadata.' : '') + '</p>' +
+      '<div class="usage-data-actions"><p class="field-hint">Usage is stored on this device. Clearing it does not change your settings or writing history.</p>' +
+      '<button type="button" class="btn secondary" id="usage-clear"' + (usageBusy || !all.requests ? ' disabled' : '') + '>Clear usage data</button></div>';
+    $("#usage-refresh").onclick = refreshUsageData;
+    $("#usage-clear").onclick = clearUsageData;
   }
 
   // The supervisor emits "serve-changed" whenever serve starts, stops, exits or
@@ -1110,7 +1305,101 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     );
   }
 
+  // Updates stay accessible from every tab without rebuilding settings drafts.
+  function renderUpdates() {
+    const up = updateStatus || {};
+    const upAvailable = up.state === "available";
+    const upBusy = updateCheckPending || updateInstallPending || ["downloading", "waiting", "installing"].includes(up.state);
+    const checkLabel = updateCheckPending ? "Checking…" : (up.state === "error" ? "Retry" : "Check for updates");
+    const upState = updateCheckPending ? "Checking…" : ({ available: "v" + up.version + " available", up_to_date: "Up to date", error: "Check failed", downloading: "Downloading…", waiting: "Waiting…", installing: "Installing…", unconfigured: "Not configured" }[up.state] || "Not checked");
+    const downloaded = Number(up.downloaded);
+    const total = Number(up.total);
+    const hasProgress = up.state === "downloading" && Number.isFinite(downloaded) && downloaded >= 0;
+    const progressText = hasProgress
+      ? (Number.isFinite(total) && total > 0
+        ? "Downloaded " + fmtBytes(downloaded) + " of " + fmtBytes(total) + "."
+        : "Downloaded " + fmtBytes(downloaded) + ".")
+      : "";
+    const upResult = up.state === "waiting"
+      ? "Finishing active work before restarting Selara."
+      : (up.state === "installing" ? "Installing the update. Selara will restart when it is ready."
+        : (up.state === "error" ? String(up.message || "Update check failed.")
+          : "Automatic updates are unavailable for this build."));
+    const retryHelp = up.state === "error"
+      ? "<p class=\"field-hint error\">Retry, or install the DMG from <a href=\"https://github.com/snowopsdev/selara/releases/latest\" target=\"_blank\" rel=\"noreferrer\">GitHub releases</a>.</p>"
+      : "";
+    const progress = hasProgress
+      ? (Number.isFinite(total) && total > 0
+        ? "<progress id=\"status-update-progress\" max=\"" + total + "\" value=\"" + downloaded + "\" aria-label=\"Downloading update\"></progress>"
+        : "<progress id=\"status-update-progress\" aria-label=\"Downloading update\"></progress>")
+      : "";
+    const detail = ["error", "unconfigured", "waiting", "installing"].includes(up.state)
+      ? upResult : (hasProgress ? progressText : "");
+    const focusedId = document.activeElement && document.activeElement.id;
+    const notesOpen = !!$("#status-updates .serve-log[open]");
+    const detailsOpen = !!$("#update-details[open]");
+    const hasDetails = !!detail || (upAvailable && !!up.notes);
+    $("#status-updates").innerHTML =
+      '<div class="nav-update-header"><div class="nav-update-summary"><div class="nav-version"><strong>Selara</strong><span id="app-version">' + escapeHtml(appVersion ? "v" + appVersion : "Version unavailable") + '</span></div>' +
+      '<div class="nav-update-state' + (up.state === "error" ? ' error' : (upAvailable ? ' available' : '')) + '" role="status"><span id="status-updates-state">' + escapeHtml(upState) + '</span></div></div>' +
+      '<button type="button" class="nav-update-check" id="status-check-update" title="' + checkLabel + '" aria-busy="' + updateCheckPending + '"' + (upBusy ? " disabled" : "") + '><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17"/></svg><span class="sr-only">' + checkLabel + '</span></button></div>' +
+      (upAvailable ? '<button type="button" class="btn" id="status-install-update"' + (upBusy ? " disabled" : "") + '>Install and restart</button>' : '') +
+      progress + '<details class="update-details" id="update-details"' + (hasDetails ? '' : ' hidden') + (detailsOpen ? ' open' : '') + '><summary id="update-details-toggle">Details</summary><div class="update-popover">' +
+      '<p class="field-hint' + (up.state === "error" ? " error" : "") + '" id="status-update-result" role="status">' + escapeHtml(detail) + '</p>' + retryHelp +
+      (upAvailable && up.notes ? '<details class="serve-log"' + (notesOpen ? ' open' : '') + '><summary>Release notes</summary><pre>' + escapeHtml(String(up.notes)) + '</pre></details>' : '') + '</div></details>';
+    $("#status-check-update").onclick = checkForUpdates;
+    const install = $("#status-install-update");
+    if (install) install.onclick = installUpdate;
+    if (focusedId && ["status-check-update", "status-install-update", "update-details-toggle"].includes(focusedId)) {
+      const control = document.getElementById(focusedId);
+      if (control && !control.disabled) control.focus();
+    }
+  }
+
+  document.addEventListener("click", (event) => {
+    const details = $("#update-details");
+    if (details && details.open && !details.contains(event.target)) details.open = false;
+  });
+  document.addEventListener("keydown", (event) => {
+    const details = $("#update-details");
+    if (event.key === "Escape" && details && details.open) {
+      details.open = false;
+      $("#update-details-toggle").focus();
+      event.preventDefault();
+    }
+  });
+
+  async function checkForUpdates() {
+    if (updateCheckPending || updateInstallPending || ["downloading", "waiting", "installing"].includes((updateStatus || {}).state)) return;
+    updateCheckPending = true;
+    renderUpdates();
+    try {
+      updateStatus = await invoke("check_for_updates");
+    } catch (e) {
+      updateStatus = { state: "error", message: String(e) };
+    } finally {
+      updateCheckPending = false;
+      renderUpdates();
+    }
+  }
+
+  async function installUpdate() {
+    if (updateCheckPending || updateInstallPending || !updateStatus || updateStatus.state !== "available") return;
+    updateInstallPending = true;
+    updateStatus = { ...updateStatus, state: "downloading", downloaded: 0 };
+    renderUpdates();
+    try {
+      await invoke("install_update");
+    } catch (e) {
+      updateStatus = { state: "error", message: String(e) };
+    } finally {
+      updateInstallPending = false;
+      renderUpdates();
+    }
+  }
+
   function renderStatus() {
+    renderUpdates();
     // Any pending provider check belongs to the previous card. Its response
     // must not write into a detached status card after a refresh.
     providerStatusRequestId += 1;
@@ -1176,19 +1465,19 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       ? "not used with ChatGPT via Codex"
       : ((p.base_url || "").trim() || "default (" + meta.baseUrl + ")");
     const authSt = normalizeAuthStatus(chatgptStatus);
-    const providerAuthState = auth === "chatgpt" ? authStatusLabel(authSt) : (authSt.state === "api_key_only" ? "API key only" : "API key");
-    const providerDot = auth === "chatgpt" ? statusDotClass(authSt) : (authSt.state === "api_key_only" ? "unknown" : "unknown");
+    const providerAuthState = p.enabled === false ? "Disabled" : isCliProvider(kind) ? cliRuntimeLabel(cliRuntimeFor(kind, String(p.cli_binary || "").trim())) : auth === "chatgpt" ? authStatusLabel(authSt) : (authSt.state === "api_key_only" ? "API key only" : "API key");
+    const providerDot = p.enabled === false ? "unknown" : auth === "chatgpt" ? statusDotClass(authSt) : (authSt.state === "api_key_only" ? "unknown" : "unknown");
     const providerBody =
       "<dl class=\"status-meta\">" +
       "<dt>Provider</dt><dd>" + escapeHtml(meta.label) + "</dd>" +
-      "<dt>Model</dt><dd>" + escapeHtml((p.model || "").trim() || "not set") + "</dd>" +
-      "<dt>Base URL</dt><dd>" + escapeHtml(baseUrl) + "</dd>" +
-      "<dt>Auth</dt><dd>" + (auth === "chatgpt" ? "ChatGPT via Codex" : "API key") + "</dd>" +
+      "<dt>Model</dt><dd>" + escapeHtml((p.model || "").trim() || (isCliProvider(kind) ? "CLI default" : "not set")) + "</dd>" +
+      (isCliProvider(kind) ? "<dt>CLI</dt><dd>" : "<dt>Base URL</dt><dd>") + escapeHtml(isCliProvider(kind) ? (p.cli_binary || meta.binary + " (auto-detect)") : baseUrl) + "</dd>" +
+      "<dt>Auth</dt><dd>" + (isCliProvider(kind) ? "CLI account" : auth === "chatgpt" ? "ChatGPT via Codex" : "API key") + "</dd>" +
       "</dl>" +
       "<div class=\"actions\">" +
-      "<button type=\"button\" class=\"btn secondary\" id=\"status-check-provider\">Check connection</button>" +
+      "<button type=\"button\" class=\"btn secondary\" id=\"status-check-provider\"" + (p.enabled === false ? " disabled" : "") + ">Check connection</button>" +
       "<span class=\"field-hint\" id=\"status-provider-result\">" +
-      (auth === "chatgpt" ? escapeHtml(authSt.message || "Checks the shared Codex account sign-in.") : "Lists models with the saved key. The key itself is never shown here.") +
+      (p.enabled === false ? "Enable this connection in Providers to use it for writing." : isCliProvider(kind) ? "Checks the installed CLI version. Account access is verified when a command runs." : auth === "chatgpt" ? escapeHtml(authSt.message || "Checks the shared Codex account sign-in.") : "Lists models with the saved key. The key itself is never shown here.") +
       "</span></div>";
 
     // 4. Shortcuts
@@ -1203,132 +1492,16 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       (cmdKeys.length ? "" : "No command has its own shortcut yet; add one from the Commands tab. ") +
       "Shortcuts work while serve is running and pick up saved changes within about a second.</p>";
 
-    // 5. Updates (signed releases via tauri-plugin-updater)
-    const up = updateStatus || {};
-    const upAvailable = up.state === "available";
-    const upBusy = ["downloading", "waiting", "installing"].includes(up.state);
-    const upDot = up.state === "available" ? "ok"
-      : (up.state === "up_to_date" ? "ok" : (up.state === "error" ? "bad" : "unknown"));
-    const upState = ({ available: "v" + up.version + " available", up_to_date: "Up to date", error: "Check failed", downloading: "Downloading…", waiting: "Waiting…", installing: "Installing…", unconfigured: "Not configured" }[up.state] || "Not checked");
-    const downloaded = Number(up.downloaded);
-    const total = Number(up.total);
-    const hasProgress = up.state === "downloading" && Number.isFinite(downloaded) && downloaded >= 0;
-    const progressText = hasProgress
-      ? (Number.isFinite(total) && total > 0
-        ? "Downloaded " + fmtBytes(downloaded) + " of " + fmtBytes(total) + "."
-        : "Downloaded " + fmtBytes(downloaded) + ".")
-      : "";
-    const upResult = up.state === "available"
-      ? "Selara v" + up.version + " is ready to install" + (up.date ? " (released " + up.date + ")" : "") + "."
-      : (up.state === "up_to_date" ? "You are on the latest release."
-        : (up.state === "downloading" ? "Downloading Selara v" + String(up.version || "the update") + ". " + progressText
-          : (up.state === "waiting" ? "Finishing active work before installing Selara v" + String(up.version || "the update") + "."
-            : (up.state === "installing" ? "Installing Selara v" + String(up.version || "the update") + ". The app will restart when installation finishes."
-              : (up.state === "error" ? String(up.message || "Update check failed.")
-                : (up.state === "unconfigured"
-                  ? "This build has no updater signing key, so checks are skipped. Download new releases from GitHub."
-                  : "Checks the GitHub release feed for a newer signed build. Nothing is downloaded until you choose to install."))))));
-    const retryHelp = up.state === "error"
-      ? "<p class=\"field-hint error\">Retry the check. If it keeps failing, install the DMG from <a href=\"https://github.com/snowopsdev/selara/releases/latest\" target=\"_blank\" rel=\"noreferrer\">GitHub releases</a>.</p>"
-      : "";
-    const progress = hasProgress
-      ? (Number.isFinite(total) && total > 0
-        ? "<progress id=\"status-update-progress\" max=\"" + total + "\" value=\"" + downloaded + "\" aria-label=\"Downloading update\"></progress>"
-        : "<progress id=\"status-update-progress\" aria-label=\"Downloading update\"></progress>")
-      : "";
-    const updatesBody =
-      "<dl class=\"status-meta\">" +
-      "<dt>Installed</dt><dd>" + escapeHtml(appVersion ? "v" + appVersion : "unknown") + "</dd>" +
-      (upAvailable ? "<dt>Latest</dt><dd>v" + escapeHtml(up.version) + "</dd>" : "") +
-      "</dl>" +
-      (upAvailable && up.notes
-        ? "<details class=\"serve-log\"><summary>Release notes</summary><pre>" + escapeHtml(String(up.notes)) + "</pre></details>"
-        : "") +
-      "<div class=\"actions\">" +
-      "<button type=\"button\" class=\"btn secondary\" id=\"status-check-update\"" + (upBusy ? " disabled" : "") + ">" + (up.state === "error" ? "Retry" : "Check for updates") + "</button>" +
-      (upAvailable ? "<button type=\"button\" class=\"btn\" id=\"status-install-update\">Install and restart</button>" : "") +
-      "<span class=\"field-hint" + (up.state === "error" ? " error" : "") + "\" id=\"status-update-result\">" + escapeHtml(upResult) + "</span>" +
-      "</div>" + progress + retryHelp;
-    // 5. usage (local ledger next to the config; never leaves the machine)
-    const u = usageSummary || {};
-    const all = u.all_time || {};
-    const usageState = u.error ? "Unavailable" : (all.requests ? fmtTokens(all.requests) + (all.requests === 1 ? " request" : " requests") : "No requests yet");
-    const usageBody = u.error
-      ? "<p class=\"field-hint error\">" + escapeHtml(u.error) + "</p>"
-      : "<table class=\"usage-table\">" +
-        "<thead><tr><th>Window</th><th>Requests</th><th>Tokens in</th><th>Tokens out</th><th>Est. cost</th></tr></thead>" +
-        "<tbody>" + usageRow("Today", u.today) + usageRow("Last 30 days", u.last_30_days) + usageRow("All time", u.all_time) + "</tbody>" +
-        "</table>" +
-        "<div class=\"actions\">" +
-        "<p class=\"field-hint\">Counted locally from provider replies and kept in <code>usage.jsonl</code> next to the config; never sent anywhere. Costs are estimates from a built-in list-price table (n/a for local or unlisted models).</p>" +
-        "<button type=\"button\" class=\"btn secondary\" id=\"usage-clear\"" + (all.requests ? "" : " disabled") + ">Clear</button>" +
-        "</div>";
-
     s.innerHTML =
       "<h1>Status</h1>" +
       "<div class=\"status-toolbar\">" +
-      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, the shortcuts, updates, and usage.</p>" +
+      "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, and the shortcuts.</p>" +
       "<button type=\"button\" class=\"btn secondary\" id=\"status-refresh\">Refresh</button>" +
       "</div>" +
       statusCard("serve", "selara serve", serveDot, serveState, serveBody) +
       statusCard("accessibility", "Accessibility", axDot, axState, axBody) +
       statusCard("provider", "Provider", providerDot, providerAuthState, providerBody) +
-      statusCard("shortcuts", "Shortcuts", "", shortcutCount + (shortcutCount === 1 ? " shortcut" : " shortcuts"), shortcutsBody) +
-      statusCard("updates", "Updates", upDot, upState, updatesBody) +
-      statusCard("usage", "Usage", u.error ? "unknown" : "", usageState, usageBody);
-
-    $("#status-check-update").onclick = async () => {
-      const btn = $("#status-check-update");
-      const out = $("#status-update-result");
-      btn.disabled = true;
-      out.classList.remove("error");
-      out.textContent = "Checking for updates…";
-      setStatus("Checking for updates…");
-      try {
-        updateStatus = await invoke("check_for_updates");
-        renderStatus();
-        setStatus(updateStatus && updateStatus.state === "available"
-          ? "Update available"
-          : (updateStatus && updateStatus.state === "error" ? String(updateStatus.message) : "Status refreshed"));
-      } catch (e) {
-        updateStatus = { state: "error", message: String(e) };
-        renderStatus();
-        setStatus(String(e));
-      }
-    };
-    const installBtn = $("#status-install-update");
-    if (installBtn) {
-      installBtn.onclick = async () => {
-        const out = $("#status-update-result");
-        installBtn.disabled = true;
-        $("#status-check-update").disabled = true;
-        out.classList.remove("error");
-        out.textContent = "Downloading and installing… Selara restarts when it is done.";
-        setStatus("Installing update…");
-        try {
-          await invoke("install_update");
-        } catch (e) {
-          updateStatus = { state: "error", message: String(e) };
-          renderStatus();
-            }
-        }
-    }
-
-    const clearBtn = $("#usage-clear");
-    if (clearBtn) {
-      clearBtn.onclick = async () => {
-        clearBtn.disabled = true;
-        setStatus("Clearing usage…");
-        try {
-          usageSummary = await invoke("clear_usage");
-          renderStatus();
-          setStatus("Usage cleared");
-        } catch (e) {
-          clearBtn.disabled = false;
-          setStatus(String(e));
-        }
-      };
-    }
+      statusCard("shortcuts", "Shortcuts", "", shortcutCount + (shortcutCount === 1 ? " shortcut" : " shortcuts"), shortcutsBody);
 
     async function serveAction(cmd, busy) {
       setStatus(busy);
@@ -1382,7 +1555,15 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       out.textContent = "Contacting " + (auth === "chatgpt" ? "the Codex CLI" : meta.label) + "…";
       setStatus("Checking provider…");
       try {
-        if (auth === "chatgpt") {
+        if (isCliProvider(kind)) {
+          const runtime = await invoke("cli_provider_status", { kind, binary: p.cli_binary || null });
+          if (requestId !== providerStatusRequestId || $("#status-provider-result") !== expectedOut || !expectedOut.isConnected) return;
+          cliRuntimes.set(JSON.stringify([kind, String(p.cli_binary || "").trim()]), runtime);
+          setDot(dot, runtime.installed ? "ok" : "unknown");
+          state.textContent = cliRuntimeLabel(runtime);
+          out.textContent = runtime.message;
+          setStatus(runtime.installed ? "CLI available" : "CLI unavailable");
+        } else if (auth === "chatgpt") {
           const st = normalizeAuthStatus(await invoke("chatgpt_auth_status"));
           if (requestId !== providerStatusRequestId || $("#status-provider-result") !== expectedOut || !expectedOut.isConnected) return;
           chatgptStatus = st;
@@ -1514,15 +1695,17 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   let modelsViewGeneration = 0;
   let keySourceRequestId = 0;
   let providerSavePending = false;
+  let providerTogglePending = false;
   let chatgptModelsLoading = null;
   let modelsAdvancedOpen = false;
   let accountControlsOpen = false;
   const providerKeychainChoices = Object.create(null);
-  const providerFeedbackByKind = Object.create(null);
+  const providerFeedbackByConnection = Object.create(null);
 
-  function showProviderFeedback(message, kind = $("#provider-kind").value) {
-    providerFeedbackByKind[kind] = message;
+  function showProviderFeedback(message, kind = $("#provider-kind").value, auth = $("#provider-auth").value) {
+    providerFeedbackByConnection[providerConnectionKey(kind, auth)] = message;
     if ($("#provider-kind").value !== kind) return;
+    if (normalizedProviderAuth(kind, $("#provider-auth").value) !== normalizedProviderAuth(kind, auth)) return;
     const el = $("#models-feedback");
     if (el) { el.textContent = message; el.hidden = !message; }
   }
@@ -1569,32 +1752,75 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   function providerDraftValue(p, key, fallback) {
     return p[key] === undefined || p[key] === null ? fallback : p[key];
   }
-  function providerKindSeed(kind, codexHome) {
-    const meta = providerMeta(kind);
+  function normalizedProviderKind(kind) {
+    return PROVIDERS[kind] ? kind : "open_ai_compatible";
+  }
+  function normalizedProviderAuth(kind, auth) {
+    return normalizedProviderKind(kind) === "open_ai_compatible" && (auth === "chatgpt" || auth === "chat_gpt") ? "chatgpt" : "api_key";
+  }
+  function providerConnectionKey(kind, auth) {
+    const normalizedKind = normalizedProviderKind(kind);
+    return normalizedKind + ":" + normalizedProviderAuth(normalizedKind, auth);
+  }
+  function providerDraftWithDefaults(value, kind, auth, codexHome) {
+    const normalizedKind = normalizedProviderKind(kind);
+    const normalizedAuth = normalizedProviderAuth(normalizedKind, auth);
+    const draft = { ...(value || {}), kind: normalizedKind, auth: normalizedAuth };
+    if (draft.byok_model === undefined || draft.byok_model === null) draft.byok_model = normalizedAuth === "api_key" ? String(draft.model || "") : "";
+    if (draft.chatgpt_model === undefined || draft.chatgpt_model === null) draft.chatgpt_model = normalizedAuth === "chatgpt" ? String(draft.model || "") : "";
+    if (draft.base_url === undefined || draft.base_url === null) draft.base_url = normalizedKind === "open_ai_compatible" ? "" : providerMeta(normalizedKind).baseUrl;
+    if (draft.api_key === undefined) draft.api_key = null;
+    if (draft.cli_binary === undefined) draft.cli_binary = null;
+    if (draft.codex_home === undefined) draft.codex_home = codexHome || null;
+    if (draft.model === undefined || draft.model === null) draft.model = normalizedAuth === "chatgpt" ? draft.chatgpt_model : draft.byok_model;
+    return draft;
+  }
+  function providerKindSeed(kind, auth, codexHome) {
+    const normalizedKind = normalizedProviderKind(kind);
+    const meta = providerMeta(normalizedKind);
     return {
-      kind,
-      auth: "api_key",
+      kind: normalizedKind,
+      auth: normalizedProviderAuth(normalizedKind, auth),
       model: "",
       byok_model: "",
       chatgpt_model: "",
-      base_url: kind === "open_ai_compatible" ? "" : meta.baseUrl,
+      base_url: normalizedKind === "open_ai_compatible" ? "" : meta.baseUrl,
       api_key: null,
+      cli_binary: null,
       codex_home: codexHome || null,
     };
   }
   function rememberProviderDraft(draft) {
     if (!draft || !draft.kind) return;
-    providerDraftsByKind[draft.kind] = { ...draft };
+    const key = providerConnectionKey(draft.kind, draft.auth);
+    const normalizedKind = normalizedProviderKind(draft.kind);
+    const normalizedAuth = normalizedProviderAuth(normalizedKind, draft.auth);
+    providerDraftsByConnection[key] = providerDraftWithDefaults(draft, normalizedKind, normalizedAuth);
+    lastProviderAuthByKind[normalizedKind] = normalizedAuth;
   }
-  function providerDraftForKind(kind, codexHome) {
-    if (Object.prototype.hasOwnProperty.call(providerDraftsByKind, kind)) {
-      return { ...providerDraftsByKind[kind], kind };
+  function providerConfigForConnection(kind, auth) {
+    const normalizedKind = normalizedProviderKind(kind);
+    const normalizedAuth = normalizedProviderAuth(normalizedKind, auth);
+    const key = providerConnectionKey(normalizedKind, normalizedAuth);
+    const active = config.provider || {};
+    if (providerConnectionKey(active.kind, active.auth) === key) {
+      return providerDraftWithDefaults(active, normalizedKind, normalizedAuth);
     }
-    const saved = config.provider || {};
-    if ((saved.kind || "open_ai_compatible") === kind) return { ...saved, kind };
-    return providerKindSeed(kind, codexHome || saved.codex_home);
+    const connections = config.provider_connections || {};
+    const stored = connections[key] || Object.values(connections).find((p) => providerConnectionKey(p && p.kind, p && p.auth) === key);
+    return stored ? providerDraftWithDefaults(stored, normalizedKind, normalizedAuth) : null;
   }
-  function currentProviderDraft() {
+  function providerDraftForConnection(kind, auth, codexHome) {
+    const normalizedKind = normalizedProviderKind(kind);
+    const normalizedAuth = normalizedProviderAuth(normalizedKind, auth);
+    const key = providerConnectionKey(normalizedKind, normalizedAuth);
+    if (Object.prototype.hasOwnProperty.call(providerDraftsByConnection, key)) {
+      return providerDraftWithDefaults(providerDraftsByConnection[key], normalizedKind, normalizedAuth, codexHome);
+    }
+    const saved = providerConfigForConnection(normalizedKind, normalizedAuth);
+    return saved || providerKindSeed(normalizedKind, normalizedAuth, codexHome || (config.provider || {}).codex_home);
+  }
+  function currentProviderDraft(connectionKind, connectionAuth) {
     const saved = config.provider || {};
     const draft = providerDraft || saved;
     const kind = $("#provider-kind");
@@ -1604,13 +1830,13 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const base = $("#base_url");
     const key = $("#api_key");
     const home = $("#codex_home");
-    const nextKind = kind ? kind.value : providerDraftValue(draft, "kind", "open_ai_compatible");
-    const nextAuth = auth ? auth.value : providerDraftValue(draft, "auth", "api_key");
+    const nextKind = normalizedProviderKind(connectionKind || (kind ? kind.value : providerDraftValue(draft, "kind", "open_ai_compatible")));
+    const nextAuth = normalizedProviderAuth(nextKind, connectionAuth || (auth ? auth.value : providerDraftValue(draft, "auth", "api_key")));
     const savedModel = providerDraftValue(draft, "model", "");
     const byokValue = byokModel ? byokModel.value : providerDraftValue(draft, "byok_model", nextAuth === "api_key" ? savedModel : "");
     const chatValue = chatModel ? chatModel.value : providerDraftValue(draft, "chatgpt_model", nextAuth === "chatgpt" ? savedModel : "");
     return {
-      ...draft,
+      ...providerDraftWithDefaults(draft, nextKind, nextAuth),
       kind: nextKind,
       auth: nextAuth,
       model: nextAuth === "chatgpt" ? chatValue : byokValue,
@@ -1619,6 +1845,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       base_url: base ? base.value : providerDraftValue(draft, "base_url", ""),
       api_key: key ? key.value : providerDraftValue(draft, "api_key", null),
       codex_home: home ? home.value : providerDraftValue(draft, "codex_home", null),
+      cli_binary: $("#cli-binary") ? $("#cli-binary").value : providerDraftValue(draft, "cli_binary", null),
     };
   }
   function providerDraftSnapshot(draft) {
@@ -1631,6 +1858,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       chatgpt_model: String(p.chatgpt_model || "").trim(),
       base_url: String(p.base_url || "").trim(),
       codex_home: String(p.codex_home || "").trim(),
+      cli_binary: String(p.cli_binary || "").trim(),
       api_key: String(p.api_key || "").trim(),
     };
   }
@@ -1642,7 +1870,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const b = providerDraftSnapshot(right);
     return a.kind === b.kind && a.auth === b.auth && a.model === b.model &&
       a.byok_model === b.byok_model && a.chatgpt_model === b.chatgpt_model &&
-      a.base_url === b.base_url && a.codex_home === b.codex_home &&
+      a.base_url === b.base_url && a.codex_home === b.codex_home && a.cli_binary === b.cli_binary &&
       (keychainStored ? a.api_key === "" : a.api_key === b.api_key);
   }
   function captureProviderDraft() {
@@ -1711,13 +1939,137 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     }
   }
 
+  const cliRuntimes = new Map();
+  function cliBinaryFor(kind) {
+    if (providerDraft && providerDraft.kind === kind) return String(providerDraft.cli_binary || "").trim();
+    const draft = providerDraftsByConnection[providerConnectionKey(kind, "api_key")];
+    const saved = providerConfigForConnection(kind, "api_key");
+    return String((draft || saved || {}).cli_binary || "").trim();
+  }
+  function cliRuntimeFor(kind, binary = cliBinaryFor(kind)) {
+    return cliRuntimes.get(JSON.stringify([kind, binary])) || {};
+  }
+  function cliRuntimeLabel(runtime) {
+    return runtime.pending ? "Checking…" : (runtime.version || (runtime.installed ? "Installed" : (runtime.message ? "Unavailable" : "Not checked")));
+  }
+  function syncCliRuntimeUi() {
+    const kind = $("#provider-kind") && $("#provider-kind").value;
+    document.querySelectorAll("[data-provider-choice]").forEach((button) => {
+      const choice = PROVIDER_CHOICES.find((c) => c.id === button.dataset.providerChoice);
+      if (choice && isCliProvider(choice.kind)) button.querySelector(".provider-choice-meta").textContent = cliRuntimeLabel(cliRuntimeFor(choice.kind));
+    });
+    if (!isCliProvider(kind)) return;
+    const runtime = cliRuntimeFor(kind, $("#cli-binary").value.trim());
+    $("#provider-runtime-version").textContent = cliRuntimeLabel(runtime);
+    $("#cli-runtime-status").textContent = runtime.pending ? "Checking the executable…" : (runtime.message || "Use automatic discovery, or enter an executable name or absolute path.");
+    $("#cli-refresh").disabled = !configIsReady() || !!runtime.pending;
+  }
+  async function refreshCliRuntime(kind, binary) {
+    if (!configIsReady() || !isCliProvider(kind)) return;
+    const key = JSON.stringify([kind, binary]);
+    if ((cliRuntimes.get(key) || {}).pending) return;
+    cliRuntimes.set(key, { pending: true });
+    syncCliRuntimeUi();
+    try {
+      cliRuntimes.set(key, await invoke("cli_provider_status", { kind, binary: binary || null }));
+    } catch (e) {
+      cliRuntimes.set(key, { installed: false, message: String(e) });
+    }
+    syncCliRuntimeUi();
+  }
+
+  const PROVIDER_CHOICES = [
+    { id: "codex", label: "Codex", kind: "open_ai_compatible", auth: "chatgpt", description: "Use models from your ChatGPT subscription." },
+    { id: "claude", label: "Claude Code", kind: "claude_cli", auth: "api_key", description: "Write with your Claude Code account." },
+    { id: "cursor", label: "Cursor", kind: "cursor_cli", auth: "api_key", description: "Write with your Cursor account. Your configured local and team hooks also apply." },
+    { id: "opencode", label: "OpenCode", kind: "open_code_cli", auth: "api_key", description: "Use a provider connected through OpenCode." },
+    { id: "openai", label: "OpenAI-compatible", kind: "open_ai_compatible", auth: "api_key", description: "Connect an API account or a local model server." },
+    { id: "anthropic", label: "Anthropic", kind: "anthropic", auth: "api_key", description: "Connect Claude models with an Anthropic API key." },
+    { id: "openrouter", label: "OpenRouter", kind: "open_router", auth: "api_key", description: "Access models through your OpenRouter account." },
+  ];
+  function providerChoiceFor(p) {
+    return PROVIDER_CHOICES.find((choice) => choice.kind === (p.kind || "open_ai_compatible") && choice.auth === (p.auth || "api_key")) || PROVIDER_CHOICES.find((choice) => choice.id === "openai");
+  }
+  function providerIsEnabled(choice) {
+    const active = config.provider || {};
+    const saved = providerChoiceFor(active).id === choice.id ? active : (config.provider_connections || {})[choice.kind + ":" + choice.auth];
+    return !!saved && saved.enabled !== false;
+  }
+  function providerEnableLabel(choice) {
+    const active = providerChoiceFor(config.provider || {}).id === choice.id;
+    return (active ? "Active · " : "") + (providerIsEnabled(choice) ? "Enabled" : "Disabled");
+  }
+  function syncProviderEnabledUi() {
+    for (const choice of PROVIDER_CHOICES) {
+      const toggle = document.querySelector('[data-provider-enabled="' + choice.id + '"]');
+      if (!toggle) continue;
+      toggle.setAttribute("aria-checked", String(providerIsEnabled(choice)));
+      toggle.disabled = !configIsReady() || providerSavePending || providerTogglePending;
+      toggle.title = (providerIsEnabled(choice) ? "Disable " : "Enable ") + choice.label;
+      const row = toggle.closest(".provider-choice-row");
+      row.querySelector(".provider-enable-state").textContent = providerEnableLabel(choice);
+      const dot = row.querySelector(".status-dot");
+      if (dot) dot.className = "status-dot " + (providerIsEnabled(choice) ? "ok" : "unknown");
+    }
+    const save = $("#save-models");
+    if (save) {
+      save.disabled = !configIsReady() || providerSavePending || providerTogglePending;
+      save.textContent = providerSavePending ? "Saving…" : "Save and use";
+    }
+  }
+  async function toggleProvider(choice) {
+    if (!ensureConfigReady() || providerSavePending || providerTogglePending) return;
+    const enabled = !providerIsEnabled(choice);
+    captureProviderDraft();
+    providerTogglePending = true;
+    syncProviderEnabledUi();
+    try {
+      const saved = await saveSection("provider_enabled", { kind: choice.kind, auth: choice.auth, enabled });
+      if (saved) setStatus(choice.label + (enabled ? " enabled" : " disabled"));
+    } finally {
+      providerTogglePending = false;
+      syncProviderEnabledUi();
+      renderStatus();
+    }
+  }
+  function renderProviderChoices() {
+    const selected = providerChoiceFor(providerDraft || config.provider || {});
+    const active = providerChoiceFor(config.provider || {});
+    const status = normalizeAuthStatus(chatgptStatus);
+    return '<div class="provider-list-label">Connections</div>' + PROVIDER_CHOICES.map((choice) => {
+      const detail = choice.id === "codex"
+        ? authStatusLabel(status) + (status.plan && isChatgptConnected(status) ? " · " + status.plan : "")
+        : (isCliProvider(choice.kind) ? cliRuntimeLabel(cliRuntimeFor(choice.kind)) : (choice.id === active.id ? "Active connection" : "API connection"));
+      return '<div class="provider-choice-row"><button type="button" class="provider-choice" data-provider-choice="' + choice.id + '" aria-pressed="' + (choice.id === selected.id) + '"' + configEditAttr() + '>' +
+        '<span class="provider-choice-title">' + choice.label + (choice.id === active.id ? '<span class="status-dot ' + (providerIsEnabled(choice) ? 'ok' : 'unknown') + '" title="Active connection" aria-label="Active connection"></span>' : '') + '</span>' +
+        (choice.id === "codex" ? '<span class="provider-choice-meta">' + (codexRuntimeVersion ? 'v' + escapeHtml(codexRuntimeVersion) + ' · Bundled' : 'Bundled runtime') + '</span>' : '') +
+        '<span class="provider-choice-meta">' + escapeHtml(detail) + '</span><span class="provider-enable-state">' + providerEnableLabel(choice) + '</span></button>' +
+        '<button type="button" class="provider-toggle" role="switch" data-provider-enabled="' + choice.id + '" aria-label="Enable ' + choice.label + '" aria-checked="' + providerIsEnabled(choice) + '"' + (!configIsReady() || providerSavePending || providerTogglePending ? ' disabled' : '') + '></button></div>';
+    }).join("");
+  }
+  function syncProviderBrowser() {
+    const kind = $("#provider-kind");
+    const auth = $("#provider-auth");
+    if (!kind || !auth) return;
+    const choice = providerChoiceFor({ kind: kind.value, auth: auth.value });
+    document.querySelectorAll("[data-provider-choice]").forEach((button) => {
+      button.setAttribute("aria-pressed", String(button.dataset.providerChoice === choice.id));
+    });
+    $("#provider-detail-title").textContent = choice.label;
+    $("#provider-detail-description").textContent = choice.description;
+    $("#provider-runtime-version").textContent = choice.id === "codex" ? (codexRuntimeVersion ? "v" + codexRuntimeVersion : "Version unavailable") : (isCliProvider(choice.kind) ? cliRuntimeLabel(cliRuntimeFor(choice.kind)) : "API");
+    syncCliRuntimeUi();
+  }
+
   function renderModels() {
     const viewGeneration = ++modelsViewGeneration;
     const saved = config.provider || {};
-    const p = providerDraft || saved;
+    const p = providerDraft
+      ? providerDraftWithDefaults(providerDraft, providerDraft.kind, providerDraft.auth)
+      : providerDraftWithDefaults(saved, saved.kind, saved.auth);
     const editAttr = configEditAttr();
-    const saveAttr = !configIsReady() || providerSavePending ? " disabled" : "";
-    const auth = p.auth || "api_key";
+    const saveAttr = !configIsReady() || providerSavePending || providerTogglePending ? " disabled" : "";
+    const auth = normalizedProviderAuth(p.kind, p.auth);
     const byokModel = providerDraftValue(p, "byok_model", auth === "api_key" ? p.model || "" : "");
     const chatModel = providerDraftValue(p, "chatgpt_model", auth === "chatgpt" ? p.model || "" : "");
     const s = $("#section-models");
@@ -1756,24 +2108,27 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const byokInner =
       "<div class=\"form-row\" id=\"preset-field\"><label for=\"provider-preset\">Preset</label><div class=\"control-stack\"><select id=\"provider-preset\">" + presetOptions + "</select></div></div>" +
       "<div class=\"form-row\" id=\"base-url-field\"><label for=\"base_url\">Base URL</label><div class=\"control-stack\"><input id=\"base_url\" value=\"" + escapeAttr(p.base_url || "") + "\" autocomplete=\"off\" spellcheck=\"false\"/><p class=\"field-hint\" id=\"base-url-hint\"></p></div></div>" +
-      "<div class=\"form-row top\" id=\"byok-key-wrap\"><label for=\"api_key\">API key</label><div class=\"control-stack\"><input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" placeholder=\"API key\" autocomplete=\"off\"/><label class=\"check-row\" for=\"store-keychain\"><input type=\"checkbox\" id=\"store-keychain\"" + (providerKeychainChoices[p.kind] === false ? "" : " checked") + "/> Store in OS keychain</label><p class=\"field-hint\" id=\"key-source-hint\"></p></div></div>" +
+      "<div class=\"form-row top\" id=\"byok-key-wrap\"><label for=\"api_key\">API key</label><div class=\"control-stack\"><input id=\"api_key\" type=\"password\" value=\"" + escapeAttr(p.api_key || "") + "\" placeholder=\"API key\" autocomplete=\"off\"/><label class=\"check-row\" for=\"store-keychain\"><input type=\"checkbox\" id=\"store-keychain\"" + (providerKeychainChoices[providerConnectionKey(p.kind, p.auth)] === false ? "" : " checked") + "/> Store in OS keychain</label><p class=\"field-hint\" id=\"key-source-hint\"></p></div></div>" +
       "<div class=\"form-row\" id=\"model-byok-wrap\"><label for=\"model\">Model</label><div class=\"control-stack\"><div class=\"control-inline\"><input id=\"model\" list=\"model-options\" value=\"" + escapeAttr(byokModel) + "\" autocomplete=\"off\" spellcheck=\"false\"/><datalist id=\"model-options\"></datalist><button type=\"button\" class=\"btn secondary\" id=\"load-models\">Load models</button></div><p class=\"field-hint\" id=\"byok-models-hint\" role=\"status\">Load models to check this connection, or enter a model ID. Then save changes.</p></div></div>";
+    const cliInner = '<div class="panel models-fields" id="cli-fields" hidden><div class="form-row top"><label for="cli-binary">CLI executable</label><div class="control-stack"><div class="control-inline"><input id="cli-binary" value="' + escapeAttr(p.cli_binary || "") + '" autocomplete="off" spellcheck="false"' + editAttr + '/><button type="button" class="btn secondary" id="cli-refresh"' + editAttr + '>Check CLI</button></div><p class="field-hint" id="cli-runtime-status" role="status"></p></div></div><div class="form-row top"><span>Account</span><div class="control-stack"><p class="field-hint">Uses the account signed in through this CLI. To sign in, run in Terminal:</p><code id="cli-login-command"></code></div></div></div>';
     s.innerHTML =
-      "<h1>Models</h1><p class=\"lead\">Choose the connection Selara uses for your commands.</p>" + configGateMarkup("models-config-gate") +
-      "<div class=\"panel models-setup\"><div class=\"form-row\"><label for=\"provider-kind\">Provider</label><select id=\"provider-kind\"" + editAttr + ">" + Object.keys(PROVIDERS).map((k) => "<option value=\"" + k + "\">" + escapeHtml(PROVIDERS[k].label) + "</option>").join("") + "</select></div>" +
+      "<h1>Providers</h1><p class=\"lead\">Configure your connections and choose the provider for your writing commands.</p>" + configGateMarkup("models-config-gate") +
+      '<div class="providers-layout"><nav class="provider-list" aria-label="Provider connections">' + renderProviderChoices() + '</nav><div class="provider-detail">' +
+      '<div class="provider-detail-head"><div><h2 id="provider-detail-title"></h2><p id="provider-detail-description"></p></div><span class="provider-runtime" id="provider-runtime-version"></span></div>' +
+      "<div class=\"panel models-setup\" hidden><div class=\"form-row\"><label for=\"provider-kind\">Provider</label><select id=\"provider-kind\"" + editAttr + ">" + Object.keys(PROVIDERS).map((k) => "<option value=\"" + k + "\">" + escapeHtml(PROVIDERS[k].label) + "</option>").join("") + "</select></div>" +
       "<div class=\"form-row\" id=\"provider-auth-row\"><label for=\"provider-auth\" id=\"auth-row-label\">Connection</label><div class=\"control-stack\"><div class=\"models-auth-choice\">" + segmentedHtml("provider-auth", [{ value: "api_key", label: "API key / local" }, { value: "chatgpt", label: "ChatGPT via Codex" }], auth) + "<span class=\"pill\" id=\"auth-experimental-pill\" style=\"display:none\">Experimental</span></div><p class=\"field-hint\" id=\"auth-hint\"></p></div></div></div>" +
-      "<div id=\"models-connections\"><div class=\"panel models-fields\" id=\"byok-fields\">" + byokInner + "</div>" +
+      "<div id=\"models-connections\">" + cliInner + "<div class=\"panel models-fields\" id=\"byok-fields\">" + byokInner + "</div>" +
       "<div id=\"chatgpt-fields\"><div class=\"panel models-fields\" id=\"chatgpt-account\">" + accountInner + "</div></div></div>" +
       "<details class=\"panel models-advanced\" id=\"provider-advanced\"" + (modelsAdvancedOpen ? " open" : "") + "><summary>Advanced</summary>" +
       "<div class=\"form-row top\"><label for=\"codex_home\">Codex home</label><div class=\"control-stack\"><input id=\"codex_home\" value=\"" + escapeAttr(p.codex_home || "") + "\" placeholder=\"Optional absolute path\" autocomplete=\"off\" spellcheck=\"false\"/><p class=\"field-hint\">Leave blank to use the default shared Codex home. A custom path takes effect after saving. ChatGPT tokens stay in that home; they are never copied into Selara.</p></div></div>" + statusMeta + "</details>" +
-      "<div class=\"models-save\"><p id=\"models-feedback\" class=\"command-error\" role=\"alert\" aria-atomic=\"true\" hidden></p><p class=\"field-hint\">Changes apply after saving.</p><button type=\"button\" class=\"btn\" id=\"save-models\"" + saveAttr + ">" + (providerSavePending ? "Saving…" : "Save changes") + "</button></div>";
+      "<div class=\"models-save\"><p id=\"models-feedback\" class=\"command-error\" role=\"alert\" aria-atomic=\"true\" hidden></p><p class=\"field-hint\">Saving enables this provider and makes it active.</p><button type=\"button\" class=\"btn\" id=\"save-models\"" + saveAttr + ">" + (providerSavePending ? "Saving…" : "Save and use") + "</button></div></div></div>";
     const initialKind = PROVIDERS[p.kind] ? p.kind : "open_ai_compatible";
     $("#provider-kind").value = initialKind;
     $("#provider-auth").value = initialKind === "open_ai_compatible" ? auth : "api_key";
     wireSegmented("provider-auth");
-    showProviderFeedback(providerFeedbackByKind[initialKind] || "");
+    showProviderFeedback(providerFeedbackByConnection[providerConnectionKey(initialKind, auth)] || "", initialKind, auth);
     $("#store-keychain").onchange = (ev) => {
-      providerKeychainChoices[$("#provider-kind").value] = ev.target.checked;
+      providerKeychainChoices[providerConnectionKey($("#provider-kind").value, $("#provider-auth").value)] = ev.target.checked;
     };
     $("#provider-advanced").ontoggle = (ev) => {
       if (ev.target.isConnected) modelsAdvancedOpen = ev.target.open;
@@ -1787,7 +2142,34 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     });
     document.querySelectorAll(".segmented[data-for=\"provider-auth\"] .seg").forEach((el) => { el.disabled = !configIsReady(); });
 
+    document.querySelectorAll("[data-provider-choice]").forEach((button) => {
+      button.onclick = () => {
+        if (!configIsReady()) return;
+        const choice = PROVIDER_CHOICES.find((item) => item.id === button.dataset.providerChoice);
+        captureProviderDraft();
+        const kind = $("#provider-kind");
+        if (kind.value !== choice.kind) {
+          kind.value = choice.kind;
+          kind.dispatchEvent(new Event("change"));
+        }
+        const auth = $("#provider-auth");
+        if (auth.value !== choice.auth) {
+          auth.value = choice.auth;
+          auth.dispatchEvent(new Event("change"));
+        }
+        syncProviderBrowser();
+        const selected = document.querySelector('[data-provider-choice="' + choice.id + '"]');
+        if (selected) selected.focus();
+      };
+    });
+
+    document.querySelectorAll("[data-provider-enabled]").forEach((toggle) => {
+      toggle.onclick = () => toggleProvider(PROVIDER_CHOICES.find((choice) => choice.id === toggle.dataset.providerEnabled));
+    });
+    syncProviderEnabledUi();
+
     function syncAuthUi() {
+      syncProviderBrowser();
       const mode = $("#provider-auth").value;
       const isCg = mode === "chatgpt";
       // Move existing nodes, rather than rebuilding the form, so switching
@@ -1795,7 +2177,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       const connections = $("#models-connections");
       const activeConnection = $(isCg ? "#chatgpt-fields" : "#byok-fields");
       if (connections.firstElementChild !== activeConnection) connections.prepend(activeConnection);
-      $("#chatgpt-fields").style.display = "block";
+      $("#chatgpt-fields").style.display = isCliProvider($("#provider-kind").value) ? "none" : "block";
       $("#byok-fields").style.display = isCg ? "none" : "block";
       $("#chatgpt-secondary-hint").hidden = isCg;
       const accountControls = $("#chatgpt-account-controls");
@@ -1839,7 +2221,22 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       const baseHint = $("#base-url-hint");
       if (baseHint) baseHint.textContent = !preset || preset.id === "openai" ? "Leave blank to use " + meta.baseUrl + "." : (preset.baseUrl ? "Filled from the " + preset.label + " preset; edit if needed." : "Enter the /v1 base URL of your server.");
       syncAuthUi();
+      const cli = isCliProvider(kind);
+      $("#cli-fields").hidden = !cli;
+      $("#base-url-field").hidden = cli;
+      $("#byok-key-wrap").hidden = cli;
+      $("#load-models").hidden = cli;
+      $("#provider-advanced").hidden = cli;
+      if (cli) {
+        $("#cli-binary").placeholder = meta.binary + " (auto-detect)";
+        $("#cli-login-command").textContent = meta.login;
+        $("#byok-models-hint").textContent = "Leave blank to use the CLI’s default model, or enter a model ID from your account.";
+        $("#models-connections").prepend($("#cli-fields"));
+      }
+      syncCliRuntimeUi();
     }
+    $("#cli-refresh").onclick = () => refreshCliRuntime($("#provider-kind").value, $("#cli-binary").value.trim());
+    $("#cli-binary").addEventListener("input", () => { captureProviderDraft(); syncCliRuntimeUi(); });
     ["model", "model-select", "base_url", "codex_home", "api_key"].forEach((id) => {
       const el = $("#" + id);
       if (el) {
@@ -1876,15 +2273,20 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       if (baseInput) baseInput.addEventListener("input", () => { syncPresetFromBaseUrl(); syncProviderUi(); });
     }
     let activeKind = initialKind;
+    let activeAuth = auth;
     $("#provider-kind").onchange = () => {
       if (!configIsReady()) return;
       const nextKind = $("#provider-kind").value;
       if (nextKind !== activeKind) {
-        const previous = currentProviderDraft();
+        const previous = currentProviderDraft(activeKind, activeAuth);
         rememberProviderDraft({ ...previous, kind: activeKind });
-        providerDraft = providerDraftForKind(nextKind, previous.codex_home);
-        if (nextKind !== "open_ai_compatible") providerDraft.auth = "api_key";
+        const nextAuth = nextKind === "open_ai_compatible"
+          ? (lastProviderAuthByKind[nextKind] || activeAuth)
+          : "api_key";
+        providerDraft = providerDraftForConnection(nextKind, nextAuth, previous.codex_home);
         activeKind = nextKind;
+        activeAuth = normalizedProviderAuth(nextKind, nextAuth);
+        lastProviderAuthByKind[activeKind] = activeAuth;
         renderModels();
         return;
       }
@@ -1894,6 +2296,16 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     };
     $("#provider-auth").onchange = () => {
       if (!configIsReady()) return;
+      const nextAuth = normalizedProviderAuth(activeKind, $("#provider-auth").value);
+      if (nextAuth !== activeAuth) {
+        const previous = currentProviderDraft(activeKind, activeAuth);
+        rememberProviderDraft(previous);
+        providerDraft = providerDraftForConnection(activeKind, nextAuth, previous.codex_home);
+        activeAuth = nextAuth;
+        lastProviderAuthByKind[activeKind] = activeAuth;
+        renderModels();
+        return;
+      }
       syncAuthUi(); syncProviderUi(); captureProviderDraft();
     };
     syncPresetFromBaseUrl();
@@ -1962,44 +2374,46 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
 
     $("#save-models").onclick = async () => {
       if (!ensureConfigReady()) return;
-      if (providerSavePending) return;
+      if (providerSavePending || providerTogglePending) return;
       const draft = captureProviderDraft() || currentProviderDraft();
       const model = String(draft.model || "").trim();
       const a = draft.auth || "api_key";
       const kind = draft.kind || "open_ai_compatible";
-      if (!model) {
+      if (!model && !isCliProvider(kind)) {
         const message = a === "chatgpt" && !isChatgptConnected(chatgptStatus) ? "Sign in with ChatGPT and choose a model before saving." : "Pick a model before saving.";
-        showProviderFeedback(message, kind);
+        showProviderFeedback(message, kind, a);
         setStatus(message);
         const target = a === "chatgpt" ? ($("#model-select").disabled ? $("#chatgpt-login") : $("#model-select")) : $("#model");
         if (target) target.focus();
         return;
       }
       const codexHome = String(draft.codex_home || "").trim();
-      if (codexHome && !codexHome.startsWith("/")) {
+      if (!isCliProvider(kind) && codexHome && !codexHome.startsWith("/")) {
         const message = "Codex home must be an absolute path, or leave it blank to use the default.";
-        showProviderFeedback(message, kind);
+        showProviderFeedback(message, kind, a);
         setStatus(message);
         modelsAdvancedOpen = true;
         $("#provider-advanced").open = true;
         $("#codex_home").focus();
         return;
       }
-      const typedKey = String(draft.api_key || "").trim();
+      const typedKey = isCliProvider(kind) ? "" : String(draft.api_key || "").trim();
       const useKeychain = !!($("#store-keychain") && $("#store-keychain").checked);
       const submitted = providerDraftSnapshot({ ...draft, kind, model, auth: a, codex_home: codexHome });
-      showProviderFeedback("", kind);
+      showProviderFeedback("", kind, a);
       providerSavePending = true;
+      syncProviderEnabledUi();
       const saveButton = $("#save-models");
       if (saveButton) { saveButton.disabled = true; saveButton.textContent = "Saving…"; }
       let keychainStored = false;
       const clearSubmittedKeyIfCurrent = () => {
-        const stored = providerDraftsByKind[kind];
+        const connectionKey = providerConnectionKey(kind, a);
+        const stored = providerDraftsByConnection[connectionKey];
         if (stored && String(stored.api_key || "").trim() === typedKey) stored.api_key = null;
-        if (providerDraft && providerDraft.kind === kind && String(providerDraft.api_key || "").trim() === typedKey) providerDraft.api_key = null;
+        if (providerDraft && providerConnectionKey(providerDraft.kind, providerDraft.auth) === connectionKey && String(providerDraft.api_key || "").trim() === typedKey) providerDraft.api_key = null;
         const selected = $("#provider-kind");
         const currentKey = $("#api_key");
-        if (selected && selected.value === kind && currentKey && String(currentKey.value || "").trim() === typedKey) currentKey.value = "";
+        if (selected && providerConnectionKey(selected.value, $("#provider-auth").value) === connectionKey && currentKey && String(currentKey.value || "").trim() === typedKey) currentKey.value = "";
       };
       let saved = false;
       try {
@@ -2012,23 +2426,23 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
             clearSubmittedKeyIfCurrent();
           } else await invoke("clear_api_key", { kind });
         }
-        saved = await saveSection("provider", { kind, model, base_url: String(draft.base_url || "").trim(), api_key: fileKey, auth: a, codex_home: codexHome || null }, (error) => {
-          showProviderFeedback("Could not save provider settings. " + String(error) + " Try saving again.", kind);
+        saved = await saveSection("provider", { kind, enabled: true, model, base_url: String(draft.base_url || "").trim(), api_key: fileKey, auth: a, codex_home: codexHome || null, cli_binary: String(draft.cli_binary || "").trim() || null }, (error) => {
+          showProviderFeedback("Could not save provider settings. " + String(error) + " Try saving again.", kind, a);
         });
         if (saved) {
-          const originDraft = providerDraft && providerDraft.kind === kind ? providerDraft : providerDraftsByKind[kind];
+          const originDraft = providerDraft && providerConnectionKey(providerDraft.kind, providerDraft.auth) === providerConnectionKey(kind, a)
+            ? providerDraft : providerDraftsByConnection[providerConnectionKey(kind, a)];
           if (providerDraftMatches(originDraft, submitted, keychainStored)) {
-            delete providerDraftsByKind[kind];
-            if (providerDraft && providerDraft.kind === kind) providerDraft = null;
+            delete providerDraftsByConnection[providerConnectionKey(kind, a)];
+            if (providerDraft && providerConnectionKey(providerDraft.kind, providerDraft.auth) === providerConnectionKey(kind, a)) providerDraft = null;
           }
         }
       } catch (e) {
         setStatus(String(e));
-        showProviderFeedback("Could not save provider settings. " + String(e) + " Try saving again.", kind);
+        showProviderFeedback("Could not save provider settings. " + String(e) + " Try saving again.", kind, a);
       } finally {
         providerSavePending = false;
-        const currentSaveButton = $("#save-models");
-        if (currentSaveButton) { currentSaveButton.disabled = !configIsReady(); currentSaveButton.textContent = "Save changes"; }
+        syncProviderEnabledUi();
       }
       if (saved) {
         chatgptModels = null;
@@ -2345,8 +2759,148 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     return true;
   }
 
+  let shortcutRecording = null;
+  let shortcutNativeQueue = Promise.resolve();
+
+  function updateShortcutLease(sessionId, active) {
+    // Serialize start/renew/stop so a slow start cannot arrive after cleanup.
+    const request = shortcutNativeQueue.catch(() => {}).then(() =>
+      invoke("set_shortcut_recording", { sessionId, active }));
+    shortcutNativeQueue = request;
+    return request;
+  }
+
+  function canonicalShortcut(chord) {
+    const aliases = { control: "ctrl", control_l: "ctrl", control_r: "ctrl", option: "alt", opt: "alt", command: "cmd", super: "cmd", meta: "cmd", win: "cmd", return: "enter", esc: "escape", del: "delete", pgup: "pageup", pgdn: "pagedown", arrowup: "up", arrowdown: "down", arrowleft: "left", arrowright: "right" };
+    const parts = String(chord || "").toLowerCase().split("+").map((part) => aliases[part.trim()] || part.trim()).filter(Boolean);
+    const modifiers = ["ctrl", "alt", "shift", "cmd"];
+    const key = parts.filter((part) => !modifiers.includes(part)).at(-1);
+    return key ? [...modifiers.filter((part) => parts.includes(part)), key].join("+") : "";
+  }
+
+  function shortcutConflict(chord) {
+    const key = canonicalShortcut(chord);
+    if (!key) return "";
+    if (["cmd+c", "cmd+x", "cmd+v", "cmd+z", "shift+cmd+z", "escape"].includes(key)) {
+      return "That shortcut is reserved for editing or cancellation. Try another combination.";
+    }
+    if (key === canonicalShortcut(config.hotkey)) return "That shortcut opens Custom instruction. Try another combination.";
+    const other = (config.commands || []).find((command) => command.id !== editingId && canonicalShortcut(command.hotkey) === key);
+    return other ? "That shortcut is already assigned to “" + other.label + "”. Try another combination." : "";
+  }
+
+  function shortcutFromEvent(event) {
+    const named = { Space: "space", Enter: "enter", Tab: "tab", Escape: "escape", Backspace: "backspace", Delete: "delete", Home: "home", End: "end", PageUp: "pageup", PageDown: "pagedown", ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]", Semicolon: ";", Quote: "'", Comma: ",", Period: ".", Slash: "/", Backquote: "`", Backslash: "\\" };
+    let key = named[event.code];
+    if (/^Key[A-Z]$/.test(event.code)) key = event.code.slice(3).toLowerCase();
+    if (/^Digit[0-9]$/.test(event.code)) key = event.code.slice(5);
+    if (/^F([1-9]|1[0-2])$/.test(event.code)) key = event.code.toLowerCase();
+    if (!event.code) {
+      key = named[event.key] || (/^[a-z0-9]$/i.test(event.key) ? event.key.toLowerCase() : undefined);
+    }
+    if (!key || event.isComposing) return null;
+    if (!event.ctrlKey && !event.altKey && !event.metaKey && !/^f\d+$/.test(key)) return null;
+    return [event.ctrlKey && "ctrl", event.altKey && "alt", event.shiftKey && "shift", event.metaKey && "cmd", key].filter(Boolean).join("+");
+  }
+
+  function renderShortcutRecorder(message) {
+    const button = $("#cmd-hotkey");
+    if (!button) return;
+    const recording = shortcutRecording && shortcutRecording.button === button;
+    button.dataset.recording = String(Boolean(recording));
+    button.setAttribute("aria-pressed", String(Boolean(recording)));
+    button.setAttribute("aria-busy", String(recording && shortcutRecording.phase === "preparing" || false));
+    button.classList.toggle("has-shortcut", Boolean(button.value) && !recording);
+    button.textContent = recording ? (shortcutRecording.phase === "preparing" ? "Preparing…" : "Press shortcut…") : (prettyHotkey(button.value) || "Record shortcut");
+    button.setAttribute("aria-label", recording ? "Recording shortcut" : (button.value ? "Change shortcut, " + prettyHotkey(button.value) : "Record shortcut"));
+    $("#cmd-hotkey-clear").disabled = !button.value;
+    if (message) $("#cmd-hotkey-hint").textContent = message;
+  }
+
+  async function startShortcutRecording() {
+    if (shortcutRecording || commandOperationPending) return;
+    const button = $("#cmd-hotkey");
+    if (!button) return;
+    button.focus(); // WebKit on macOS does not always focus a clicked button.
+    const session = { button, original: button.value, sessionId: "shortcut-" + Date.now() + "-" + Math.random().toString(36).slice(2), phase: "preparing", timer: null, renewing: false };
+    shortcutRecording = session;
+    renderShortcutRecorder("Preparing to record…");
+    try {
+      await updateShortcutLease(session.sessionId, true);
+      if (shortcutRecording !== session) return;
+      session.phase = "listening";
+      renderShortcutRecorder("Press the keys together. Esc cancels; Delete clears.");
+      session.timer = setInterval(async () => {
+        if (session.renewing || shortcutRecording !== session) return;
+        session.renewing = true;
+        try { await updateShortcutLease(session.sessionId, true); }
+        catch (error) {
+          if (shortcutRecording === session) stopShortcutRecording("Recording stopped: " + error);
+        } finally { session.renewing = false; }
+      }, 700);
+    } catch (error) {
+      if (shortcutRecording === session) stopShortcutRecording("Could not record shortcut: " + error);
+    }
+  }
+
+  function stopShortcutRecording(message) {
+    const session = shortcutRecording;
+    if (!session) return;
+    shortcutRecording = null;
+    clearInterval(session.timer);
+    renderShortcutRecorder(message || "Click to record a shortcut, then press the keys together.");
+    // The service also expires the lease if this view closes before cleanup arrives.
+    updateShortcutLease(session.sessionId, false).catch(() => {});
+  }
+
+  function recordShortcutKey(event) {
+    const session = shortcutRecording;
+    if (!session) return false;
+    const bare = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
+    if (event.key === "Tab" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      stopShortcutRecording();
+      return false; // Keep the sheet's normal keyboard focus navigation.
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (event.key === "Escape" && bare) { session.button.value = session.original; stopShortcutRecording("Recording cancelled."); return true; }
+    if (session.phase !== "listening" || event.repeat) return true;
+    if (["Control", "Alt", "Shift", "Meta", "CapsLock", "Fn"].includes(event.key)) return true;
+    if (["Backspace", "Delete"].includes(event.key) && bare) {
+      session.button.value = "";
+      session.phase = "captured";
+      session.capturedCode = event.code || event.key;
+      renderShortcutRecorder("Shortcut cleared. Release the keys to finish.");
+      session.button.textContent = "No shortcut";
+      return true;
+    }
+    const chord = shortcutFromEvent(event);
+    if (!chord) { renderShortcutRecorder("Use ⌘, ⌃, or ⌥ with a key, or a function key (F1–F12)."); return true; }
+    const conflict = shortcutConflict(chord);
+    if (conflict) { renderShortcutRecorder(conflict); return true; }
+    session.button.value = chord;
+    session.phase = "captured";
+    session.capturedCode = event.code || event.key;
+    renderShortcutRecorder("Shortcut recorded. Release the keys to finish.");
+    session.button.textContent = prettyHotkey(chord);
+    return true;
+  }
+
+  document.addEventListener("keyup", (event) => {
+    const released = shortcutRecording && ((event.code || event.key) === shortcutRecording.capturedCode || (!event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey));
+    if (shortcutRecording && shortcutRecording.phase === "captured" && released) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      stopShortcutRecording(shortcutRecording.button.value ? "Shortcut recorded. Save changes to apply." : "Shortcut cleared. Save changes to apply.");
+    }
+  }, true);
+  window.addEventListener("blur", () => stopShortcutRecording());
+  window.addEventListener("pagehide", () => stopShortcutRecording());
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stopShortcutRecording(); });
+
   function closeCommandSheet() {
     if (commandOperationPending) return;
+    stopShortcutRecording();
     const root = $("#sheet-root");
     if (root) root.remove();
     document.body.classList.remove("sheet-open");
@@ -2376,6 +2930,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   function sheetKeyHandler(ev) {
+    if (shortcutRecording && recordShortcutKey(ev)) return;
     if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); closeCommandSheet(); return; }
     if (ev.key === "Tab") {
       const elements = sheetFocusableElements();
@@ -2422,8 +2977,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<div class=\"form-row\">" +
       "<label for=\"cmd-hotkey\">Shortcut</label>" +
       "<div class=\"control-stack\">" +
-      "<input id=\"cmd-hotkey\" value=\"" + escapeAttr((editing && editing.hotkey) || "") + "\" placeholder=\"Optional, e.g. ctrl+shift+p\" autocomplete=\"off\" spellcheck=\"false\" />" +
-      "<p class=\"field-hint\">Runs this command on the current selection.</p>" +
+      "<div class=\"control-inline\"><button type=\"button\" id=\"cmd-hotkey\" class=\"shortcut-recorder\" value=\"" + escapeAttr((editing && editing.hotkey) || "") + "\" aria-describedby=\"cmd-hotkey-hint\" aria-pressed=\"false\"></button>" +
+      "<button type=\"button\" id=\"cmd-hotkey-clear\" class=\"btn secondary\" aria-label=\"Clear shortcut\">Clear</button></div>" +
+      "<p class=\"field-hint\" id=\"cmd-hotkey-hint\" role=\"status\">Click to record a shortcut, then press the keys together.</p>" +
       "</div></div>" +
       "<details class=\"sheet-advanced\"><summary>Advanced <span>Model override and app rules</span></summary>" +
       "<div class=\"form-row\">" +
@@ -2458,6 +3014,15 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
 
     root.onclick = (ev) => { if (ev.target === root) closeCommandSheet(); };
     $("#cmd-cancel").onclick = closeCommandSheet;
+    renderShortcutRecorder();
+    $("#cmd-hotkey").onclick = startShortcutRecording;
+    $("#cmd-hotkey").onblur = () => stopShortcutRecording();
+    $("#cmd-hotkey-clear").onclick = () => {
+      stopShortcutRecording();
+      $("#cmd-hotkey").value = "";
+      renderShortcutRecorder("Shortcut cleared. Save changes to apply.");
+      $("#cmd-hotkey").focus();
+    };
     const del = $("#cmd-delete");
     if (del) del.onclick = async () => {
       if (await deleteCommand(id)) closeCommandSheet();
@@ -2466,11 +3031,14 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
 
     $("#cmd-save").onclick = async () => {
       if (!ensureConfigReady() || commandOperationPending) return;
+      stopShortcutRecording();
       const label = $("#cmd-label").value.trim();
       const prompt = $("#cmd-prompt").value.trim();
       const kind = "replace";
       const hotkeyRaw = $("#cmd-hotkey").value.trim();
       const hotkey = hotkeyRaw ? hotkeyRaw : null;
+      const shortcutError = shortcutConflict(hotkey);
+      if (shortcutError) { renderShortcutRecorder(shortcutError); $("#cmd-hotkey").focus(); return; }
       const modelRaw = $("#cmd-model").value.trim();
       const cmdModel = modelRaw ? modelRaw : null;
       const apps = parseAppList($("#cmd-apps").value);
@@ -2569,7 +3137,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   // The background check (10 s after launch, then daily) and the tray's
-  // "Check for updates…" item report through this event; keep the card in step.
+  // "Check for updates…" item report through this event; keep the footer in step.
   let updateListenerBound = false;
   function listenForUpdates() {
     if (updateListenerBound) return;
@@ -2578,8 +3146,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     updateListenerBound = true;
     g.event.listen("update-changed", (ev) => {
       updateStatus = ev && ev.payload ? ev.payload : null;
-      if ($("#section-status").classList.contains("active")) renderStatus();
-      else if ($("#status-updates")) renderStatus();
+      renderUpdates();
     }).catch(() => { updateListenerBound = false; });
     }
 
@@ -2622,6 +3189,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   function historyKindLabel(entry) {
+    if (entry.outcome === "not_applied") return "Not applied";
+    if (entry.outcome === "paste_unverified") return "Paste unverified";
     const legacy = !entry.original || (entry.kind && String(entry.kind).toLowerCase() !== "replace");
     return legacy ? "Legacy result" : "Replace";
   }
@@ -2638,6 +3207,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         "<h3><span class=\"hist-name\">" + escapeHtml(h.label || h.command_id || "Command") + "</span>" +
         "<span class=\"badge\">" + escapeHtml(historyKindLabel(h)) + "</span></h3>" +
         "<div class=\"hist-meta\" title=\"" + escapeAttr(h.ts ? new Date(h.ts * 1000).toLocaleString() : "") + "\">" + escapeHtml(when) + app + "</div>" +
+        (h.outcome === "paste_unverified" ? '<p class="field-hint">Check your document before copying this result; the paste may have completed.</p>' :
+          h.outcome === "not_applied" ? '<p class="field-hint">Your selection was not changed. The completed rewrite is saved here.</p>' : "") +
         "<dl class=\"hist-preview\">" +
         "<dt>Original</dt><dd class=\"original\" title=\"" + escapeAttr(previewLine(h.original, 400)) + "\">" + escapeHtml(previewLine(h.original, 160)) + "</dd>" +
         "<dt>Result</dt><dd class=\"result\" title=\"" + escapeAttr(previewLine(h.result, 400)) + "\">" + escapeHtml(previewLine(h.result, 160)) + "</dd>" +
@@ -2660,7 +3231,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
 
     s.innerHTML =
       "<h1>History</h1>" +
-      "<p class=\"lead\">What Selara wrote and what it replaced. Copy a result or the original text back to the clipboard; " +
+      "<p class=\"lead\">Your completed rewrites, including results that could not be applied. Copy a result or the original text back to the clipboard; " +
       "to restore a replacement in the source app, use that app's native undo command. " +
       "The file holds the selected text verbatim and is readable only by you.</p>" +
       "<div class=\"toolbar\">" +
@@ -2709,6 +3280,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     // a slow account-status response returns.
     renderSettings();
     renderStatus();
+    renderUsage();
     let configLoaded = false;
     try {
       const loaded = await invoke("get_config");
@@ -2721,6 +3293,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       configLoadError = "";
       configLoaded = true;
       renderSettings();
+      for (const kind of Object.keys(PROVIDERS).filter(isCliProvider)) {
+        const saved = config.provider.kind === kind ? config.provider : (config.provider_connections || {})[kind + ":api_key"];
+        refreshCliRuntime(kind, saved && saved.cli_binary || "");
+      }
       await refreshChatgptStatus();
       await refreshStatusData();
       renderStatus();

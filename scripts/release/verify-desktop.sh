@@ -6,6 +6,7 @@ APP="$ROOT/target/release/bundle/macos/Selara.app"
 codesign --verify --deep --strict "$APP"
 codesign --verify --strict "$APP/Contents/MacOS/selara"
 "$APP/Contents/MacOS/selara" --help
+test -s "$APP/Contents/Resources/runtime-notices/thinking-orbs.LICENSE"
 if [ -x "$APP/Contents/MacOS/selara-codex" ]; then
   codesign --verify --strict "$APP/Contents/MacOS/selara-codex"
   env -i HOME="$HOME" PATH=/usr/bin:/bin "$APP/Contents/MacOS/selara-codex" --version

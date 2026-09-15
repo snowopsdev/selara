@@ -68,6 +68,9 @@ jobs:
       - name: cargo test (platform crate)
         run: cargo test -p selara-platform
 
+      - name: Test working orb geometry
+        run: sh apps/selara/native/test.sh --geometry-only
+
   desktop-package:
     name: package desktop (macOS)
     runs-on: macos-latest
