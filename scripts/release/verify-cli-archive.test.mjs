@@ -7,14 +7,18 @@ import {tmpdir} from 'node:os';
 import {join, basename, resolve} from 'node:path';
 import {verifyCliArchive} from './verify-cli-archive.mjs';
 
-function fixture(t, missing) {
+function fixture(t, missing, {withOrb = true} = {}) {
   const temp=mkdtempSync(join(tmpdir(),'selara-cli-fixture-'));
   t.after(()=>rmSync(temp,{recursive:true,force:true}));
-  const root=fileURLToPath(new URL('../../',import.meta.url));
+  const repository=fileURLToPath(new URL('../../',import.meta.url));
+  const root=join(temp,'source');
+  mkdirSync(join(root,'vendor/codex-runtime'),{recursive:true});
+  writeFileSync(join(root,'vendor/codex-runtime/runtime.toml'),readFileSync(join(repository,'vendor/codex-runtime/runtime.toml')));
+  if(withOrb)mkdirSync(join(root,'apps/selara/native/ThinkingOrbsKit'),{recursive:true});
   const content=join(temp,'selara-0.4.1-macos-arm64'); mkdirSync(content);
   const lock=readFileSync(join(root,'vendor/codex-runtime/runtime.toml'),'utf8');
   const provenance=Object.fromEntries(['source_revision','patches_sha256','target','minimum_macos'].map(key=>[key,lock.match(new RegExp(`^${key} = "([^"]+)"`,'m'))[1]]));
-  for(const name of ['selara','selara-codex','selara-codex.LICENSE','selara-codex.NOTICE']) if(name!==missing)writeFileSync(join(content,name),'fixture');
+  for(const name of ['selara','selara-codex','selara-codex.LICENSE','selara-codex.NOTICE',...(withOrb?['thinking-orbs.LICENSE']:[])]) if(name!==missing)writeFileSync(join(content,name),'fixture');
   writeFileSync(join(content,'selara-codex.provenance.json'),JSON.stringify(provenance));
   const archive=join(temp,'archive.tar.gz');
   const pack=()=>execFileSync('tar',['-czf',archive,'-C',temp,basename(content)], {env:{...process.env,COPYFILE_DISABLE:'1'}});
@@ -57,4 +61,16 @@ test('missing expected team rejects recovered CLI before extraction or execution
  const f=fixture(t);
  for(const teamId of ['',undefined,'0123456789\n']) assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1',teamId,f.run),/APPLE_TEAM_ID/);
  assert.deepEqual(f.calls,[]);
+});
+
+test('orb-enabled CLI source requires its license before signature checks or execution',t=>{
+ const f=fixture(t,'thinking-orbs.LICENSE');
+ assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run),/Missing CLI archive file: thinking-orbs\.LICENSE/);
+ assert.equal(f.calls.includes('codesign'),false);
+ assert.equal(f.calls.some(p=>basename(p)==='selara'),false);
+});
+test('recovered releases whose source predates the orb keep their original requirements',t=>{
+ const f=fixture(t,undefined,{withOrb:false});
+ verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run);
+ assert.equal(f.calls.filter(x=>x==='codesign').length,4);
 });

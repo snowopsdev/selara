@@ -13,7 +13,11 @@ export function verifyCliArchive(archive, root, tag, teamId, run = command) {
   try {
     run("python3", [fileURLToPath(new URL("./extract-archive.py", import.meta.url)), archive, directory, basename(cli, ".tar.gz")]);
     const content = join(directory, basename(cli, ".tar.gz"));
-    for (const name of ["selara", "selara-codex", "selara-codex.LICENSE", "selara-codex.NOTICE", "selara-codex.provenance.json"]) if (!existsSync(join(content, name))) throw new Error(`Missing CLI archive file: ${name}`);
+    const required = ["selara", "selara-codex", "selara-codex.LICENSE", "selara-codex.NOTICE", "selara-codex.provenance.json"];
+    // Recovery uses the release's original source. Older releases did not
+    // bundle the orb, so require its license only when that source includes it.
+    if (existsSync(join(root, "apps/selara/native/ThinkingOrbsKit"))) required.push("thinking-orbs.LICENSE");
+    for (const name of required) if (!existsSync(join(content, name))) throw new Error(`Missing CLI archive file: ${name}`);
     for (const binary of ["selara", "selara-codex"]) {
       run("codesign", ["--verify", "--strict", join(content, binary)]);
       // Verify a requirement instead of parsing localized diagnostic output.
