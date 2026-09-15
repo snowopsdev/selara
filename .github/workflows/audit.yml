@@ -35,15 +35,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # cargo audit only reads Cargo.lock; nothing here needs git auth.
+          persist-credentials: false
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
+      # Prebuilt binary; nothing to compile or cache. ubuntu-latest ships cargo,
+      # which is all `cargo audit` needs to dispatch to the subcommand.
+      # fallback: none fails loudly instead of silently compiling from source
+      # (the behavior this replaced) and keeps the job token away from
+      # cargo-binstall.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+          fallback: none
 
       - name: Audit Cargo.lock against RustSec
         run: cargo audit
