@@ -32,6 +32,12 @@ Findings 2, 6, and 8–14 are implemented as well:
 
 These changes were checked in an offscreen WKWebView as well as Playwright WebKit. The native menus and alerts come from Tauri and the dialog plugin; the mock records them for tests but doesn't draw them.
 
+The Settings UI rendered by WKWebView (the engine Tauri uses), against the mock with a Purple accent: native pop-up button and accent switches, and History's Copy control with warning badges.
+
+![Providers in WKWebView](screenshots/15-wkwebview-providers.png)
+
+![History in WKWebView](screenshots/16-wkwebview-history.png)
+
 The real window after the change, in the debug build with the system accent set to Purple, scrolled to show all four groups (captured before the scroll reset was added):
 
 ![General after the change, real window](screenshots/14-native-after-general.png)
