@@ -1,6 +1,6 @@
-import { test } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { SECTIONS, openSettings, showSection, artifactPath } from "./helpers.mjs";
+import { SECTIONS, openSettings, showSection, artifactPath, settle } from "./helpers.mjs";
 
 // Report-only: measures styling that reads as "web page" rather than macOS
 // app, for the native-feel audit. Nothing here fails; compare the JSON across
@@ -14,6 +14,8 @@ test("collect native-feel metrics", async ({ page }, testInfo) => {
   }
   await showSection(page, "commands");
   await page.locator("#cmd-new").click();
+  await expect(page.locator("#sheet-root [role=dialog]")).toBeVisible();
+  await settle(page);
   perSection.commandSheet = await page.evaluate(collectVisible);
   const global = await page.evaluate(collectStylesheet);
 
@@ -78,6 +80,7 @@ function collectVisible() {
   }
   const accentProbe = document.querySelector(".btn:not(.secondary):not(.danger)");
   const focusable = [...document.querySelectorAll("button, input, select, textarea, summary, [tabindex]")].filter(visible);
+  const shown = (selector) => [...document.querySelectorAll(selector)].filter(visible);
   return {
     visibleElements: els.length,
     cursorPointer: pointer,
@@ -92,11 +95,11 @@ function collectVisible() {
     accentVar: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
     focusables: focusable.length,
     nativeControls: {
-      selects: document.querySelectorAll("select").length,
-      appearanceNone: [...document.querySelectorAll("select, input, button")].filter((el) => getComputedStyle(el).appearance === "none" || getComputedStyle(el).webkitAppearance === "none").length,
-      checkboxes: document.querySelectorAll("input[type=checkbox]").length,
+      selects: shown("select").length,
+      appearanceNone: shown("select, input, button").filter((el) => getComputedStyle(el).appearance === "none" || getComputedStyle(el).webkitAppearance === "none").length,
+      checkboxes: shown("input[type=checkbox]").length,
     },
-    externalLinks: [...document.querySelectorAll("a[target=_blank]")].map((a) => a.href),
+    externalLinks: shown("a[target=_blank]").map((a) => a.href),
   };
 }
 

@@ -19,7 +19,7 @@
   const params = new URLSearchParams(location.search);
   const scenario = params.get("scenario") || "configured";
   const failConfig = params.get("fail") === "config";
-  const delayParam = Number(params.get("delay"));
+  const delayParam = params.has("delay") ? Number(params.get("delay")) : NaN;
   const delay = Number.isFinite(delayParam) && delayParam >= 0 ? delayParam : 150;
   const accent = /^#[0-9a-f]{6}$/i.test(params.get("accent") || "") ? params.get("accent") : null;
   const now = Math.floor(Date.now() / 1000);
@@ -47,18 +47,32 @@
     command("translate", "Translate", "Translate the text to English.", null, { apps: ["com.apple.mail", "com.tinyspeck.slackmacgap"] }),
   ];
 
+  // The nine commands a new config.toml starts with (selara-core builtin_commands).
+  const builtinCommands = [
+    command("proofread", "Proofread", "Proofread the text. Fix grammar, spelling, and punctuation only. Keep meaning and voice. Return only the corrected text."),
+    command("rewrite", "Rewrite", "Rewrite the text for clarity and flow. Keep the original meaning. Return only the rewritten text."),
+    command("friendly", "Friendly", "Rewrite the text in a warm, friendly tone. Return only the rewritten text."),
+    command("professional", "Professional", "Rewrite the text in a clear, professional tone. Return only the rewritten text."),
+    command("concise", "Concise", "Make the text more concise without losing key meaning. Return only the rewritten text."),
+    command("summary", "Summary", "Summarize the text clearly in markdown. Use short paragraphs or bullets as needed."),
+    command("key_points", "Key Points", "Extract the key points as a markdown bullet list."),
+    command("table", "Table", "Convert the useful information in the text into a markdown table."),
+    command("translate", "Translate", "Translate the text to {{language}}. Return only the translation."),
+  ];
+
   const limits = { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000, secret_guard: true };
 
   function makeConfig() {
     if (scenario === "fresh") {
+      // Matches AppConfig::default(), which load_or_init writes on first launch.
       return {
         schema_version: 2,
-        provider: { kind: "open_ai_compatible", enabled: true, base_url: "", model: "", api_key: null, auth: "api_key", codex_home: null, cli_binary: null },
+        provider: { kind: "open_ai_compatible", enabled: true, base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", api_key: null, auth: "api_key", codex_home: null, cli_binary: null },
         provider_connections: {},
         hotkey: "ctrl+shift+space",
         language: "en",
         excluded_apps: [],
-        commands: [],
+        commands: clone(builtinCommands),
         limits: clone(limits),
       };
     }
@@ -82,9 +96,14 @@
     return { requests, input, output, cost_usd: cost, unpriced: 0, tokens_missing: 0 };
   }
 
+  function emptyUsage() {
+    const empty = () => bucket(0, 0, 0, null);
+    return { path: "~/Library/Application Support/selara/usage.jsonl", today: empty(), last_30_days: empty(), all_time: empty(), models: [] };
+  }
+
   function makeUsage() {
     if (scenario === "fresh") {
-      return { path: "~/Library/Application Support/selara/usage.jsonl", today: bucket(0, 0, 0, 0), last_30_days: bucket(0, 0, 0, 0), all_time: bucket(0, 0, 0, 0), models: [] };
+      return emptyUsage();
     }
     return {
       path: "~/Library/Application Support/selara/usage.jsonl",
@@ -116,7 +135,8 @@
   const state = {
     scenario,
     config: makeConfig(),
-    apiKeySource: scenario === "fresh" ? "none" : "keychain",
+    // Provider kinds with a key in the (mock) keychain, like secrets::keychain_*.
+    keychain: scenario === "fresh" ? [] : ["open_ai_compatible"],
     auth: scenario === "configured" ? clone(connected) : clone(signedOut),
     ax: scenario === "fresh" ? "missing" : "granted",
     autostart: scenario !== "fresh",
@@ -131,6 +151,60 @@
       ? ["[serve] selara serve 0.6.0 starting", "[serve] accessibility trust: granted", "[serve] 6 commands registered, 4 shortcuts", "[serve] ready"]
       : [],
   };
+
+  // The native command reports the active provider's source only.
+  function keySource() {
+    const kind = state.config.provider.kind;
+    if (CLI_KINDS.includes(kind)) return "none";
+    return state.keychain.includes(kind) ? "keychain" : "none";
+  }
+
+  // A fixed two-command pack merged the way commands::merge_commands does:
+  // "rewrite" collides by id, and "summary" asks for Proofread's shortcut.
+  function importPack(mode) {
+    const incoming = [
+      command("rewrite", "Rewrite", "Rewrite the text so it reads naturally. Return only the rewritten text."),
+      command("summary", "Summary", "Summarize the text in three sentences.", "ctrl+alt+p"),
+    ];
+    const cmds = state.config.commands;
+    const report = { added: 0, replaced: 0, skipped: 0, renamed: [], hotkeys_dropped: 0 };
+    for (const cmd of incoming) {
+      const pos = cmds.findIndex((c) => c.id === cmd.id);
+      if (pos >= 0 && mode === "skip") { report.skipped += 1; continue; }
+      if (cmd.hotkey && cmds.some((c, i) => c.hotkey === cmd.hotkey && !(mode === "replace" && i === pos))) {
+        cmd.hotkey = null;
+        report.hotkeys_dropped += 1;
+      }
+      if (pos < 0) { cmds.push(cmd); report.added += 1; }
+      else if (mode === "replace") { cmds[pos] = cmd; report.replaced += 1; }
+      else {
+        let n = 2;
+        while (cmds.some((c) => c.id === cmd.id + "-" + n)) n += 1;
+        const renamed = cmd.id + "-" + n;
+        report.renamed.push([cmd.id, renamed]);
+        cmds.push({ ...cmd, id: renamed, label: cmd.label + " (imported)" });
+        report.added += 1;
+      }
+    }
+    return report;
+  }
+
+  // Walk the states the native updater emits, ending where the real app
+  // would relaunch.
+  function runMockInstall() {
+    const version = state.update && state.update.version || "0.7.0";
+    const total = 18 * 1024 * 1024;
+    const steps = [
+      { state: "downloading", version, downloaded: total / 3, total },
+      { state: "downloading", version, downloaded: total, total },
+      { state: "waiting", version },
+      { state: "installing", version },
+    ];
+    steps.forEach((step, i) => setTimeout(() => {
+      state.update = step;
+      emit("update-changed", clone(step));
+    }, (i + 1) * 400));
+  }
 
   function supervisorStatus() {
     if (!state.serveRunning) return { managed: false, pid: null, external: false, last_error: scenario === "errors" ? "serve exited with status 1" : null, child_status: null };
@@ -213,14 +287,18 @@
         return null;
       case "config_path": return "~/.config/selara/config.toml";
       case "history_path": return "~/Library/Application Support/selara/history.jsonl";
-      case "api_key_source": return state.apiKeySource;
-      case "store_api_key": state.apiKeySource = "keychain"; return state.apiKeySource;
-      case "clear_api_key": state.apiKeySource = "none"; return state.apiKeySource;
+      case "api_key_source": return keySource();
+      case "store_api_key":
+        if (!state.keychain.includes(args.kind)) state.keychain.push(args.kind);
+        return keySource();
+      case "clear_api_key":
+        state.keychain = state.keychain.filter((kind) => kind !== args.kind);
+        return keySource();
       case "cli_provider_status":
         if (args.kind === "cursor_cli") return { installed: false, version: null, binary: null, message: "cursor-agent was not found on PATH." };
         return { installed: true, version: "2.1.4", binary: "/opt/homebrew/bin/" + ({ claude_cli: "claude", open_code_cli: "opencode" }[args.kind] || "cli"), message: "CLI available. Sign in through the CLI before writing." };
       case "export_commands": return "~/Downloads/selara-commands.json";
-      case "import_commands": return { added: 2, replaced: 0, skipped: 1, renamed: [["rewrite", "rewrite-2"]], hotkeys_dropped: 1 };
+      case "import_commands": return importPack(args.mode || "keep_both");
       case "history_list": return clone(state.history);
       case "history_clear": state.history = []; return null;
       case "chatgpt_auth_status": return clone(state.auth);
@@ -233,7 +311,7 @@
         if (args.kind === "open_router") return ["anthropic/claude-opus-5", "openai/gpt-5.4", "google/gemini-2.5-pro"];
         return ["gpt-5.4", "gpt-5.4-mini", "gpt-4o-mini"];
       case "usage_summary": return clone(state.usage);
-      case "clear_usage": state.usage = { ...makeUsage(), today: bucket(0, 0, 0, 0), last_30_days: bucket(0, 0, 0, 0), all_time: bucket(0, 0, 0, 0), models: [] }; return clone(state.usage);
+      case "clear_usage": state.usage = emptyUsage(); return clone(state.usage);
       case "serve_status": return { running: state.serveRunning, pid: state.serveRunning ? 48213 : null, pidfile: "~/Library/Application Support/selara/serve.pid" };
       case "serve_supervisor_status": return supervisorStatus();
       case "serve_log": return state.log.slice();
@@ -263,7 +341,7 @@
         if (scenario === "errors") throw "Update check failed: network unreachable";
         state.update = state.update && state.update.state === "available" ? state.update : { state: "up_to_date", current: "0.6.0" };
         return clone(state.update);
-      case "install_update": return null;
+      case "install_update": runMockInstall(); return null;
       case "set_shortcut_recording": return null;
       case "plugin:autostart|is_enabled": return state.autostart;
       case "plugin:autostart|enable": state.autostart = true; return null;
