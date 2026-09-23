@@ -4,3 +4,6 @@ dist/*
 src-tauri/target/
 src-tauri/binaries/
 .DS_Store
+e2e/artifacts/
+test-results/
+playwright-report/

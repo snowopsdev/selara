@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:mock": "SELARA_MOCK=1 vite",
     "build": "vite build",
     "preview": "vite preview",
     "test": "node --test \"tests/**/*.test.mjs\"",
+    "e2e": "playwright test",
+    "e2e:update": "playwright test --update-snapshots",
     "prepare-sidecar": "node scripts/prepare-sidecar.mjs",
     "tauri": "tauri"
   },
@@ -16,6 +19,7 @@
     "@tauri-apps/plugin-shell": "^2"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@tauri-apps/cli": "^2",
     "esbuild": "^0.28.2",
     "jsdom": "30.0.1",
