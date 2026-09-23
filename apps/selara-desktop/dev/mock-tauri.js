@@ -6,6 +6,7 @@
 //   ?scenario=configured|fresh|update|errors   starting state (default configured)
 //   &fail=config                                make get_config reject too
 //   &delay=<ms>                                 per-call latency (default 150)
+//   &accent=<hex>                               system accent, e.g. %23bf5af2 (default: none)
 //
 // window.__selaraMock exposes { emit(event, payload), calls, state } for tests
 // and for poking at the UI from the console.
@@ -18,6 +19,7 @@
   const failConfig = params.get("fail") === "config";
   const delayParam = Number(params.get("delay"));
   const delay = Number.isFinite(delayParam) && delayParam >= 0 ? delayParam : 150;
+  const accent = /^#[0-9a-f]{6}$/i.test(params.get("accent") || "") ? params.get("accent") : null;
   const now = Math.floor(Date.now() / 1000);
 
   const clone = (value) => (value === undefined ? value : JSON.parse(JSON.stringify(value)));
@@ -251,6 +253,7 @@
       case "open_accessibility_settings": return null;
       case "app_version": return "0.6.0";
       case "bundled_codex_version": return "0.153.4";
+      case "system_accent_color": return accent;
       case "update_status": return clone(state.update);
       case "check_for_updates":
         if (scenario === "errors") throw "Update check failed: network unreachable";

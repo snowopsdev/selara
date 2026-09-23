@@ -2,7 +2,23 @@
 
 Settings already uses the system font, disables text selection outside fields, keeps a `default` cursor almost everywhere, and has working sidebar vibrancy and traffic-light clearance. What still reads as "web page" is the surface and interaction model: shadowed floating cards and capsule buttons, a hard-coded blue beside system-accent controls, hover-driven chrome, explicit Save buttons with a status bar, a sidebar without arrow-key selection, and a responsive reflow at the minimum window size. One keyboard defect was reproduced: Tab can leave the command sheet.
 
-This report records findings only. No production UI code changed. Choose which findings to implement; each becomes a follow-up change.
+This report records the audit as found. The follow-up below lists what has since been implemented.
+
+## Implementation follow-up — September 23, 2026
+
+Findings 1, 3, 4, 5, and 7 are implemented:
+
+- **1:** the sheet's focus trap now moves focus on every Tab and Shift-Tab, so focus stays in the dialog whichever controls the platform puts in the Tab order. The expected-failure marker is gone and the test passes.
+- **3:** groups are flat, with no drop shadow or per-group blur. General and Limits use one group per heading, with the heading above the group. The page title is 15 px bold, level with the traffic lights and inside the drag strip, so it moves the window like a native title. Lead paragraphs are unchanged.
+- **4:** buttons, switches, links, and checkboxes now share the macOS accent color. **Correction to the recommendation above:** CSS `AccentColor` does not work here. In a WKWebView it always resolves to the default blue (`rgb(0, 122, 255)`), even when native checkboxes and switches in the same view draw in the user's accent; this was measured with Purple selected. The app now exposes `system_accent_color`, which reads `NSColor.controlAccentColor`. Settings applies it on load, when the window regains focus, and when the appearance changes. `#0a84ff` remains the fallback.
+- **5:** push buttons are 24 px rounded rectangles with regular-weight labels. They don't change on hover and only darken when pressed. Text fields, pop-ups, and the segmented control use the same height.
+- **7:** the sidebar is a source list. ↑, ↓, Home, and End change the page, and only the current item is a tab stop. The current item has `aria-current="page"` and a flat fill with no shadow or fade. Changing page also resets the scroll position, so each page opens at its title.
+
+The e2e suite covers each change. Findings 2, 6, and 8–14 remain open.
+
+The real window after the change, in the debug build with the system accent set to Purple, scrolled to show all four groups (captured before the scroll reset was added):
+
+![General after the change, real window](screenshots/14-native-after-general.png)
 
 ## Scope and evidence
 
