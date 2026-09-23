@@ -1719,6 +1719,30 @@ fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// Ask before a destructive action with a native alert attached to the
+/// Settings window. The confirm button carries the action's name (for
+/// example "Clear History"), as macOS alerts do, rather than OK.
+#[tauri::command]
+async fn confirm_action(
+    app: AppHandle,
+    window: tauri::Window,
+    title: String,
+    message: String,
+    confirm_label: String,
+) -> bool {
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            confirm_label,
+            "Cancel".into(),
+        ))
+        .parent(&window)
+        .blocking_show()
+}
+
 /// The macOS accent color as `#rrggbb`, so custom controls match the native
 /// checkboxes and switches. WebKit's CSS `AccentColor` is always the default
 /// blue inside a WKWebView, so the UI cannot read the user's choice itself.
@@ -1839,6 +1863,7 @@ pub fn run() {
             app_version,
             bundled_codex_version,
             system_accent_color,
+            confirm_action,
             cli_provider_status,
             check_for_updates,
             update_status,

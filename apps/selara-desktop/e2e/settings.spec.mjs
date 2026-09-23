@@ -115,7 +115,8 @@ test("groups and buttons follow macOS metrics", async ({ page }) => {
   expect(groups.length).toBe(4);
   for (const group of groups) expect(group).toEqual({ shadow: "none", blur: "none" });
 
-  const button = page.locator("#save-general");
+  await showSection(page, "commands");
+  const button = page.locator("#cmd-new");
   const metrics = await button.evaluate((el) => {
     const cs = getComputedStyle(el);
     return { height: el.getBoundingClientRect().height, radius: parseFloat(cs.borderTopLeftRadius) };
@@ -129,17 +130,24 @@ test("groups and buttons follow macOS metrics", async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
-test("saving General round-trips through the bridge", async ({ page }) => {
+test("General saves each field when it is committed", async ({ page }) => {
   const problems = await openSettings(page);
   await showSection(page, "general");
+  await expect(page.locator("#save-general")).toHaveCount(0);
   await page.locator("#language").fill("es");
-  await page.locator("#save-general").click();
+  await page.locator("#language").press("Enter");
   await expect(page.locator("#save-status")).toHaveText("Saved");
+  await expect(page.locator(".nav-feedback")).toHaveClass(/quiet/);
   const saved = await page.evaluate(() =>
     window.__selaraMock.calls.filter((c) => c.cmd === "save_config_section" && c.args.section === "general").map((c) => c.args.value),
   );
   expect(saved.at(-1)).toMatchObject({ language: "es" });
   expect(await page.evaluate(() => window.__selaraMock.state.config.language)).toBe("es");
+
+  await showSection(page, "limits");
+  await expect(page.locator("#save-limits")).toHaveCount(0);
+  await page.locator("#secret_guard").click();
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.state.config.limits.secret_guard)).toBe(false);
   expect(problems).toEqual([]);
 });
 
@@ -158,7 +166,10 @@ test("errors scenario reports a failed save", async ({ page }, testInfo) => {
   const problems = await openSettings(page, "errors");
   await showSection(page, "general");
   await page.locator("#language").fill("fr");
-  await page.locator("#save-general").click();
+  await page.locator("#language").press("Enter");
+  await expect(page.locator("#section-general .field-error")).toContainText("Permission denied");
+  await expect(page.locator("#language")).toHaveValue("fr");
+  await expect(page.locator(".nav-feedback")).not.toHaveClass(/quiet/);
   await expect(page.locator("#save-status")).toContainText("Permission denied");
   await expect(page.locator("#save-dot")).toHaveClass(/bad/);
   await settle(page);
@@ -192,5 +203,140 @@ test("usage breakdown labels every provider", async ({ page }) => {
   const usage = await showSection(page, "usage");
   const providers = usage.locator(".usage-models .usage-provider");
   await expect(providers).toHaveText(["OpenAI-compatible", "Claude Code", "OpenRouter"]);
+  expect(problems).toEqual([]);
+});
+
+test("the footer keeps routine status quiet", async ({ page }) => {
+  const problems = await openSettings(page);
+  await expect(page.locator(".nav-feedback")).toHaveClass(/quiet/);
+  await expect(page.locator("#status-updates")).toBeVisible();
+  expect(problems).toEqual([]);
+});
+
+test("nothing changes on hover", async ({ page }) => {
+  await openSettings(page);
+  const hoverRules = await page.evaluate(() => {
+    const found = [];
+    const walk = (rules) => {
+      for (const rule of rules) {
+        if (rule.cssRules && !rule.selectorText) walk(rule.cssRules);
+        else if (rule.selectorText && rule.selectorText.includes(":hover")) found.push(rule.selectorText);
+      }
+    };
+    for (const sheet of document.styleSheets) walk(sheet.cssRules);
+    return found;
+  });
+  expect(hoverRules).toEqual([]);
+});
+
+test("History copies through a button and a native menu", async ({ page }) => {
+  const problems = await openSettings(page);
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { window.__copied = text; } } });
+  });
+  const history = await showSection(page, "history");
+  const first = history.locator(".hist-item").first();
+  await expect(first.locator('[data-act="copy-original"]')).toHaveCount(0);
+  await first.locator('[data-act="copy-result"]').click();
+  await expect.poll(() => page.evaluate(() => window.__copied)).toBe("Thanks for your help with the launch; it's been great.");
+
+  await first.locator('[data-act="copy-menu"]').click();
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.menu)).toEqual([
+    { text: "Copy Result", enabled: true },
+    { text: "Copy Original", enabled: true },
+  ]);
+  await page.evaluate(() => window.__selaraMock.chooseMenuItem("Copy Original"));
+  await expect.poll(() => page.evaluate(() => window.__copied)).toBe("Thanks for you're help with the launch, its been great.");
+
+  await history.locator(".hist-item").nth(1).click({ button: "right" });
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.menu && window.__selaraMock.menu.length)).toBe(2);
+  await expect(history.locator(".hist-item").nth(1).locator(".badge")).toHaveClass(/warn/);
+  expect(problems).toEqual([]);
+});
+
+test("command rows offer a native context menu and native delete confirmation", async ({ page }) => {
+  const problems = await openSettings(page);
+  const commands = await showSection(page, "commands");
+  const row = commands.locator('.cmd-item[data-id="friendly"]');
+  await expect(row.locator('[data-act="del"]')).toBeHidden();
+  await row.click({ button: "right" });
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.menu)).toEqual([
+    { text: "Edit…", enabled: true },
+    { text: "Duplicate", enabled: true },
+    "-",
+    { text: "Delete…", enabled: true },
+  ]);
+  await page.evaluate(() => { window.__selaraMock.state.confirm = false; return window.__selaraMock.chooseMenuItem("Delete…"); });
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.calls.filter((c) => c.cmd === "confirm_action").length)).toBe(1);
+  expect(await page.evaluate(() => window.__selaraMock.state.config.commands.length)).toBe(6);
+
+  await row.click({ button: "right" });
+  await page.evaluate(() => { window.__selaraMock.state.confirm = true; return window.__selaraMock.chooseMenuItem("Delete…"); });
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.state.config.commands.length)).toBe(5);
+  const ask = await page.evaluate(() => window.__selaraMock.calls.filter((c) => c.cmd === "confirm_action").at(-1).args);
+  expect(ask).toMatchObject({ confirmLabel: "Delete Command" });
+  await expect(commands.locator('.cmd-item[data-id="friendly"]')).toHaveCount(0);
+  expect(problems).toEqual([]);
+});
+
+test("Providers keeps its list beside the connection at every size", async ({ page }) => {
+  const problems = await openSettings(page);
+  await showSection(page, "models");
+  const list = await page.locator(".provider-list").boundingBox();
+  const detail = await page.locator(".provider-detail").boundingBox();
+  expect(detail.x).toBeGreaterThanOrEqual(list.x + list.width - 1);
+  expect(Math.abs(detail.y - list.y)).toBeLessThan(2);
+  const appearance = await page.locator("#provider-preset").evaluate((el) => getComputedStyle(el).appearance || getComputedStyle(el).webkitAppearance);
+  expect(appearance).not.toBe("none");
+  expect(await page.locator(".provider-toggle").first().evaluate((el) => getComputedStyle(el).cursor)).toBe("default");
+  expect(problems).toEqual([]);
+});
+
+test("the page title stays in the title bar while content scrolls", async ({ page }) => {
+  const problems = await openSettings(page);
+  const title = page.locator("#section-status > h1");
+  await expect(title).toHaveAttribute("data-tauri-drag-region", "");
+  await page.locator("main.content").evaluate((el) => { el.scrollTop = 300; });
+  await expect(page.locator("main.content")).toHaveClass(/scrolled/);
+  const box = await title.boundingBox();
+  expect(Math.round(box.y)).toBe(0);
+  expect(await title.evaluate((el) => getComputedStyle(el).boxShadow)).not.toBe("none");
+  expect(problems).toEqual([]);
+});
+
+test("Status explains serve without developer commands up front", async ({ page }) => {
+  const problems = await openSettings(page, "fresh");
+  const serve = page.locator("#status-serve");
+  await expect(serve.locator("> .field-hint").first()).toHaveText("Hotkeys only work while it runs.");
+  await expect(serve.locator("details summary", { hasText: "Troubleshooting" })).toBeVisible();
+  await expect(page.locator("#status-shortcuts .status-dot")).toHaveCount(0);
+  await showSection(page, "usage");
+  await expect(page.locator("#status-usage .status-dot")).toHaveCount(0);
+  expect(problems).toEqual([]);
+});
+
+test("a destructive action asks once however often it is clicked", async ({ page }) => {
+  const problems = await openSettings(page);
+  await page.evaluate(() => { window.__selaraMock.state.confirm = false; });
+  const history = await showSection(page, "history");
+  await history.locator("#history-clear").evaluate((el) => { el.click(); el.click(); el.click(); });
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.calls.filter((c) => c.cmd === "confirm_action").length)).toBe(1);
+  expect(await page.evaluate(() => window.__selaraMock.state.history.length)).toBe(4);
+  expect(problems).toEqual([]);
+});
+
+test("Limits rejects a blank number instead of saving unlimited", async ({ page }) => {
+  const problems = await openSettings(page);
+  await showSection(page, "limits");
+  const before = await page.evaluate(() => window.__selaraMock.calls.filter((c) => c.cmd === "save_config_section").length);
+  await page.locator("#soft_warn").fill("");
+  await page.locator("#soft_warn").press("Enter");
+  await expect(page.locator("#section-limits .field-error")).toContainText("0 means no limit");
+  expect(await page.evaluate(() => window.__selaraMock.calls.filter((c) => c.cmd === "save_config_section").length)).toBe(before);
+  expect(await page.evaluate(() => window.__selaraMock.state.config.limits.soft_warn_chars)).toBe(8000);
+  await page.locator("#soft_warn").fill("6000");
+  await page.locator("#soft_warn").press("Enter");
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.state.config.limits.soft_warn_chars)).toBe(6000);
+  await expect(page.locator("#section-limits .field-error")).toHaveCount(0);
   expect(problems).toEqual([]);
 });

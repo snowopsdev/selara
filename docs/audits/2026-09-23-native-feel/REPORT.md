@@ -14,7 +14,23 @@ Findings 1, 3, 4, 5, and 7 are implemented:
 - **5:** push buttons are 24 px rounded rectangles with regular-weight labels. They don't change on hover and only darken when pressed. Text fields, pop-ups, and the segmented control use the same height.
 - **7:** the sidebar is a source list. ↑, ↓, Home, and End change the page, and only the current item is a tab stop. The current item has `aria-current="page"` and a flat fill with no shadow or fade. Changing page also resets the scroll position, so each page opens at its title.
 
-The e2e suite covers each change. Findings 2, 6, and 8–14 remain open.
+The e2e suite covers each change.
+
+### Second pass
+
+Findings 2, 6, and 8–14 are implemented as well:
+
+- **2:** General and Limits save each field when it is committed (Return, leaving the field, or toggling), with inline errors beside the field that failed. Providers keeps **Save and use**. The footer stays, as chosen, but only shows problems. Routine messages such as "Saved" stay in its status region for VoiceOver and are hidden visually.
+- **6:** there are no hover rules left (the suite asserts none). Command rows show Duplicate/Delete only for keyboard focus and offer **Edit…**, **Duplicate**, and **Delete…** in a native right-click menu. Each History entry has one **Copy** button with a pull-down arrow. The arrow, or right-clicking the entry, opens a native menu with **Copy Result** and **Copy Original**.
+- **8:** Providers keeps its list and connection side by side at every size. The list is 180 px wide and the 820 px breakpoint is gone.
+- **9:** `<select>` is left to WebKit, which draws native macOS pop-up buttons. The provider switch has a gray track, a white knob, and a default cursor.
+- **10:** the command sheet drops from just under the title bar over a dimmed window without blur. The ⌘↩ keycap hint is gone; the shortcut still saves.
+- **11:** the four confirmations use a native alert (`confirm_action`, through the existing dialog plugin), with buttons named for the action: Clear Usage Data, Sign Out, Delete Command, Clear History.
+- **12:** kept per the owner's choice, but quieter (see 2).
+- **13:** the page title stays in the title bar while content scrolls, and gains a separator and fill once content passes beneath. It is a drag region, so dragging moves the window and double-clicking zooms it, as a title bar does.
+- **14:** Not applied and Paste unverified use a warning tint. Overview and Shortcuts no longer show a meaningless dot. The developer commands for running `serve` moved into a **Troubleshooting** disclosure.
+
+These changes were checked in an offscreen WKWebView as well as Playwright WebKit. The native menus and alerts come from Tauri and the dialog plugin; the mock records them for tests but doesn't draw them.
 
 The real window after the change, in the debug build with the system accent set to Purple, scrolled to show all four groups (captured before the scroll reset was added):
 

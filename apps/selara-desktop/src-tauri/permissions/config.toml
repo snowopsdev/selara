@@ -177,3 +177,8 @@ commands.allow = ["clear_usage"]
 identifier = "allow-system-accent-color"
 description = "Read the macOS accent color so Settings controls match the system"
 commands.allow = ["system_accent_color"]
+
+[[permission]]
+identifier = "allow-confirm-action"
+description = "Show a native confirmation alert before a destructive Settings action"
+commands.allow = ["confirm_action"]

@@ -465,6 +465,12 @@
           "markdownDescription": "Read config file path"
         },
         {
+          "description": "Show a native confirmation alert before a destructive Settings action",
+          "type": "string",
+          "const": "allow-confirm-action",
+          "markdownDescription": "Show a native confirmation alert before a destructive Settings action"
+        },
+        {
           "description": "Write the command list to a file chosen in a save dialog",
           "type": "string",
           "const": "allow-export-commands",
