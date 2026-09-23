@@ -340,3 +340,59 @@ test("Limits rejects a blank number instead of saving unlimited", async ({ page 
   await expect(page.locator("#section-limits .field-error")).toHaveCount(0);
   expect(problems).toEqual([]);
 });
+
+test("errors stay visible even when the message doesn't look like one", async ({ page }) => {
+  const problems = await openSettings(page, "errors");
+  await page.locator("#serve-start").click();
+  await expect(page.locator("#save-status")).toContainText("Accessibility permission is missing");
+  await expect(page.locator(".nav-feedback")).not.toHaveClass(/quiet/);
+  await expect(page.locator("#save-dot")).toHaveClass(/bad/);
+  expect(problems).toEqual([]);
+});
+
+test("a successful save clears every field error in the section", async ({ page }) => {
+  const problems = await openSettings(page);
+  await showSection(page, "general");
+  await page.evaluate(() => { window.__selaraMock.state.failSaves = true; });
+  await page.locator("#language").fill("de");
+  await page.locator("#language").press("Enter");
+  await expect(page.locator("#section-general .field-error")).toHaveCount(1);
+  await page.evaluate(() => { window.__selaraMock.state.failSaves = false; });
+  await page.locator("#hotkey").fill("ctrl+alt+space");
+  await page.locator("#hotkey").press("Enter");
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.state.config.hotkey)).toBe("ctrl+alt+space");
+  expect(await page.evaluate(() => window.__selaraMock.state.config.language)).toBe("de");
+  await expect(page.locator("#section-general .field-error")).toHaveCount(0);
+  expect(problems).toEqual([]);
+});
+
+test("each native menu gets fresh item ids and replaces the previous one", async ({ page }) => {
+  const problems = await openSettings(page);
+  const commands = await showSection(page, "commands");
+  await commands.locator('.cmd-item[data-id="friendly"]').click({ button: "right" });
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.menuIds.length)).toBe(3);
+  const first = await page.evaluate(() => window.__selaraMock.menuIds);
+  await commands.locator('.cmd-item[data-id="concise"]').click({ button: "right" });
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.closedMenus)).toBe(1);
+  const second = await page.evaluate(() => window.__selaraMock.menuIds);
+  expect(second.filter((id) => first.includes(id))).toEqual([]);
+  await page.evaluate(() => window.__selaraMock.chooseMenuItem("Duplicate"));
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.state.config.commands.some((c) => c.id.startsWith("concise-copy-")))).toBe(true);
+  expect(await page.evaluate(() => window.__selaraMock.state.config.commands.some((c) => c.id.startsWith("friendly-copy-")))).toBe(false);
+  expect(problems).toEqual([]);
+});
+
+test("quick successive edits save in order", async ({ page }) => {
+  const problems = await openSettings(page);
+  await showSection(page, "general");
+  await page.locator("#language").fill("it");
+  await page.locator("#language").press("Enter");
+  await page.locator("#hotkey").fill("ctrl+alt+i");
+  await page.locator("#hotkey").press("Enter");
+  await expect.poll(() => page.evaluate(() => window.__selaraMock.state.config.hotkey)).toBe("ctrl+alt+i");
+  expect(await page.evaluate(() => window.__selaraMock.state.config.language)).toBe("it");
+  const saves = await page.evaluate(() => window.__selaraMock.calls.filter((c) => c.cmd === "save_config_section" && c.args.section === "general"));
+  expect(saves.length).toBe(2);
+  expect(saves[1].startedAt).toBeGreaterThanOrEqual(saves[0].finishedAt);
+  expect(problems).toEqual([]);
+});

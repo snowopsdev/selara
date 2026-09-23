@@ -883,7 +883,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
   function ensureConfigReady() {
     if (configIsReady()) return true;
-    setStatus(configLoadState === "failed" ? "Settings unavailable; cannot save" : "Still loading saved settings…");
+    setStatus(configLoadState === "failed" ? "Settings unavailable; cannot save" : "Still loading saved settings…", "error");
     return false;
   }
 
@@ -915,23 +915,27 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const st = normalizeAuthStatus(status);
     return AUTH_STATUS_LABELS[st.state] || "Unknown";
   }
-  function setStatus(msg) {
+  // severity: "error" keeps the message on screen; "info" keeps it quiet.
+  // Untagged calls fall back to BAD_STATUS. Every failure path passes "error"
+  // explicitly, because backend errors don't always contain those phrases.
+  function setStatus(msg, severity) {
     const text = msg || "";
+    const isError = severity === "error" || (severity !== "info" && BAD_STATUS.test(text));
     statusEl().textContent = text;
     statusEl().title = text;
     // The footer stays quiet for routine progress and success; VoiceOver still
     // hears them through the status region. Problems stay on screen.
     const feedback = statusEl().closest(".nav-feedback");
-    if (feedback) feedback.classList.toggle("quiet", !BAD_STATUS.test(text));
+    if (feedback) feedback.classList.toggle("quiet", !isError);
     const dot = $("#save-dot");
     if (!dot) return;
     dot.classList.remove("ok", "bad", "pulse");
-    if (OK_STATUS.test(text)) {
+    if (isError) {
+      dot.classList.add("bad");
+    } else if (OK_STATUS.test(text)) {
       dot.classList.add("ok");
       void dot.offsetWidth;
       dot.classList.add("pulse");
-    } else if (BAD_STATUS.test(text)) {
-      dot.classList.add("bad");
     }
   }
 
@@ -1538,7 +1542,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         renderStatus();
         setStatus("Status refreshed");
       } catch (e) {
-        setStatus(String(e));
+        setStatus(String(e), "error");
       }
     }
     const startBtn = $("#serve-start");
@@ -1564,7 +1568,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         try {
           await invoke("open_accessibility_settings");
         } catch (e) {
-          setStatus(String(e));
+          setStatus(String(e), "error");
         }
       };
     }
@@ -1588,7 +1592,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
           setDot(dot, runtime.installed ? "ok" : "unknown");
           state.textContent = cliRuntimeLabel(runtime);
           out.textContent = runtime.message;
-          setStatus(runtime.installed ? "CLI available" : "CLI unavailable");
+          setStatus(runtime.installed ? "CLI available" : "CLI unavailable", runtime.installed ? "info" : "error");
         } else if (auth === "chatgpt") {
           const st = normalizeAuthStatus(await invoke("chatgpt_auth_status"));
           if (requestId !== providerStatusRequestId || $("#status-provider-result") !== expectedOut || !expectedOut.isConnected) return;
@@ -1599,7 +1603,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
           out.textContent = ok
             ? "The shared Codex account is signed in" + (st.email ? " as " + maskEmail(st.email) : "") + "."
             : authStatusMessage(st);
-          setStatus(ok ? "Provider reachable" : authStatusMessage(st));
+          setStatus(ok ? "Provider reachable" : authStatusMessage(st), ok ? "info" : "error");
         } else {
           const models = await invoke("list_provider_models_cmd", {
             kind: kind,
@@ -1619,7 +1623,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         state.textContent = "Unreachable";
         out.textContent = String(e);
         out.classList.add("error");
-        setStatus(String(e));
+        setStatus(String(e), "error");
       } finally {
         if (requestId === providerStatusRequestId && $("#status-provider-result") === expectedOut && expectedOut.isConnected) btn.disabled = false;
       }
@@ -1698,7 +1702,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         setStatus(autostart.checked ? "Will start at login" : "Will not start at login");
       } catch (e) {
         autostart.checked = !autostart.checked;
-        setStatus(String(e));
+        setStatus(String(e), "error");
       }
     };
     // Each field saves when committed (Return or leaving it), like System
@@ -1713,7 +1717,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       }, (e) => showFieldError(field, String(e)));
       if (saved) {
         generalDraft = null;
-        showFieldError(field, "");
+        clearFieldErrors("#section-general");
       }
     };
     [generalView.language, generalView.hotkey, generalView.excluded].forEach((el) => el.addEventListener("change", saveGeneral));
@@ -1967,7 +1971,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       // cannot replace an unsaved model with a failure placeholder.
       if (!sel.value.trim() && originalSelection) sel.innerHTML = modelOptionMarkup([], originalSelection, true);
       if (expectedHint === $("#chatgpt-models-hint")) expectedHint.textContent = "Could not load models: " + String(e);
-      setStatus(String(e));
+      setStatus(String(e), "error");
     } finally {
       if (requestId === chatgptModelsRequestId) {
         chatgptModelsLoading = null;
@@ -2376,7 +2380,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       } catch (e) {
         if (requestId !== byokModelsRequestId || view !== modelsViewGeneration || $("#model") !== expectedInput || !expectedInput.isConnected) return;
         if (hint) hint.textContent = "Could not load models: " + String(e);
-        setStatus(String(e));
+        setStatus(String(e), "error");
       } finally {
         if (requestId === byokModelsRequestId && view === modelsViewGeneration && $("#model") === expectedInput && expectedInput.isConnected) loadBtn.disabled = false;
       }
@@ -2421,7 +2425,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       if (!model && !isCliProvider(kind)) {
         const message = a === "chatgpt" && !isChatgptConnected(chatgptStatus) ? "Sign in with ChatGPT and choose a model before saving." : "Pick a model before saving.";
         showProviderFeedback(message, kind, a);
-        setStatus(message);
+        setStatus(message, "error");
         const target = a === "chatgpt" ? ($("#model-select").disabled ? $("#chatgpt-login") : $("#model-select")) : $("#model");
         if (target) target.focus();
         return;
@@ -2430,7 +2434,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       if (!isCliProvider(kind) && codexHome && !codexHome.startsWith("/")) {
         const message = "Codex home must be an absolute path, or leave it blank to use the default.";
         showProviderFeedback(message, kind, a);
-        setStatus(message);
+        setStatus(message, "error");
         modelsAdvancedOpen = true;
         $("#provider-advanced").open = true;
         $("#codex_home").focus();
@@ -2477,7 +2481,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
           }
         }
       } catch (e) {
-        setStatus(String(e));
+        setStatus(String(e), "error");
         showProviderFeedback("Could not save provider settings. " + String(e) + " Try saving again.", kind, a);
       } finally {
         providerSavePending = false;
@@ -2502,9 +2506,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         const value = await invoke("chatgpt_login");
         if (requestId !== loginRequestId) return;
         chatgptStatus = normalizeAuthStatus(value);
-        setStatus(chatgptStatus.state === "connected" ? "ChatGPT signed in" : authStatusMessage(chatgptStatus));
+        setStatus(chatgptStatus.state === "connected" ? "ChatGPT signed in" : authStatusMessage(chatgptStatus), chatgptStatus.state === "connected" ? "info" : "error");
       } catch (e) {
-        if (requestId === loginRequestId) { chatgptStatus = normalizeAuthStatus({ state: "error", message: String(e) }); setStatus(String(e)); }
+        if (requestId === loginRequestId) { chatgptStatus = normalizeAuthStatus({ state: "error", message: String(e) }); setStatus(String(e), "error"); }
       } finally {
         if (requestId === loginRequestId) { chatgptLoginPending = false; renderModels(); }
       }
@@ -2523,7 +2527,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         chatgptStatus = normalizeAuthStatus({ state: "signed_out", message: "ChatGPT sign-in was cancelled." });
         renderModels();
         setStatus("ChatGPT sign-in cancelled");
-      } catch (e) { if (requestId === loginRequestId) { cancelBtn.disabled = false; setStatus(String(e)); } }
+      } catch (e) { if (requestId === loginRequestId) { cancelBtn.disabled = false; setStatus(String(e), "error"); } }
     };
     const logoutBtn = $("#chatgpt-logout");
     if (logoutBtn) logoutBtn.onclick = async () => {
@@ -2544,13 +2548,13 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         if (requestId !== logoutRequestId) return;
         chatgptStatus = normalizeAuthStatus(value);
         setStatus("Signed out");
-      } catch (e) { if (requestId === logoutRequestId) { chatgptStatus = normalizeAuthStatus({ state: "error", message: String(e) }); setStatus(String(e)); } }
+      } catch (e) { if (requestId === logoutRequestId) { chatgptStatus = normalizeAuthStatus({ state: "error", message: String(e) }); setStatus(String(e), "error"); } }
       finally { if (requestId === logoutRequestId) { chatgptLogoutPending = false; renderModels(); } }
     };
     const refreshBtn = $("#chatgpt-refresh");
     if (refreshBtn) refreshBtn.onclick = async () => {
       const value = await refreshChatgptStatus({ render: true });
-      if (value) setStatus(value.state === "error" ? authStatusMessage(value) : "Status refreshed");
+      if (value) setStatus(value.state === "error" ? authStatusMessage(value) : "Status refreshed", value.state === "error" ? "error" : "info");
     };
     const modelsBtn = $("#chatgpt-models");
     if (modelsBtn) modelsBtn.onclick = async () => {
@@ -2724,7 +2728,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         const path = await invoke("export_commands");
         setStatus(path ? "Exported commands" : "Export cancelled");
       } catch (e) {
-        setStatus(String(e));
+        setStatus(String(e), "error");
       }
     };
     $("#cmd-import").onclick = async () => {
@@ -2747,7 +2751,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         if (report.hotkeys_dropped) parts.push(report.hotkeys_dropped + " hotkey(s) dropped (already in use)");
         setStatus("Imported: " + (parts.join(", ") || "nothing to do"));
       } catch (e) {
-        setStatus(String(e));
+        setStatus(String(e), "error");
         setCommandError("Could not import commands. " + String(e));
       } finally {
         commandOperationPending = false;
@@ -3184,7 +3188,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         replace_warn_chars: num($("#replace_warn").value),
         secret_guard: $("#secret_guard").checked,
       }, (e) => showFieldError(field, String(e)));
-      if (saved) showFieldError(field, "");
+      if (saved) clearFieldErrors("#section-limits");
     };
     ["#soft_warn", "#hard_max", "#replace_warn", "#secret_guard"].forEach((sel) => $(sel).addEventListener("change", saveLimits));
     $("#reset-limits").onclick = async () => {
@@ -3198,18 +3202,30 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   // section, writes atomically, and returns the merged config, so a change
   // made elsewhere (for example Limits inside `selara serve`) is kept and
   // shows up here after the save.
+  // Saves run one at a time, in the order they were requested. With
+  // save-as-you-go, two quick edits send two full-section snapshots; the
+  // native lock serializes the writes but not their arrival order, so an
+  // older snapshot could otherwise land last and undo the newer edit.
+  // A save starts at once when none is running, and otherwise waits its turn.
+  let saveInFlight = null;
   async function saveSection(section, value, onError) {
     if (!ensureConfigReady()) return false;
-    try {
-      const merged = await invoke("save_config_section", { section, value });
-      if (merged && typeof merged === "object") config = normalizeConfigForUi(merged);
-      setStatus("Saved");
-      return true;
-    } catch (e) {
-      setStatus(String(e));
-      if (onError) onError(e);
-      return false;
-    }
+    const run = async () => {
+      try {
+        const merged = await invoke("save_config_section", { section, value });
+        if (merged && typeof merged === "object") config = normalizeConfigForUi(merged);
+        setStatus("Saved");
+        return true;
+      } catch (e) {
+        setStatus(String(e), "error");
+        if (onError) onError(e);
+        return false;
+      }
+    };
+    const save = saveInFlight ? saveInFlight.then(run) : run();
+    saveInFlight = save;
+    save.finally(() => { if (saveInFlight === save) saveInFlight = null; });
+    return save;
   }
 
   // The background check (10 s after launch, then daily) and the tray's
@@ -3334,14 +3350,14 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         renderHistory();
         setStatus("History cleared");
       } catch (e) {
-        setStatus(String(e));
+        setStatus(String(e), "error");
       } finally {
         historyClearPending = false;
       }
     };
     const copyFromHistory = async (h, which) => {
       const ok = await copyText((which === "original" ? h.original : h.result) || "");
-      setStatus(ok ? (which === "original" ? "Copied original" : "Copied result") : "Copy failed");
+      setStatus(ok ? (which === "original" ? "Copied original" : "Copied result") : "Copy failed", ok ? "info" : "error");
     };
     const historyMenu = (h, anchor) => showNativeMenu([
       { text: "Copy Result", action: () => copyFromHistory(h, "result") },
@@ -3377,15 +3393,27 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
 
   // Native macOS context/pull-down menu. `items` are { text, action, enabled }
   // or "-" for a separator. Returns false when the menu API is unavailable.
+  // Tauri routes menu actions by item id, so every popup gets fresh ids and
+  // the previous menu is closed before a new one opens. Otherwise a stale
+  // handler with the same id could run for another row's menu.
+  let nativeMenuSeq = 0;
+  let openNativeMenu = null;
   async function showNativeMenu(items, anchor) {
     const api = window.__TAURI__ && window.__TAURI__.menu;
     if (!api || !api.Menu) return false;
     try {
+      if (openNativeMenu && typeof openNativeMenu.close === "function") {
+        const previous = openNativeMenu;
+        openNativeMenu = null;
+        await previous.close().catch(() => {});
+      }
+      const menuId = ++nativeMenuSeq;
       const menu = await api.Menu.new({
         items: items.map((item, i) => item === "-"
           ? { item: "Separator" }
-          : { id: "item-" + i, text: item.text, enabled: item.enabled !== false, action: () => item.action() }),
+          : { id: "selara-menu-" + menuId + "-" + i, text: item.text, enabled: item.enabled !== false, action: () => item.action() }),
       });
+      openNativeMenu = menu;
       let at;
       const dpi = window.__TAURI__.dpi;
       if (anchor && dpi && dpi.LogicalPosition) {
@@ -3398,6 +3426,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       console.warn("context menu unavailable:", e);
       return false;
     }
+  }
+
+  function clearFieldErrors(sectionSelector) {
+    document.querySelectorAll(sectionSelector + " .field-error").forEach((note) => note.remove());
   }
 
   // Inline error beside the control that failed to save; cleared on success.
@@ -3475,7 +3507,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         configLoadError = msg;
         renderSettings();
       }
-      setStatus(msg);
+      setStatus(msg, "error");
       if (!configLoaded) {
         $("#section-status").innerHTML =
           "<h1 data-tauri-drag-region>Settings unavailable</h1><p class=\"lead error\">" + escapeHtml(msg) + "</p>" +
