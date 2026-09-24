@@ -96,7 +96,7 @@ jobs:
 
       - name: Install Rust stable
         if: steps.prepare.outputs.build_required == 'true'
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.120.0
 
       - name: Cache cargo
         if: steps.prepare.outputs.build_required == 'true'
