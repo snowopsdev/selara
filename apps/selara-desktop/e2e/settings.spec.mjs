@@ -395,10 +395,15 @@ test("each native menu gets fresh item ids and replaces the previous one", async
 test("quick successive edits save in order", async ({ page }) => {
   const problems = await openSettings(page);
   await showSection(page, "general");
-  await page.locator("#language").fill("it");
-  await page.locator("#language").press("Enter");
-  await page.locator("#hotkey").fill("ctrl+alt+i");
-  await page.locator("#hotkey").press("Enter");
+  // Commit both fields in one task so the second save is requested while the
+  // first is still in flight. The first snapshot still has the old hotkey.
+  await page.evaluate(() => {
+    for (const [id, value] of [["language", "it"], ["hotkey", "ctrl+alt+i"]]) {
+      const field = document.getElementById(id);
+      field.value = value;
+      field.dispatchEvent(new Event("change"));
+    }
+  });
   await expect.poll(() => page.evaluate(() => window.__selaraMock.state.config.hotkey)).toBe("ctrl+alt+i");
   expect(await page.evaluate(() => window.__selaraMock.state.config.language)).toBe("it");
   const saves = await page.evaluate(() => window.__selaraMock.calls.filter((c) => c.cmd === "save_config_section" && c.args.section === "general"));
