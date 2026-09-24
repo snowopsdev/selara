@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/snowopsdev/selara/compare/v0.6.0...v0.7.0) (2026-09-24)
+
+
+### Features
+
+* **desktop:** Make Settings controls and layout feel native on macOS ([#125](https://github.com/snowopsdev/selara/issues/125)) ([2e94bc2](https://github.com/snowopsdev/selara/commit/2e94bc2b958b28881be9703f6242936436a96661))
+* **desktop:** Save as you go with native menus and alerts ([#126](https://github.com/snowopsdev/selara/issues/126)) ([318f266](https://github.com/snowopsdev/selara/commit/318f266b633ff8ad8fbfba5ab51eb92a6de0a590))
+
 ## [0.6.0](https://github.com/snowopsdev/selara/compare/v0.5.0...v0.6.0) (2026-09-15)
 
 
