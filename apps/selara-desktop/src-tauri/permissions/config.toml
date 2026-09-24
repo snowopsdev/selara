@@ -172,3 +172,8 @@ commands.allow = ["usage_summary"]
 identifier = "allow-clear-usage"
 description = "Truncate the local usage ledger"
 commands.allow = ["clear_usage"]
+
+[[permission]]
+identifier = "allow-system-accent-color"
+description = "Read the macOS accent color so Settings controls match the system"
+commands.allow = ["system_accent_color"]

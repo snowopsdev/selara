@@ -35,3 +35,5 @@ tauri = { version = "2", features = ["test"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 selara-platform = { path = "../../../crates/selara-platform" }
+# Already in the tree through tao/wry; used to read the system accent color.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSColor", "NSColorSpace", "objc2-core-foundation"] }

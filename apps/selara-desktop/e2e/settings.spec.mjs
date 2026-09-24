@@ -57,11 +57,8 @@ test("command sheet closes on Escape and returns focus to the opener", async ({ 
 });
 
 test("command sheet keeps Tab focus inside the dialog", async ({ page }) => {
-  // Known issue (docs/audits/2026-09-23-native-feel): WebKit, like WKWebView
-  // with macOS Full Keyboard Access off, skips buttons on Tab. The trap only
-  // intercepts Tab on its first/last button, so focus falls to <body> after
-  // the Advanced summary. Remove this line once the trap handles every Tab.
-  test.fail(true, "focus escapes the sheet when buttons are not tabbable");
+  // WebKit, like WKWebView with macOS keyboard navigation off, leaves buttons
+  // out of the native Tab order; the trap must still keep focus in the sheet.
   await openSettings(page);
   await showSection(page, "commands");
   await page.locator("#cmd-new").click();
@@ -73,6 +70,73 @@ test("command sheet keeps Tab focus inside the dialog", async ({ page }) => {
       expect(await focusInsideSheet(), `${key} #${i + 1} left the sheet`).toBe(true);
     }
   }
+});
+
+test("sidebar behaves like a source list", async ({ page }) => {
+  const problems = await openSettings(page);
+  const current = page.locator(".nav-item[aria-current=page]");
+  await expect(current).toHaveAttribute("data-section", "status");
+  await expect(page.locator('.nav-item[tabindex="0"]')).toHaveCount(1);
+  await current.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator("#section-general")).toBeVisible();
+  await expect(page.locator('.nav-item[data-section="general"]')).toBeFocused();
+  await expect(page.locator(".nav-item[aria-current=page]")).toHaveAttribute("data-section", "general");
+  await page.keyboard.press("End");
+  await expect(page.locator("#section-limits")).toBeVisible();
+  await page.keyboard.press("Home");
+  await expect(page.locator("#section-status")).toBeVisible();
+  await page.locator("main.content").evaluate((el) => { el.scrollTop = 400; });
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator("#section-general h1")).toBeInViewport();
+  expect(await page.locator("main.content").evaluate((el) => el.scrollTop)).toBe(0);
+  const selection = await page.locator(".nav-item.active").evaluate((el) => getComputedStyle(el).boxShadow);
+  expect(selection).toBe("none");
+  expect(problems).toEqual([]);
+});
+
+test("controls use the system accent color", async ({ page }) => {
+  const problems = await openSettings(page, "configured", "&accent=%23a550a7");
+  await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim())).toBe("#a550a7");
+  await showSection(page, "commands");
+  expect(await page.locator("#cmd-new").evaluate((el) => getComputedStyle(el).backgroundColor)).toBe("rgb(165, 80, 167)");
+  await showSection(page, "limits");
+  expect(await page.locator("#secret_guard").evaluate((el) => getComputedStyle(el).accentColor)).toBe("rgb(165, 80, 167)");
+  expect(problems).toEqual([]);
+});
+
+for (const [accent, label] of [["#a550a7", "rgb(255, 255, 255)"], ["#007aff", "rgb(255, 255, 255)"], ["#ffc600", "rgb(29, 29, 31)"], ["#f7821b", "rgb(29, 29, 31)"]]) {
+  test(`accent ${accent} gets a readable button label`, async ({ page }) => {
+    const problems = await openSettings(page, "configured", `&accent=${encodeURIComponent(accent)}`);
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim())).toBe(accent);
+    await showSection(page, "commands");
+    expect(await page.locator("#cmd-new").evaluate((el) => getComputedStyle(el).color)).toBe(label);
+    expect(problems).toEqual([]);
+  });
+}
+
+test("groups and buttons follow macOS metrics", async ({ page }) => {
+  const problems = await openSettings(page);
+  await showSection(page, "general");
+  const groups = await page.locator("#section-general .panel").evaluateAll((els) => els.map((el) => {
+    const cs = getComputedStyle(el);
+    return { shadow: cs.boxShadow, blur: cs.webkitBackdropFilter || cs.backdropFilter || "none" };
+  }));
+  expect(groups.length).toBe(4);
+  for (const group of groups) expect(group).toEqual({ shadow: "none", blur: "none" });
+
+  const button = page.locator("#save-general");
+  const metrics = await button.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return { height: el.getBoundingClientRect().height, radius: parseFloat(cs.borderTopLeftRadius) };
+  });
+  expect(metrics.height).toBe(24);
+  expect(metrics.radius).toBeLessThan(metrics.height / 2);
+  await button.hover();
+  await page.mouse.down();
+  expect(await button.evaluate((el) => getComputedStyle(el).transform)).toBe("none");
+  await page.mouse.up();
+  expect(problems).toEqual([]);
 });
 
 test("saving General round-trips through the bridge", async ({ page }) => {

@@ -585,6 +585,12 @@
           "markdownDescription": "Store the provider API key in the OS keychain"
         },
         {
+          "description": "Read the macOS accent color so Settings controls match the system",
+          "type": "string",
+          "const": "allow-system-accent-color",
+          "markdownDescription": "Read the macOS accent color so Settings controls match the system"
+        },
+        {
           "description": "Read the current update progress without starting another check",
           "type": "string",
           "const": "allow-update-status",

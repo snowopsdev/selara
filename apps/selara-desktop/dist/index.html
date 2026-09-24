@@ -7,8 +7,9 @@
   <style>
 :root {
   color-scheme: light dark;
+  /* Fallback only: the app replaces --accent with the macOS accent color. */
   --accent: #0a84ff;
-  --accent-press: #0071e3;
+  --accent-press: color-mix(in srgb, var(--accent) 86%, black);
   --on-accent: #ffffff;
   --text: #1d1d1f;
   --muted: #6e6e73;
@@ -23,7 +24,7 @@
   --danger: #ff3b30;
   --success: #34c759;
   --warning: #ff9f0a;
-  --radius-group: 14px;
+  --radius-group: 10px;
   --radius-control: 8px;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif;
   font-size: 13px;
@@ -32,7 +33,6 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --accent: #3a8dff;
-    --accent-press: #2a7ae8;
     --text: #f2f2f7;
     --muted: #98989d;
     --glass: rgba(34, 34, 36, 0.55);
@@ -59,6 +59,8 @@ body {
   -webkit-user-select: none;
 }
 input, textarea, select { user-select: text; -webkit-user-select: text; }
+/* Native checkboxes and radios draw in the system accent; keep custom controls on the same color. */
+input[type="checkbox"], input[type="radio"], progress { accent-color: var(--accent); }
 
 #app { display: grid; grid-template-columns: 200px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 38px; height: 100%; }
 
@@ -92,17 +94,11 @@ input, textarea, select { user-select: text; -webkit-user-select: text; }
   display: flex; align-items: center; gap: 9px;
   width: 100%; text-align: left;
   border: 0; background: transparent; color: var(--text);
-  padding: 7px 10px; border-radius: 9px; cursor: default;
+  padding: 7px 10px; border-radius: 7px; cursor: default;
   font: inherit; font-size: 13px; font-weight: 500; line-height: 1;
-  transition: background-color 150ms ease;
 }
 .nav-item svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--muted); }
-.nav-item:hover { background: var(--glass); }
-.nav-item.active {
-  background: var(--glass-strong);
-  box-shadow: inset 0 1px 0 var(--specular), 0 0 0 1px var(--hairline), 0 1px 2px rgba(0, 0, 0, 0.05);
-  font-weight: 600;
-}
+.nav-item.active { background: color-mix(in srgb, var(--text) 10%, transparent); }
 .nav-item.active svg { color: var(--accent); }
 .app-footer {
   grid-column: 1 / -1; display: flex; align-items: center; gap: 20px;
@@ -158,7 +154,7 @@ input, textarea, select { user-select: text; -webkit-user-select: text; }
 /* Content column */
 .content {
   position: relative;
-  padding: 44px 32px 32px;
+  padding: 6px 32px 32px;
   overflow: auto;
   background: var(--content-wash);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
@@ -167,9 +163,11 @@ input, textarea, select { user-select: text; -webkit-user-select: text; }
 .drag-strip { position: absolute; top: 0; left: 0; right: 0; height: 36px; }
 .section { display: none; max-width: 640px; }
 .section.active { display: block; }
+/* Page title sits in the title bar, level with the traffic lights, and inside
+   the drag strip so it moves the window like a native title. */
 h1 {
-  font-size: 22px; font-weight: 650; letter-spacing: -0.01em;
-  margin: 0 0 4px; line-height: 1.2;
+  font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
+  margin: 0 0 12px; line-height: 20px;
 }
 .lead { color: var(--muted); margin: 0 0 22px; font-size: 13px; line-height: 1.4; }
 
@@ -185,14 +183,11 @@ h1 {
 }
 .section-label-row .section-label { margin: 0; }
 
-/* Glass group: the one surface with the specular edge. */
+/* Grouped box, as in System Settings: flat fill and hairline, no shadow or blur. */
 .panel, .card, .cmd-list, .group {
   background: var(--glass);
   border: 1px solid var(--hairline);
   border-radius: var(--radius-group);
-  box-shadow: inset 0 1px 0 var(--specular), var(--shadow);
-  -webkit-backdrop-filter: blur(20px) saturate(1.3);
-  backdrop-filter: blur(20px) saturate(1.3);
 }
 .panel, .card { padding: 0 16px; }
 .panel .section-label, .panel .section-label-row {
@@ -250,7 +245,7 @@ input, select, textarea {
   background: var(--glass-strong);
   color: var(--text);
   font: inherit; font-size: 13px;
-  padding: 0 10px; height: 30px;
+  padding: 0 8px; height: 24px;
   box-shadow: inset 0 1px 0 var(--specular);
   transition: border-color 120ms ease, box-shadow 120ms ease;
 }
@@ -275,37 +270,30 @@ select {
 select:disabled { opacity: 0.6; cursor: not-allowed; }
 .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
-/* Buttons: capsules. */
+/* Buttons: macOS push buttons. Regular control height, rounded rect, no hover
+   change; pressing darkens without moving. One accent-filled default per context. */
 .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 button.btn {
-  border: 1px solid transparent; border-radius: 999px;
-  padding: 0 14px; height: 30px;
-  font: inherit; font-size: 13px; font-weight: 500; line-height: 1;
+  border: 1px solid transparent; border-radius: 7px;
+  padding: 0 12px; height: 24px;
+  font: inherit; font-size: 13px; font-weight: 400; line-height: 1;
   cursor: default; white-space: nowrap;
   background: var(--accent); color: var(--on-accent);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 1px 2px rgba(0, 0, 0, 0.12);
-  transition: background-color 120ms ease, transform 80ms ease, box-shadow 120ms ease;
+  box-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.12);
 }
-button.btn:hover { background: color-mix(in srgb, var(--accent) 92%, white); }
-button.btn:active { background: var(--accent-press); transform: translateY(0.5px); }
-button.btn.secondary {
+button.btn:active { background: var(--accent-press); }
+button.btn.secondary, button.btn.danger {
   background: var(--glass-strong); color: var(--text);
   border-color: var(--hairline-strong);
-  box-shadow: inset 0 1px 0 var(--specular), 0 1px 2px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 0.5px 1px rgba(0, 0, 0, 0.06);
 }
-button.btn.secondary:hover { background: var(--glass-hover); }
-button.btn.secondary:active { background: var(--glass); }
-button.btn.danger {
-  background: var(--glass-strong); color: var(--danger);
-  border-color: var(--hairline-strong);
-  box-shadow: inset 0 1px 0 var(--specular), 0 1px 2px rgba(0, 0, 0, 0.05);
-}
-button.btn.danger:hover { background: color-mix(in srgb, var(--danger) 12%, var(--glass-strong)); }
+button.btn.danger { color: var(--danger); }
+button.btn.secondary:active, button.btn.danger:active { background: color-mix(in srgb, var(--text) 12%, var(--glass-strong)); }
 button.btn.linkish, .limits-actions .btn.linkish {
   background: transparent; border-color: transparent; box-shadow: none;
   color: var(--muted); padding: 0 8px;
 }
-button.btn.linkish:hover { color: var(--text); background: var(--glass); }
+button.btn.linkish:active { color: var(--text); }
 button.btn:disabled { opacity: 0.5; }
 
 .save-bar, .limits-actions, .models-save, .general-save {
@@ -320,15 +308,15 @@ button.btn:disabled { opacity: 0.5; }
   position: relative;
   display: inline-flex; align-items: stretch; gap: 2px;
   align-self: flex-start; width: max-content; max-width: 100%;
-  padding: 2px; height: 30px;
-  border-radius: 999px;
+  padding: 2px; height: 24px;
+  border-radius: 7px;
   background: var(--glass);
   border: 1px solid var(--hairline);
   box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.04);
 }
 .segmented .seg {
   border: 0; background: transparent; color: var(--muted);
-  border-radius: 999px; padding: 0 12px;
+  border-radius: 5px; padding: 0 12px;
   font: inherit; font-size: 12.5px; font-weight: 500; line-height: 1;
   cursor: default; white-space: nowrap;
   transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
@@ -698,7 +686,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
 </head>
 <body>
   <div id="app">
-    <aside class="nav" data-tauri-drag-region>
+    <aside class="nav" data-tauri-drag-region aria-label="Settings sections">
       <div class="brand" data-tauri-drag-region>
         <span class="brand-mark" aria-hidden="true" data-tauri-drag-region></span>
         Selara
@@ -1069,13 +1057,36 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   function showSection(id) {
+    // Source-list selection: one tab stop on the current page, the rest
+    // reached with the arrow keys.
     document.querySelectorAll(".nav-item").forEach((b) => {
-      b.classList.toggle("active", b.dataset.section === id);
+      const current = b.dataset.section === id;
+      b.classList.toggle("active", current);
+      b.tabIndex = current ? 0 : -1;
+      if (current) b.setAttribute("aria-current", "page");
+      else b.removeAttribute("aria-current");
     });
+    const content = $(".content");
+    const changed = !$("#section-" + id + ".active");
     document.querySelectorAll(".section").forEach((s) => {
       s.classList.toggle("active", s.id === "section-" + id);
     });
+    // Each page opens at its top, title included, like a Settings pane.
+    if (changed && content) content.scrollTop = 0;
   }
+  showSection("status");
+
+  $(".nav").addEventListener("keydown", (ev) => {
+    const items = Array.from(document.querySelectorAll(".nav-item"));
+    const index = items.indexOf(document.activeElement);
+    if (index < 0) return;
+    const target = { ArrowDown: items[Math.min(index + 1, items.length - 1)], ArrowUp: items[Math.max(index - 1, 0)], Home: items[0], End: items[items.length - 1] }[ev.key];
+    if (!target) return;
+    ev.preventDefault();
+    if (target === document.activeElement) return;
+    target.focus();
+    target.click();
+  });
 
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -1608,29 +1619,35 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<h1>General</h1>" +
       "<p class=\"lead\">Language and the global shortcut for custom instructions.</p>" +
       configGateMarkup("general-config-gate") +
-      "<div class=\"panel\">" +
       "<div class=\"section-label\">Language</div>" +
+      "<div class=\"panel\">" +
       "<div class=\"form-row\">" +
       "<label for=\"language\">Default language</label>" +
       "<div class=\"control-stack\">" +
       "<input id=\"language\"" + editAttr + " value=\"" + escapeAttr(g.language || "en") + "\" placeholder=\"en\" />" +
       "<p class=\"field-hint\">Preferred language for the model, for example en, es, or fr.</p>" +
       "</div></div>" +
+      "</div>" +
       "<div class=\"section-label\">Shortcut</div>" +
+      "<div class=\"panel\">" +
       "<div class=\"form-row\">" +
       "<label for=\"hotkey\">Custom instruction hotkey</label>" +
       "<div class=\"control-stack\">" +
       "<input id=\"hotkey\"" + editAttr + " value=\"" + escapeAttr(g.hotkey || "ctrl+shift+space") + "\" />" +
       "<p class=\"field-hint\">With selara serve running, changes apply within about a second.</p>" +
       "</div></div>" +
+      "</div>" +
       "<div class=\"section-label\">Excluded apps</div>" +
+      "<div class=\"panel\">" +
       "<div class=\"form-row\">" +
       "<label for=\"excluded-apps\">Skip commands in</label>" +
       "<div class=\"control-stack\">" +
       "<textarea id=\"excluded-apps\"" + editAttr + " rows=\"4\" placeholder=\"1Password&#10;com.apple.Terminal&#10;com.googlecode.iterm2\" autocomplete=\"off\" spellcheck=\"false\">" + escapeHtml((g.excluded_apps || []).join("\n")) + "</textarea>" +
       "<p class=\"field-hint\">One app per line, by name (1Password) or bundle id (com.apple.Terminal). End an entry with * to match a prefix, for example com.apple.* or iTerm*. In these apps menu commands and shortcuts do nothing: no selection or clipboard read.</p>" +
       "</div></div>" +
+      "</div>" +
       "<div class=\"section-label\">Startup</div>" +
+      "<div class=\"panel\">" +
       "<div class=\"form-row\">" +
       "<label for=\"autostart\">Start at login</label>" +
       "<div class=\"control-stack\">" +
@@ -2933,14 +2950,17 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     if (shortcutRecording && recordShortcutKey(ev)) return;
     if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); closeCommandSheet(); return; }
     if (ev.key === "Tab") {
+      // Move focus ourselves on every Tab. WebKit leaves buttons out of the
+      // native Tab order unless macOS keyboard navigation is on, so letting
+      // the browser handle the middle steps walks focus out of the sheet.
+      ev.preventDefault();
       const elements = sheetFocusableElements();
-      const first = elements[0];
-      const last = elements[elements.length - 1];
-      if (!first) { ev.preventDefault(); $("#sheet-root .sheet").focus(); return; }
-      if (!elements.includes(document.activeElement) || (ev.shiftKey && document.activeElement === first) || (!ev.shiftKey && document.activeElement === last)) {
-        ev.preventDefault();
-        (ev.shiftKey ? last : first).focus();
-      }
+      if (!elements.length) { $("#sheet-root .sheet").focus(); return; }
+      const index = elements.indexOf(document.activeElement);
+      const next = index < 0
+        ? (ev.shiftKey ? elements.length - 1 : 0)
+        : (index + (ev.shiftKey ? -1 : 1) + elements.length) % elements.length;
+      elements[next].focus();
       return;
     }
     if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
@@ -3072,8 +3092,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<h1>Limits</h1>" +
       "<p class=\"lead\">Gentle rails for large selections. Set any value to 0 for unlimited.</p>" +
       configGateMarkup("limits-config-gate") +
-      "<div class=\"panel\">" +
       "<div class=\"section-label\">Thresholds</div>" +
+      "<div class=\"panel\">" +
       "<div class=\"form-row\">" +
       "<label for=\"soft_warn\">Soft warn (chars)</label>" +
       "<div class=\"control-stack\">" +
@@ -3092,7 +3112,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<input id=\"replace_warn\"" + editAttr + " type=\"number\" min=\"0\" value=\"" + (L.replace_warn_chars ?? 4000) + "\" />" +
       "<p class=\"field-hint\">Ask again before replacing a selection larger than this.</p>" +
       "</div></div>" +
+      "</div>" +
       "<div class=\"section-label\">Secrets</div>" +
+      "<div class=\"panel\">" +
       "<div class=\"form-row\">" +
       "<label class=\"check-row\" for=\"secret_guard\"><input type=\"checkbox\" id=\"secret_guard\"" + editAttr + (L.secret_guard === false ? "" : " checked") + " /> Warn before sending secret-shaped text to a hosted provider</label>" +
       "<p class=\"field-hint\">Looks for API keys, private key blocks, JWTs, and card numbers. Local servers (localhost, .local, private IPs) are exempt.</p>" +
@@ -3270,8 +3292,42 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     });
   }
 
+  // WebKit's CSS AccentColor is always the default blue in a WKWebView, while
+  // native checkboxes draw in the user's accent. Ask the app for the real
+  // color; re-read it when the window regains focus (the user may have just
+  // changed it in System Settings) and when the appearance flips.
+  // Keep white labels on accent fills unless they drop below the 3:1 WCAG
+  // contrast for large text and UI (Yellow, Orange, and Green accents).
+  function accentLabelColor(hex) {
+    const channel = (i) => {
+      const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+      return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    };
+    const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+    return 1.05 / (luminance + 0.05) < 3 ? "#1d1d1f" : "#ffffff";
+  }
+
+  async function applySystemAccent() {
+    let hex = null;
+    try { hex = await invoke("system_accent_color"); } catch (_) { hex = null; }
+    const root = document.documentElement.style;
+    if (typeof hex === "string" && /^#[0-9a-f]{6}$/i.test(hex)) {
+      root.setProperty("--accent", hex);
+      root.setProperty("--on-accent", accentLabelColor(hex));
+    } else {
+      root.removeProperty("--accent");
+      root.removeProperty("--on-accent");
+    }
+  }
+  window.addEventListener("focus", applySystemAccent);
+  if (window.matchMedia) {
+    const scheme = window.matchMedia("(prefers-color-scheme: dark)");
+    if (scheme.addEventListener) scheme.addEventListener("change", applySystemAccent);
+  }
+
   async function load() {
     setStatus("Loading config…");
+    applySystemAccent();
     // Before the first await: the startup check fires 10 s after launch and a
     // slow load must not miss it.
     listenForUpdates();
