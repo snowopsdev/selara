@@ -40,6 +40,7 @@
     "allow-app-version",
     "allow-bundled-codex-version",
     "allow-system-accent-color",
+    "allow-confirm-action",
     "allow-cli-provider-status",
     "allow-check-for-updates",
     "allow-update-status",

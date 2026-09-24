@@ -20,6 +20,7 @@
   --hairline-strong: rgba(0, 0, 0, 0.14);
   --specular: rgba(255, 255, 255, 0.7);
   --content-wash: rgba(245, 245, 247, 0.62);
+  --titlebar-fill: rgba(242, 242, 245, 0.94);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px rgba(0, 0, 0, 0.07);
   --danger: #ff3b30;
   --success: #34c759;
@@ -42,6 +43,7 @@
     --hairline-strong: rgba(255, 255, 255, 0.18);
     --specular: rgba(255, 255, 255, 0.12);
     --content-wash: rgba(24, 24, 26, 0.6);
+    --titlebar-fill: rgba(32, 32, 35, 0.94);
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 30px rgba(0, 0, 0, 0.3);
     --danger: #ff453a;
     --success: #30d158;
@@ -121,7 +123,6 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
   width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px;
   color: var(--muted); background: transparent; cursor: default;
 }
-.nav-update-check:hover:not(:disabled) { color: var(--text); background: var(--glass-hover); }
 .nav-update-check:disabled { opacity: 0.45; }
 .nav-update-check svg { width: 14px; height: 14px; }
 .nav-update-check[aria-busy="true"] svg { animation: update-spin 1s linear infinite; }
@@ -135,7 +136,6 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 .update-details { flex-shrink: 0; }
 .update-details[hidden] { display: none; }
 .update-details > summary { padding: 5px 6px; border-radius: 5px; cursor: default; white-space: nowrap; }
-.update-details > summary:hover { color: var(--text); background: var(--glass); }
 .update-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .update-popover {
   position: absolute; left: 16px; bottom: calc(100% + 8px); width: min(380px, calc(100vw - 32px));
@@ -148,26 +148,39 @@ input[type="checkbox"], input[type="radio"], progress { accent-color: var(--acce
 .nav-updates .serve-log pre { max-height: 180px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .nav-feedback { margin-left: auto; justify-content: flex-end; flex: 0 1 35%; white-space: nowrap; }
 .nav-feedback #save-status { overflow: hidden; text-overflow: ellipsis; }
+.nav-feedback.quiet { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.field-hint:empty { display: none; }
 .nav { min-height: 0; overflow-y: auto; }
 .nav > .nav-item { flex-shrink: 0; }
 
 /* Content column */
 .content {
   position: relative;
-  padding: 6px 32px 32px;
+  padding: 0 32px 32px;
   overflow: auto;
   background: var(--content-wash);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
   backdrop-filter: blur(24px) saturate(1.4);
 }
 .drag-strip { position: absolute; top: 0; left: 0; right: 0; height: 36px; }
-.section { display: none; max-width: 640px; }
+.section { display: none; }
+.section > *:not(h1) { max-width: 640px; }
 .section.active { display: block; }
-/* Page title sits in the title bar, level with the traffic lights, and inside
-   the drag strip so it moves the window like a native title. */
+/* Page title sits in the title bar, level with the traffic lights. It stays
+   put while the page scrolls under it, drags the window like a native title,
+   and gains a separator once content passes beneath, as a toolbar does. */
 h1 {
   font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
   margin: 0 0 12px; line-height: 20px;
+}
+.section > h1:first-child {
+  position: sticky; top: 0; z-index: 4;
+  margin: 0 -32px 2px; padding: 6px 32px 10px;
+}
+.content.scrolled .section > h1:first-child {
+  background: var(--titlebar-fill);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4); backdrop-filter: blur(20px) saturate(1.4);
+  box-shadow: 0 1px 0 var(--hairline);
 }
 .lead { color: var(--muted); margin: 0 0 22px; font-size: 13px; line-height: 1.4; }
 
@@ -226,7 +239,6 @@ label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
   background: var(--glass-strong); color: var(--text); font: inherit;
   text-align: center; cursor: default;
 }
-.shortcut-recorder:hover { background: var(--glass-hover); }
 .shortcut-recorder:focus-visible, .shortcut-recorder[data-recording="true"] {
   outline: 2px solid var(--accent); outline-offset: 2px;
 }
@@ -238,7 +250,7 @@ label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
 .field-hint code { font: inherit; }
 
 /* Controls */
-input, select, textarea {
+input, textarea {
   width: 100%; margin: 0;
   border: 1px solid var(--hairline-strong);
   border-radius: var(--radius-control);
@@ -250,7 +262,7 @@ input, select, textarea {
   transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
-input:focus, select:focus, textarea:focus {
+input:focus, textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
@@ -260,14 +272,9 @@ textarea {
   height: auto; min-height: 110px; padding: 8px 10px;
   resize: vertical; line-height: 1.45;
 }
-select {
-  -webkit-appearance: none; appearance: none;
-  padding-right: 28px;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M3 4.5l3 3 3-3' fill='none' stroke='%236e6e73' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-}
-select:disabled { opacity: 0.6; cursor: not-allowed; }
+/* Pop-up buttons: leave <select> to WebKit, which draws the macOS control.
+   Border, background, or padding here would switch it to a styled box. */
+select { width: 100%; margin: 0; font: inherit; font-size: 13px; }
 .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
 /* Buttons: macOS push buttons. Regular control height, rounded rect, no hover
@@ -321,7 +328,6 @@ button.btn:disabled { opacity: 0.5; }
   cursor: default; white-space: nowrap;
   transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
 }
-.segmented .seg:hover { color: var(--text); }
 .segmented .seg.active {
   background: var(--glass-strong); color: var(--text); font-weight: 600;
   box-shadow: inset 0 1px 0 var(--specular), 0 1px 3px rgba(0, 0, 0, 0.1);
@@ -362,12 +368,12 @@ button.btn:disabled { opacity: 0.5; }
 .cmd-item {
   display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;
   padding: 10px 10px; margin: 0 -6px; border-top: 1px solid var(--hairline);
-  cursor: default; transition: background-color 120ms ease;
+  cursor: default;
 }
 .cmd-item:first-child { border-top: 0; }
 .cmd-item:first-child { border-top-left-radius: var(--radius-group); border-top-right-radius: var(--radius-group); }
 .cmd-item:last-child { border-bottom-left-radius: var(--radius-group); border-bottom-right-radius: var(--radius-group); }
-.cmd-item:hover, .cmd-item:focus-visible { background: var(--glass-strong); outline: none; }
+.cmd-item:focus-visible { outline: none; }
 .cmd-item:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
 .cmd-item .cmd-main { min-width: 0; }
 .cmd-item h3 {
@@ -379,10 +385,10 @@ button.btn:disabled { opacity: 0.5; }
   margin: 3px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.cmd-item .row-actions {
-  display: flex; gap: 4px; opacity: 0; transition: opacity 120ms ease;
-}
-.cmd-item:hover .row-actions, .cmd-item:focus-within .row-actions { opacity: 1; }
+/* Row actions stay out of the way for the mouse (right-click opens a native
+   menu) and appear for keyboard users on the focused row. */
+.cmd-item .row-actions { display: flex; gap: 4px; visibility: hidden; }
+.cmd-item:focus-visible .row-actions, .cmd-item .row-actions:focus-within { visibility: visible; }
 .cmd-item .chevron { width: 12px; height: 12px; color: var(--muted); opacity: 0.7; }
 .cmd-list .empty {
   padding: 28px 12px; text-align: center; color: var(--muted); font-size: 12.5px;
@@ -410,21 +416,25 @@ button.btn:disabled { opacity: 0.5; }
 }
 .hist-item .hist-preview dd.result { color: var(--text); }
 .hist-item .hist-preview dd.original { color: var(--muted); }
-.hist-item .row-actions { display: flex; flex-direction: column; gap: 4px; }
-.hist-item .row-actions .btn { white-space: nowrap; font-size: 11.5px; padding: 3px 9px; }
-button.icon-btn.danger:hover { color: var(--danger); }
+.hist-item .row-actions { display: flex; gap: 0; }
+.hist-item .row-actions .btn { white-space: nowrap; }
+.hist-item .row-actions .btn[data-act="copy-result"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.hist-item .row-actions .btn[data-act="copy-menu"] {
+  display: inline-flex; align-items: center; padding: 0 5px; margin-left: -1px;
+  border-top-left-radius: 0; border-bottom-left-radius: 0;
+}
+.hist-item .row-actions .btn[data-act="copy-menu"] svg { width: 10px; height: 10px; }
 
 /* Sheet */
 .sheet-backdrop {
   position: fixed; inset: 0; z-index: 20;
   background: rgba(0, 0, 0, 0.18);
-  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
   display: flex; align-items: flex-start; justify-content: center;
-  padding: 64px 24px 24px;
+  padding: 38px 24px 24px;
   animation: sheet-fade 160ms ease-out;
 }
 .sheet {
-  width: 560px; max-width: 100%; max-height: calc(100vh - 88px);
+  width: 560px; max-width: 100%; max-height: calc(100vh - 62px);
   display: flex; flex-direction: column; overflow: hidden;
   background: var(--glass-strong);
   border: 1px solid var(--hairline-strong);
@@ -451,20 +461,18 @@ button.icon-btn.danger:hover { color: var(--danger); }
 .sheet-foot .command-error { flex-basis: 100%; margin: 0; max-height: 96px; overflow: auto; }
 .sheet-foot .spacer { flex: 1; }
 .sheet-foot .btn.linkish.danger-text { color: var(--danger); }
-.sheet-foot .btn.linkish.danger-text:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
-.sheet .field-hint kbd {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px;
-  padding: 1px 5px; border-radius: 5px; border: 1px solid var(--hairline-strong);
-  background: var(--glass); color: var(--muted);
-}
 @keyframes sheet-fade { from { opacity: 0; } to { opacity: 1; } }
-@keyframes sheet-rise { from { opacity: 0; transform: translateY(-8px) scale(0.985); } to { opacity: 1; transform: none; } }
+@keyframes sheet-rise { from { opacity: 0; transform: translateY(-16px); } to { opacity: 1; transform: none; } }
 body.sheet-open .content { overflow: hidden; }
 .badge {
   display: inline-flex; align-items: center; height: 18px;
   font-size: 11px; padding: 0 7px; border-radius: 999px; font-weight: 500;
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--accent);
+}
+.badge.warn {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: color-mix(in srgb, var(--warning) 75%, var(--text));
 }
 .badge.key {
   font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px;
@@ -522,7 +530,6 @@ button.icon-btn {
   flex-shrink: 0;
 }
 button.icon-btn svg { width: 13px; height: 13px; }
-button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
 .auth-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0 14px; border-top: 1px solid var(--hairline); }
 .auth-actions .btn:first-child { margin-left: 0; }
 .auth-actions .btn { min-width: 0; }
@@ -555,21 +562,21 @@ button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
 
 
 /* Provider list and selected connection, within the existing Settings shell. */
-#section-models { max-width: 1100px; }
-.providers-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); border: 1px solid var(--hairline); border-radius: 14px; background: var(--glass); overflow: hidden; min-height: 520px; }
+#section-models > *:not(h1) { max-width: 1100px; }
+.providers-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); border: 1px solid var(--hairline); border-radius: 14px; background: var(--glass); overflow: hidden; min-height: 520px; }
 .provider-list { border-right: 1px solid var(--hairline); background: color-mix(in srgb, var(--content-wash) 45%, transparent); padding: 8px; }
 .provider-list-label { padding: 8px 8px 10px; font-size: 10px; font-weight: 600; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; }
 .provider-choice-row { position: relative; margin-bottom: 4px; }
 .provider-choice-row .provider-choice { display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; height: 100%; padding-right: 46px; margin: 0; }
-.provider-toggle { position: absolute; right: 9px; top: 11px; width: 30px; height: 18px; padding: 2px; border: 1px solid var(--hairline-strong); border-radius: 10px; background: var(--glass-strong); cursor: pointer; }
-.provider-toggle::after { content: ""; display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); transition: transform .15s; }
-.provider-toggle[aria-checked="true"] { background: var(--accent); border-color: var(--accent); }
-.provider-toggle[aria-checked="true"]::after { transform: translateX(12px); background: white; }
+/* Small macOS switch: gray track, white knob with a soft shadow. */
+.provider-toggle { position: absolute; right: 9px; top: 11px; width: 32px; height: 18px; padding: 0; border: 0; border-radius: 9px; background: color-mix(in srgb, var(--text) 18%, transparent); box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.06); cursor: default; }
+.provider-toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #ffffff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28), 0 0 0 0.5px rgba(0, 0, 0, 0.06); transition: transform .15s; }
+.provider-toggle[aria-checked="true"] { background: var(--accent); }
+.provider-toggle[aria-checked="true"]::after { transform: translateX(14px); }
 .provider-toggle:disabled { opacity: .45; cursor: default; }
 .provider-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .provider-enable-state { display: block; margin-top: 5px; color: var(--muted); font-size: 10.5px; }
 .provider-choice { display: block; width: 100%; padding: 12px 10px; margin: 0 0 4px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: default; }
-.provider-choice:hover { background: var(--glass); }
 .provider-choice[aria-pressed="true"] { background: var(--glass-strong); border-color: var(--hairline-strong); }
 .provider-choice:disabled { opacity: .55; }
 .provider-choice-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
@@ -579,7 +586,7 @@ button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
 .provider-detail-head { display: flex; align-items: start; justify-content: space-between; gap: 10px; padding-bottom: 14px; border-bottom: 1px solid var(--hairline); }
 .provider-detail-head h2 { margin: 0 0 5px; font-size: 15px; font-weight: 600; }
 .provider-detail-head p { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
-.provider-runtime { color: var(--muted); font-size: 10.5px; max-width: 42%; overflow-wrap: anywhere; text-align: right; padding-top: 3px; }
+.provider-runtime { color: var(--muted); font-size: 10.5px; max-width: 42%; overflow-wrap: break-word; text-align: right; padding-top: 3px; }
 .provider-detail [hidden] { display: none; }
 #cli-login-command { display: block; padding: 8px 10px; overflow-wrap: anywhere; user-select: text; }
 .provider-detail .panel { box-shadow: none; background: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; border-radius: 10px; }
@@ -590,13 +597,6 @@ button.icon-btn:hover { color: var(--text); background: var(--glass-hover); }
 .provider-detail .models-save { bottom: -32px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; box-shadow: none; padding: 10px 12px; }
 .provider-detail .models-save .field-hint { margin: 0; min-width: 100px; font-size: 11px; }
 .provider-detail .models-save .btn { margin-left: auto; }
-@media (max-width: 820px) {
-  .providers-layout { grid-template-columns: minmax(0, 1fr); }
-  .provider-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; border-right: 0; border-bottom: 1px solid var(--hairline); }
-  .provider-list-label { grid-column: 1 / -1; padding-bottom: 4px; }
-  .provider-choice { margin: 0; padding: 8px; }
-  .provider-detail { padding: 14px; }
-}
 
 /* Status tab: one glass card per check. */
 .status-toolbar {
@@ -723,7 +723,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     <main class="content">
       <div class="drag-strip" data-tauri-drag-region></div>
       <section id="section-status" class="section active">
-        <h1>Status</h1>
+        <h1 data-tauri-drag-region>Status</h1>
         <p class="lead">Loading settings…</p>
       </section>
       <section id="section-general" class="section"></section>
@@ -735,7 +735,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     </main>
       <footer class="app-footer" aria-label="Application status">
         <div class="nav-updates" id="status-updates" role="region" aria-label="App updates"></div>
-        <div class="nav-feedback" role="status"><span class="status-dot" id="save-dot" aria-hidden="true"></span><span id="save-status">Starting…</span></div>
+        <div class="nav-feedback quiet" role="status"><span class="status-dot" id="save-dot" aria-hidden="true"></span><span id="save-status">Starting…</span></div>
       </footer>
   </div>
   <script>
@@ -883,7 +883,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
   function ensureConfigReady() {
     if (configIsReady()) return true;
-    setStatus(configLoadState === "failed" ? "Settings unavailable; cannot save" : "Still loading saved settings…");
+    setStatus(configLoadState === "failed" ? "Settings unavailable; cannot save" : "Still loading saved settings…", "error");
     return false;
   }
 
@@ -915,19 +915,27 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const st = normalizeAuthStatus(status);
     return AUTH_STATUS_LABELS[st.state] || "Unknown";
   }
-  function setStatus(msg) {
+  // severity: "error" keeps the message on screen; "info" keeps it quiet.
+  // Untagged calls fall back to BAD_STATUS. Every failure path passes "error"
+  // explicitly, because backend errors don't always contain those phrases.
+  function setStatus(msg, severity) {
     const text = msg || "";
+    const isError = severity === "error" || (severity !== "info" && BAD_STATUS.test(text));
     statusEl().textContent = text;
     statusEl().title = text;
+    // The footer stays quiet for routine progress and success; VoiceOver still
+    // hears them through the status region. Problems stay on screen.
+    const feedback = statusEl().closest(".nav-feedback");
+    if (feedback) feedback.classList.toggle("quiet", !isError);
     const dot = $("#save-dot");
     if (!dot) return;
     dot.classList.remove("ok", "bad", "pulse");
-    if (OK_STATUS.test(text)) {
+    if (isError) {
+      dot.classList.add("bad");
+    } else if (OK_STATUS.test(text)) {
       dot.classList.add("ok");
       void dot.offsetWidth;
       dot.classList.add("pulse");
-    } else if (BAD_STATUS.test(text)) {
-      dot.classList.add("bad");
     }
   }
 
@@ -1075,6 +1083,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     if (changed && content) content.scrollTop = 0;
   }
   showSection("status");
+  $(".content").addEventListener("scroll", (ev) => {
+    ev.currentTarget.classList.toggle("scrolled", ev.currentTarget.scrollTop > 0);
+  }, { passive: true });
 
   $(".nav").addEventListener("keydown", (ev) => {
     const items = Array.from(document.querySelectorAll(".nav-item"));
@@ -1116,6 +1127,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   let updateInstallPending = false;
   let usageSummary = null;
   let usageBusy = false;
+  let usageConfirmPending = false;
   let usageError = "";
   let providerStatusRequestId = 0;
 
@@ -1203,7 +1215,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   async function refreshUsageData() {
-    if (usageBusy) return;
+    if (usageBusy || usageConfirmPending) return;
     usageBusy = true;
     usageError = "";
     renderUsage();
@@ -1220,8 +1232,13 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   async function clearUsageData() {
-    if (usageBusy || !usageSummary || !usageSummary.all_time || !usageSummary.all_time.requests) return;
-    if (!confirm("Clear all usage data on this device? This removes request, token, and cost totals. Your settings and writing history will stay intact.")) return;
+    if (usageBusy || usageConfirmPending || !usageSummary || !usageSummary.all_time || !usageSummary.all_time.requests) return;
+    usageConfirmPending = true;
+    let confirmed = false;
+    try {
+      confirmed = await confirmAction("Clear usage data?", "This removes request, token, and cost totals on this device. Your settings and writing history stay intact.", "Clear Usage Data");
+    } finally { usageConfirmPending = false; }
+    if (!confirmed || usageBusy) return;
     usageBusy = true;
     usageError = "";
     renderUsage();
@@ -1252,10 +1269,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         '<div class="usage-table-wrap" tabindex="0" role="region" aria-label="All-time usage by model"><table class="usage-table usage-models"><thead><tr><th scope="col">Model / provider</th>' + headers + '</tr></thead><tbody>' +
         models.map((model) => usageRow(model.model || (isCliProvider(model.kind) ? "CLI default" : "Unknown model"), model, providerLabels[model.kind] || model.kind || "Unknown provider")).join("") + '</tbody></table></div></div>'
       : '';
-    $("#section-usage").innerHTML = '<h1>Usage</h1><div class="status-toolbar"><p class="lead">Requests, tokens, and estimated costs for your activity on this device.</p>' +
+    $("#section-usage").innerHTML = '<h1 data-tauri-drag-region>Usage</h1><div class="status-toolbar"><p class="lead">Requests, tokens, and estimated costs for your activity on this device.</p>' +
       '<button type="button" class="btn secondary" id="usage-refresh"' + (usageBusy ? ' disabled' : '') + '>' + (usageBusy ? 'Loading…' : 'Refresh') + '</button></div>' +
       (usageError ? '<p class="field-hint error" role="alert">' + escapeHtml(usageError) + (u ? ' Showing the last loaded totals.' : '') + '</p>' : '') +
-      statusCard("usage", "Overview", "", all.requests ? fmtTokens(all.requests) + (all.requests === 1 ? " request" : " requests") : "", overview) + breakdown +
+      statusCard("usage", "Overview", null, all.requests ? fmtTokens(all.requests) + (all.requests === 1 ? " request" : " requests") : "", overview) + breakdown +
       '<p class="field-hint usage-note">Input tokens are the text sent to a model; output tokens are its response. Costs are estimates in USD, not a bill. ' +
       '“n/a” means the provider did not report tokens or no cost estimate is available. Subscription and unpriced requests are excluded from cost totals.' +
       (all.tokens_missing ? ' Token totals exclude ' + fmtTokens(all.tokens_missing) + (all.tokens_missing === 1 ? ' request' : ' requests') + ' without token metadata.' : '') + '</p>' +
@@ -1309,7 +1326,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     return (
       "<div class=\"card status-card\" id=\"status-" + id + "\">" +
       "<div class=\"status-card-head\">" +
-      "<span class=\"status-dot " + dotClass + "\" aria-hidden=\"true\"></span>" +
+      (dotClass === null ? "" : "<span class=\"status-dot " + dotClass + "\" aria-hidden=\"true\"></span>") +
       "<h2>" + escapeHtml(title) + "</h2>" +
       "<span class=\"status-state\" id=\"status-" + id + "-state\">" + escapeHtml(state) + "</span>" +
       "</div>" + body + "</div>"
@@ -1447,10 +1464,12 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<p class=\"field-hint\">" +
       (running
         ? "The global hotkey is live."
-        : "Hotkeys only work while it runs. Start it here, or from a terminal with <code>cargo run -p selara -- serve</code> / <code>selara serve</code>.") +
+        : "Hotkeys only work while it runs.") +
       "</p>" +
       serveActions +
+      "<details class=\"serve-log\"><summary>Troubleshooting</summary>" +
       "<dl class=\"status-meta\"><dt>Pidfile</dt><dd>" + escapeHtml(sv.pidfile || "unknown") + "</dd></dl>" +
+      "<p class=\"field-hint\">To run it outside Settings, use <code>selara serve</code> in Terminal, or <code>cargo run -p selara -- serve</code> from a source checkout.</p></details>" +
       (sup.last_error ? "<p class=\"field-hint error\">" + escapeHtml(sup.last_error) + "</p>" : "") +
       (sv.error ? "<p class=\"field-hint error\">" + escapeHtml(sv.error) + "</p>" : "") +
       serveLog;
@@ -1504,7 +1523,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "Shortcuts work while serve is running and pick up saved changes within about a second.</p>";
 
     s.innerHTML =
-      "<h1>Status</h1>" +
+      "<h1 data-tauri-drag-region>Status</h1>" +
       "<div class=\"status-toolbar\">" +
       "<p class=\"lead\">Is everything in place? The shell, the Accessibility grant, the provider, and the shortcuts.</p>" +
       "<button type=\"button\" class=\"btn secondary\" id=\"status-refresh\">Refresh</button>" +
@@ -1512,7 +1531,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       statusCard("serve", "selara serve", serveDot, serveState, serveBody) +
       statusCard("accessibility", "Accessibility", axDot, axState, axBody) +
       statusCard("provider", "Provider", providerDot, providerAuthState, providerBody) +
-      statusCard("shortcuts", "Shortcuts", "", shortcutCount + (shortcutCount === 1 ? " shortcut" : " shortcuts"), shortcutsBody);
+      statusCard("shortcuts", "Shortcuts", null, shortcutCount + (shortcutCount === 1 ? " shortcut" : " shortcuts"), shortcutsBody);
 
     async function serveAction(cmd, busy) {
       setStatus(busy);
@@ -1523,7 +1542,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         renderStatus();
         setStatus("Status refreshed");
       } catch (e) {
-        setStatus(String(e));
+        setStatus(String(e), "error");
       }
     }
     const startBtn = $("#serve-start");
@@ -1549,7 +1568,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         try {
           await invoke("open_accessibility_settings");
         } catch (e) {
-          setStatus(String(e));
+          setStatus(String(e), "error");
         }
       };
     }
@@ -1573,7 +1592,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
           setDot(dot, runtime.installed ? "ok" : "unknown");
           state.textContent = cliRuntimeLabel(runtime);
           out.textContent = runtime.message;
-          setStatus(runtime.installed ? "CLI available" : "CLI unavailable");
+          setStatus(runtime.installed ? "CLI available" : "CLI unavailable", runtime.installed ? "info" : "error");
         } else if (auth === "chatgpt") {
           const st = normalizeAuthStatus(await invoke("chatgpt_auth_status"));
           if (requestId !== providerStatusRequestId || $("#status-provider-result") !== expectedOut || !expectedOut.isConnected) return;
@@ -1584,7 +1603,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
           out.textContent = ok
             ? "The shared Codex account is signed in" + (st.email ? " as " + maskEmail(st.email) : "") + "."
             : authStatusMessage(st);
-          setStatus(ok ? "Provider reachable" : authStatusMessage(st));
+          setStatus(ok ? "Provider reachable" : authStatusMessage(st), ok ? "info" : "error");
         } else {
           const models = await invoke("list_provider_models_cmd", {
             kind: kind,
@@ -1604,7 +1623,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         state.textContent = "Unreachable";
         out.textContent = String(e);
         out.classList.add("error");
-        setStatus(String(e));
+        setStatus(String(e), "error");
       } finally {
         if (requestId === providerStatusRequestId && $("#status-provider-result") === expectedOut && expectedOut.isConnected) btn.disabled = false;
       }
@@ -1616,7 +1635,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const g = generalDraft ? { ...config, ...generalDraft } : config;
     const editAttr = configEditAttr();
     s.innerHTML =
-      "<h1>General</h1>" +
+      "<h1 data-tauri-drag-region>General</h1>" +
       "<p class=\"lead\">Language and the global shortcut for custom instructions.</p>" +
       configGateMarkup("general-config-gate") +
       "<div class=\"section-label\">Language</div>" +
@@ -1652,10 +1671,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<label for=\"autostart\">Start at login</label>" +
       "<div class=\"control-stack\">" +
       "<label class=\"check-row\" for=\"autostart\"><input type=\"checkbox\" id=\"autostart\"" + editAttr + " /> Start Selara in the background when you log in</label>" +
-      "<p class=\"field-hint\" id=\"autostart-hint\">Applies immediately; no save needed.</p>" +
+      "<p class=\"field-hint\" id=\"autostart-hint\"></p>" +
       "</div></div>" +
-      "</div>" +
-      "<div class=\"general-save\"><button class=\"btn\" id=\"save-general\"" + editAttr + ">Save changes</button></div>";
+      "</div>";
     const autostart = $("#autostart");
     const generalView = { language: $("#language"), hotkey: $("#hotkey"), excluded: $("#excluded-apps") };
     const captureGeneralDraft = () => {
@@ -1684,18 +1702,25 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         setStatus(autostart.checked ? "Will start at login" : "Will not start at login");
       } catch (e) {
         autostart.checked = !autostart.checked;
-        setStatus(String(e));
+        setStatus(String(e), "error");
       }
     };
-    $("#save-general").onclick = async () => {
+    // Each field saves when committed (Return or leaving it), like System
+    // Settings. A failed save keeps the draft and explains itself inline.
+    const saveGeneral = async (ev) => {
       if (!ensureConfigReady()) return;
+      const field = ev && ev.currentTarget;
       const saved = await saveSection("general", {
         language: $("#language").value.trim() || "en",
         hotkey: $("#hotkey").value.trim() || "ctrl+shift+space",
         excluded_apps: $("#excluded-apps").value.split("\n").map((l) => l.trim()).filter(Boolean),
-      });
-      if (saved) generalDraft = null;
+      }, (e) => showFieldError(field, String(e)));
+      if (saved) {
+        generalDraft = null;
+        clearFieldErrors("#section-general");
+      }
     };
+    [generalView.language, generalView.hotkey, generalView.excluded].forEach((el) => el.addEventListener("change", saveGeneral));
   }
 
   let chatgptStatus = normalizeAuthStatus({ state: "checking", message: "Checking the shared Codex account…" });
@@ -1703,6 +1728,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   // response conditional on the view and request that created it.
   let chatgptLoginPending = false;
   let chatgptLogoutPending = false;
+  let logoutConfirmPending = false;
   let chatgptModels = null;
   let authStatusRequestId = 0;
   let loginRequestId = 0;
@@ -1945,7 +1971,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       // cannot replace an unsaved model with a failure placeholder.
       if (!sel.value.trim() && originalSelection) sel.innerHTML = modelOptionMarkup([], originalSelection, true);
       if (expectedHint === $("#chatgpt-models-hint")) expectedHint.textContent = "Could not load models: " + String(e);
-      setStatus(String(e));
+      setStatus(String(e), "error");
     } finally {
       if (requestId === chatgptModelsRequestId) {
         chatgptModelsLoading = null;
@@ -2129,7 +2155,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<div class=\"form-row\" id=\"model-byok-wrap\"><label for=\"model\">Model</label><div class=\"control-stack\"><div class=\"control-inline\"><input id=\"model\" list=\"model-options\" value=\"" + escapeAttr(byokModel) + "\" autocomplete=\"off\" spellcheck=\"false\"/><datalist id=\"model-options\"></datalist><button type=\"button\" class=\"btn secondary\" id=\"load-models\">Load models</button></div><p class=\"field-hint\" id=\"byok-models-hint\" role=\"status\">Load models to check this connection, or enter a model ID. Then save changes.</p></div></div>";
     const cliInner = '<div class="panel models-fields" id="cli-fields" hidden><div class="form-row top"><label for="cli-binary">CLI executable</label><div class="control-stack"><div class="control-inline"><input id="cli-binary" value="' + escapeAttr(p.cli_binary || "") + '" autocomplete="off" spellcheck="false"' + editAttr + '/><button type="button" class="btn secondary" id="cli-refresh"' + editAttr + '>Check CLI</button></div><p class="field-hint" id="cli-runtime-status" role="status"></p></div></div><div class="form-row top"><span>Account</span><div class="control-stack"><p class="field-hint">Uses the account signed in through this CLI. To sign in, run in Terminal:</p><code id="cli-login-command"></code></div></div></div>';
     s.innerHTML =
-      "<h1>Providers</h1><p class=\"lead\">Configure your connections and choose the provider for your writing commands.</p>" + configGateMarkup("models-config-gate") +
+      "<h1 data-tauri-drag-region>Providers</h1><p class=\"lead\">Configure your connections and choose the provider for your writing commands.</p>" + configGateMarkup("models-config-gate") +
       '<div class="providers-layout"><nav class="provider-list" aria-label="Provider connections">' + renderProviderChoices() + '</nav><div class="provider-detail">' +
       '<div class="provider-detail-head"><div><h2 id="provider-detail-title"></h2><p id="provider-detail-description"></p></div><span class="provider-runtime" id="provider-runtime-version"></span></div>' +
       "<div class=\"panel models-setup\" hidden><div class=\"form-row\"><label for=\"provider-kind\">Provider</label><select id=\"provider-kind\"" + editAttr + ">" + Object.keys(PROVIDERS).map((k) => "<option value=\"" + k + "\">" + escapeHtml(PROVIDERS[k].label) + "</option>").join("") + "</select></div>" +
@@ -2354,7 +2380,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       } catch (e) {
         if (requestId !== byokModelsRequestId || view !== modelsViewGeneration || $("#model") !== expectedInput || !expectedInput.isConnected) return;
         if (hint) hint.textContent = "Could not load models: " + String(e);
-        setStatus(String(e));
+        setStatus(String(e), "error");
       } finally {
         if (requestId === byokModelsRequestId && view === modelsViewGeneration && $("#model") === expectedInput && expectedInput.isConnected) loadBtn.disabled = false;
       }
@@ -2399,7 +2425,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       if (!model && !isCliProvider(kind)) {
         const message = a === "chatgpt" && !isChatgptConnected(chatgptStatus) ? "Sign in with ChatGPT and choose a model before saving." : "Pick a model before saving.";
         showProviderFeedback(message, kind, a);
-        setStatus(message);
+        setStatus(message, "error");
         const target = a === "chatgpt" ? ($("#model-select").disabled ? $("#chatgpt-login") : $("#model-select")) : $("#model");
         if (target) target.focus();
         return;
@@ -2408,7 +2434,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       if (!isCliProvider(kind) && codexHome && !codexHome.startsWith("/")) {
         const message = "Codex home must be an absolute path, or leave it blank to use the default.";
         showProviderFeedback(message, kind, a);
-        setStatus(message);
+        setStatus(message, "error");
         modelsAdvancedOpen = true;
         $("#provider-advanced").open = true;
         $("#codex_home").focus();
@@ -2455,7 +2481,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
           }
         }
       } catch (e) {
-        setStatus(String(e));
+        setStatus(String(e), "error");
         showProviderFeedback("Could not save provider settings. " + String(e) + " Try saving again.", kind, a);
       } finally {
         providerSavePending = false;
@@ -2480,9 +2506,9 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         const value = await invoke("chatgpt_login");
         if (requestId !== loginRequestId) return;
         chatgptStatus = normalizeAuthStatus(value);
-        setStatus(chatgptStatus.state === "connected" ? "ChatGPT signed in" : authStatusMessage(chatgptStatus));
+        setStatus(chatgptStatus.state === "connected" ? "ChatGPT signed in" : authStatusMessage(chatgptStatus), chatgptStatus.state === "connected" ? "info" : "error");
       } catch (e) {
-        if (requestId === loginRequestId) { chatgptStatus = normalizeAuthStatus({ state: "error", message: String(e) }); setStatus(String(e)); }
+        if (requestId === loginRequestId) { chatgptStatus = normalizeAuthStatus({ state: "error", message: String(e) }); setStatus(String(e), "error"); }
       } finally {
         if (requestId === loginRequestId) { chatgptLoginPending = false; renderModels(); }
       }
@@ -2501,12 +2527,17 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         chatgptStatus = normalizeAuthStatus({ state: "signed_out", message: "ChatGPT sign-in was cancelled." });
         renderModels();
         setStatus("ChatGPT sign-in cancelled");
-      } catch (e) { if (requestId === loginRequestId) { cancelBtn.disabled = false; setStatus(String(e)); } }
+      } catch (e) { if (requestId === loginRequestId) { cancelBtn.disabled = false; setStatus(String(e), "error"); } }
     };
     const logoutBtn = $("#chatgpt-logout");
     if (logoutBtn) logoutBtn.onclick = async () => {
-      if (chatgptLogoutPending) return;
-      if (!window.confirm("Sign out of the shared Codex account? This changes the account used by Selara's bundled runtime and other Codex clients that share this Codex home.")) return;
+      if (chatgptLogoutPending || logoutConfirmPending) return;
+      logoutConfirmPending = true;
+      let confirmed = false;
+      try {
+        confirmed = await confirmAction("Sign out of the shared Codex account?", "This changes the account used by Selara's bundled runtime and other Codex clients that share this Codex home.", "Sign Out");
+      } finally { logoutConfirmPending = false; }
+      if (!confirmed || chatgptLogoutPending) return;
       const requestId = ++logoutRequestId;
       chatgptLogoutPending = true;
       chatgptStatus = normalizeAuthStatus({ state: "checking", message: "Signing out of the shared Codex account…" });
@@ -2517,13 +2548,13 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         if (requestId !== logoutRequestId) return;
         chatgptStatus = normalizeAuthStatus(value);
         setStatus("Signed out");
-      } catch (e) { if (requestId === logoutRequestId) { chatgptStatus = normalizeAuthStatus({ state: "error", message: String(e) }); setStatus(String(e)); } }
+      } catch (e) { if (requestId === logoutRequestId) { chatgptStatus = normalizeAuthStatus({ state: "error", message: String(e) }); setStatus(String(e), "error"); } }
       finally { if (requestId === logoutRequestId) { chatgptLogoutPending = false; renderModels(); } }
     };
     const refreshBtn = $("#chatgpt-refresh");
     if (refreshBtn) refreshBtn.onclick = async () => {
       const value = await refreshChatgptStatus({ render: true });
-      if (value) setStatus(value.state === "error" ? authStatusMessage(value) : "Status refreshed");
+      if (value) setStatus(value.state === "error" ? authStatusMessage(value) : "Status refreshed", value.state === "error" ? "error" : "info");
     };
     const modelsBtn = $("#chatgpt-models");
     if (modelsBtn) modelsBtn.onclick = async () => {
@@ -2547,11 +2578,14 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     "<svg class=\"chevron\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M6 3.5L10.5 8 6 12.5\"/></svg>";
   const COPY_SVG =
     "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><rect x=\"5.5\" y=\"5.5\" width=\"8\" height=\"8\" rx=\"1.6\"/><path d=\"M10.5 5.5V4a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5\"/></svg>";
+  const PULLDOWN_SVG =
+    "<svg viewBox=\"0 0 10 10\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M2.5 4l2.5 2.5L7.5 4\"/></svg>";
   const TRASH_SVG =
     "<svg viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8\"/></svg>";
 
   let commandFilter = "";
   let commandOperationPending = false;
+  let commandConfirmPending = false;
   let commandError = "";
   let commandImportMode = "keep_both";
   let sheetOpener = null;
@@ -2638,7 +2672,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     }
 
     s.innerHTML =
-      "<h1>Commands</h1>" +
+      "<h1 data-tauri-drag-region>Commands</h1>" +
       "<p class=\"lead\">Run commands from the menu bar or a shortcut to replace selected text. Select a command below to edit it.</p>" +
       configGateMarkup("commands-config-gate") +
       "<div class=\"toolbar\">" +
@@ -2694,7 +2728,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         const path = await invoke("export_commands");
         setStatus(path ? "Exported commands" : "Export cancelled");
       } catch (e) {
-        setStatus(String(e));
+        setStatus(String(e), "error");
       }
     };
     $("#cmd-import").onclick = async () => {
@@ -2717,7 +2751,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         if (report.hotkeys_dropped) parts.push(report.hotkeys_dropped + " hotkey(s) dropped (already in use)");
         setStatus("Imported: " + (parts.join(", ") || "nothing to do"));
       } catch (e) {
-        setStatus(String(e));
+        setStatus(String(e), "error");
         setCommandError("Could not import commands. " + String(e));
       } finally {
         commandOperationPending = false;
@@ -2745,6 +2779,16 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         ev.stopPropagation();
         await deleteCommand(id, ev.currentTarget);
       };
+      el.oncontextmenu = (ev) => {
+        ev.preventDefault();
+        const enabled = canEditCommands();
+        showNativeMenu([
+          { text: "Edit…", enabled, action: () => openCommandSheet(id, el) },
+          { text: "Duplicate", enabled, action: () => duplicateCommand(id, el) },
+          "-",
+          { text: "Delete…", enabled, action: () => deleteCommand(id, el) },
+        ]);
+      };
     });
   }
 
@@ -2763,9 +2807,14 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   }
 
   async function deleteCommand(id, opener) {
-    if (!ensureConfigReady() || commandOperationPending) return false;
+    if (!ensureConfigReady() || commandOperationPending || commandConfirmPending) return false;
     const c = config.commands.find((x) => x.id === id);
-    if (!confirm("Delete “" + (c ? c.label : id) + "”?")) return false;
+    commandConfirmPending = true;
+    let confirmed = false;
+    try {
+      confirmed = await confirmAction("Delete “" + (c ? c.label : id) + "”?", "The command and its shortcut are removed. This can't be undone.", "Delete Command");
+    } finally { commandConfirmPending = false; }
+    if (!confirmed || commandOperationPending) return false;
     const saved = await saveCommands(config.commands.filter((x) => x.id !== id));
     if (!saved) {
       if (!$("#sheet-root")) restoreCommandFocus(opener);
@@ -3019,7 +3068,6 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "<p id=\"cmd-save-error\" class=\"command-error\" role=\"alert\" aria-atomic=\"true\" hidden></p>" +
       (editing ? "<button type=\"button\" class=\"btn linkish danger-text\" id=\"cmd-delete\">Delete command</button>" : "") +
       "<span class=\"spacer\"></span>" +
-      "<span class=\"field-hint\" style=\"margin-right:4px\"><kbd>⌘</kbd><kbd>↩</kbd> to save</span>" +
       "<button type=\"button\" class=\"btn secondary\" id=\"cmd-cancel\">Cancel</button>" +
       "<button type=\"button\" class=\"btn\" id=\"cmd-save\" data-ready-label=\"" + (editing ? "Save changes" : "Add command") + "\">" + (editing ? "Save changes" : "Add command") + "</button>" +
       "</div>" +
@@ -3089,7 +3137,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     const s = $("#section-limits");
     const editAttr = configEditAttr();
     s.innerHTML =
-      "<h1>Limits</h1>" +
+      "<h1 data-tauri-drag-region>Limits</h1>" +
       "<p class=\"lead\">Gentle rails for large selections. Set any value to 0 for unlimited.</p>" +
       configGateMarkup("limits-config-gate") +
       "<div class=\"section-label\">Thresholds</div>" +
@@ -3121,18 +3169,28 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       "</div>" +
       "</div>" +
       "<div class=\"limits-actions\">" +
-      "<button class=\"btn linkish\" id=\"reset-limits\"" + editAttr + ">Reset to defaults</button>" +
-      "<button class=\"btn\" id=\"save-limits\"" + editAttr + ">Save changes</button>" +
+      "<button class=\"btn secondary\" id=\"reset-limits\"" + editAttr + ">Reset to Defaults</button>" +
       "</div>";
-    $("#save-limits").onclick = async () => {
+    const saveLimits = async (ev) => {
       if (!ensureConfigReady()) return;
-      await saveSection("limits", {
+      const field = ev && ev.currentTarget;
+      const invalid = ["#soft_warn", "#hard_max", "#replace_warn"].map((sel) => $(sel)).find((el) => {
+        const n = Number(el.value);
+        return el.validity.badInput || el.value.trim() === "" || !Number.isFinite(n) || n < 0;
+      });
+      if (invalid) {
+        showFieldError(invalid, "Enter 0 or a positive number of characters. 0 means no limit.");
+        return;
+      }
+      const saved = await saveSection("limits", {
         soft_warn_chars: num($("#soft_warn").value),
         hard_max_chars: num($("#hard_max").value),
         replace_warn_chars: num($("#replace_warn").value),
         secret_guard: $("#secret_guard").checked,
-      });
+      }, (e) => showFieldError(field, String(e)));
+      if (saved) clearFieldErrors("#section-limits");
     };
+    ["#soft_warn", "#hard_max", "#replace_warn", "#secret_guard"].forEach((sel) => $(sel).addEventListener("change", saveLimits));
     $("#reset-limits").onclick = async () => {
       if (!ensureConfigReady()) return;
       await saveSection("limits", { soft_warn_chars: 8000, hard_max_chars: 100000, replace_warn_chars: 4000, secret_guard: true });
@@ -3144,18 +3202,30 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
   // section, writes atomically, and returns the merged config, so a change
   // made elsewhere (for example Limits inside `selara serve`) is kept and
   // shows up here after the save.
+  // Saves run one at a time, in the order they were requested. With
+  // save-as-you-go, two quick edits send two full-section snapshots; the
+  // native lock serializes the writes but not their arrival order, so an
+  // older snapshot could otherwise land last and undo the newer edit.
+  // A save starts at once when none is running, and otherwise waits its turn.
+  let saveInFlight = null;
   async function saveSection(section, value, onError) {
     if (!ensureConfigReady()) return false;
-    try {
-      const merged = await invoke("save_config_section", { section, value });
-      if (merged && typeof merged === "object") config = normalizeConfigForUi(merged);
-      setStatus("Saved");
-      return true;
-    } catch (e) {
-      setStatus(String(e));
-      if (onError) onError(e);
-      return false;
-    }
+    const run = async () => {
+      try {
+        const merged = await invoke("save_config_section", { section, value });
+        if (merged && typeof merged === "object") config = normalizeConfigForUi(merged);
+        setStatus("Saved");
+        return true;
+      } catch (e) {
+        setStatus(String(e), "error");
+        if (onError) onError(e);
+        return false;
+      }
+    };
+    const save = saveInFlight ? saveInFlight.then(run) : run();
+    saveInFlight = save;
+    save.finally(() => { if (saveInFlight === save) saveInFlight = null; });
+    return save;
   }
 
   // The background check (10 s after launch, then daily) and the tray's
@@ -3199,6 +3269,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     return ok;
   }
 
+  let historyClearPending = false;
   async function refreshHistoryData() {
     try {
       const list = await invoke("history_list");
@@ -3227,7 +3298,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         "<div class=\"hist-item\" data-index=\"" + i + "\">" +
         "<div class=\"hist-main\">" +
         "<h3><span class=\"hist-name\">" + escapeHtml(h.label || h.command_id || "Command") + "</span>" +
-        "<span class=\"badge\">" + escapeHtml(historyKindLabel(h)) + "</span></h3>" +
+        "<span class=\"badge" + (h.outcome === "not_applied" || h.outcome === "paste_unverified" ? " warn" : "") + "\">" + escapeHtml(historyKindLabel(h)) + "</span></h3>" +
         "<div class=\"hist-meta\" title=\"" + escapeAttr(h.ts ? new Date(h.ts * 1000).toLocaleString() : "") + "\">" + escapeHtml(when) + app + "</div>" +
         (h.outcome === "paste_unverified" ? '<p class="field-hint">Check your document before copying this result; the paste may have completed.</p>' :
           h.outcome === "not_applied" ? '<p class="field-hint">Your selection was not changed. The completed rewrite is saved here.</p>' : "") +
@@ -3236,8 +3307,8 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         "<dt>Result</dt><dd class=\"result\" title=\"" + escapeAttr(previewLine(h.result, 400)) + "\">" + escapeHtml(previewLine(h.result, 160)) + "</dd>" +
         "</dl></div>" +
         "<div class=\"row-actions\">" +
-        "<button type=\"button\" class=\"btn secondary\" data-act=\"copy-result\" title=\"Copy the result to the clipboard\">Copy result</button>" +
-        "<button type=\"button\" class=\"btn secondary\" data-act=\"copy-original\" title=\"Copy the text that was selected\"" + (h.original ? "" : " disabled") + ">Copy original</button>" +
+        "<button type=\"button\" class=\"btn secondary\" data-act=\"copy-result\" title=\"Copy the result to the clipboard\">Copy</button>" +
+        "<button type=\"button\" class=\"btn secondary\" data-act=\"copy-menu\" aria-haspopup=\"menu\" aria-label=\"More copy options\" title=\"Copy the result or the original\">" + PULLDOWN_SVG + "</button>" +
         "</div></div>"
       );
     }).join("");
@@ -3252,7 +3323,7 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
     }
 
     s.innerHTML =
-      "<h1>History</h1>" +
+      "<h1 data-tauri-drag-region>History</h1>" +
       "<p class=\"lead\">Your completed rewrites, including results that could not be applied. Copy a result or the original text back to the clipboard; " +
       "to restore a replacement in the source app, use that app's native undo command. " +
       "The file holds the selected text verbatim and is readable only by you.</p>" +
@@ -3270,26 +3341,110 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
       setStatus("History refreshed");
     };
     $("#history-clear").onclick = async () => {
-      if (!confirm("Clear the history? This deletes every saved original and result.")) return;
+      if (historyClearPending) return;
+      historyClearPending = true;
       try {
+        if (!(await confirmAction("Clear the history?", "This deletes every saved original and result.", "Clear History"))) return;
         await invoke("history_clear");
         await refreshHistoryData();
         renderHistory();
         setStatus("History cleared");
       } catch (e) {
-        setStatus(String(e));
+        setStatus(String(e), "error");
+      } finally {
+        historyClearPending = false;
       }
     };
+    const copyFromHistory = async (h, which) => {
+      const ok = await copyText((which === "original" ? h.original : h.result) || "");
+      setStatus(ok ? (which === "original" ? "Copied original" : "Copied result") : "Copy failed", ok ? "info" : "error");
+    };
+    const historyMenu = (h, anchor) => showNativeMenu([
+      { text: "Copy Result", action: () => copyFromHistory(h, "result") },
+      { text: "Copy Original", enabled: !!h.original, action: () => copyFromHistory(h, "original") },
+    ], anchor);
     $("#history-list").addEventListener("click", async (ev) => {
       const btn = ev.target.closest("button[data-act]");
       if (!btn) return;
       const row = btn.closest(".hist-item");
       const h = historyEntries[Number(row && row.dataset.index)];
       if (!h) return;
-      const text = btn.dataset.act === "copy-original" ? h.original : h.result;
-      const ok = await copyText(text || "");
-      setStatus(ok ? (btn.dataset.act === "copy-original" ? "Copied original" : "Copied result") : "Copy failed");
+      if (btn.dataset.act === "copy-menu") historyMenu(h, btn);
+      else await copyFromHistory(h, "result");
     });
+    $("#history-list").addEventListener("contextmenu", (ev) => {
+      const row = ev.target.closest(".hist-item");
+      const h = row && historyEntries[Number(row.dataset.index)];
+      if (!h) return;
+      ev.preventDefault();
+      historyMenu(h);
+    });
+  }
+
+  // Destructive actions ask with a native alert whose button names the action.
+  // Builds without the command (and the DOM tests) fall back to confirm().
+  async function confirmAction(title, message, confirmLabel) {
+    try {
+      const answer = await invoke("confirm_action", { title, message, confirmLabel });
+      if (typeof answer === "boolean") return answer;
+    } catch (_) { /* fall back below */ }
+    return window.confirm(message);
+  }
+
+  // Native macOS context/pull-down menu. `items` are { text, action, enabled }
+  // or "-" for a separator. Returns false when the menu API is unavailable.
+  // Tauri routes menu actions by item id, so every popup gets fresh ids and
+  // the previous menu is closed before a new one opens. Otherwise a stale
+  // handler with the same id could run for another row's menu.
+  let nativeMenuSeq = 0;
+  let openNativeMenu = null;
+  async function showNativeMenu(items, anchor) {
+    const api = window.__TAURI__ && window.__TAURI__.menu;
+    if (!api || !api.Menu) return false;
+    try {
+      if (openNativeMenu && typeof openNativeMenu.close === "function") {
+        const previous = openNativeMenu;
+        openNativeMenu = null;
+        await previous.close().catch(() => {});
+      }
+      const menuId = ++nativeMenuSeq;
+      const menu = await api.Menu.new({
+        items: items.map((item, i) => item === "-"
+          ? { item: "Separator" }
+          : { id: "selara-menu-" + menuId + "-" + i, text: item.text, enabled: item.enabled !== false, action: () => item.action() }),
+      });
+      openNativeMenu = menu;
+      let at;
+      const dpi = window.__TAURI__.dpi;
+      if (anchor && dpi && dpi.LogicalPosition) {
+        const r = anchor.getBoundingClientRect();
+        at = new dpi.LogicalPosition(r.left, r.bottom + 4);
+      }
+      await menu.popup(at);
+      return true;
+    } catch (e) {
+      console.warn("context menu unavailable:", e);
+      return false;
+    }
+  }
+
+  function clearFieldErrors(sectionSelector) {
+    document.querySelectorAll(sectionSelector + " .field-error").forEach((note) => note.remove());
+  }
+
+  // Inline error beside the control that failed to save; cleared on success.
+  function showFieldError(el, message) {
+    const stack = el && (el.closest(".control-stack") || el.closest(".form-row"));
+    if (!stack) return;
+    let note = stack.querySelector(".field-error");
+    if (!message) { if (note) note.remove(); return; }
+    if (!note) {
+      note = document.createElement("p");
+      note.className = "field-hint error field-error";
+      note.setAttribute("role", "alert");
+      stack.appendChild(note);
+    }
+    note.textContent = message;
   }
 
   // WebKit's CSS AccentColor is always the default blue in a WKWebView, while
@@ -3368,10 +3523,10 @@ button:focus-visible, .nav-item:focus-visible, .segmented .seg:focus-visible {
         configLoadError = msg;
         renderSettings();
       }
-      setStatus(msg);
+      setStatus(msg, "error");
       if (!configLoaded) {
         $("#section-status").innerHTML =
-          "<h1>Settings unavailable</h1><p class=\"lead error\">" + escapeHtml(msg) + "</p>" +
+          "<h1 data-tauri-drag-region>Settings unavailable</h1><p class=\"lead error\">" + escapeHtml(msg) + "</p>" +
           "<p class=\"hint\">Editing is disabled because saved settings could not be loaded. Restart Selara to try again.</p>";
       }
     }

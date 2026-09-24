@@ -122,6 +122,14 @@ function value(dom, id, next) {
   return el;
 }
 
+// A field commits (Return or leaving it) with a change event; Settings saves then.
+function commit(dom, id) {
+  const el = dom.window.document.getElementById(id);
+  assert.ok(el, `#${id} should exist`);
+  el.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+  return el;
+}
+
 function callsFor(harness, command) {
   return harness.calls.filter((call) => call.command === command);
 }
@@ -165,8 +173,7 @@ test("blocks config writes while saved settings are loading, then allows normal 
     const document = harness.dom.window.document;
     document.querySelector('[data-section="general"]').click();
     assert.equal(document.querySelector("#language").disabled, true);
-    assert.equal(document.querySelector("#save-general").disabled, true);
-    await document.querySelector("#save-general").onclick();
+    commit(harness.dom, "language");
     document.querySelector('[data-section="models"]').click();
     assert.equal(document.querySelector("#provider-kind").disabled, true);
     assert.equal(document.querySelector("#save-models").disabled, true);
@@ -178,13 +185,14 @@ test("blocks config writes while saved settings are loading, then allows normal 
 
     harness.configRequest.resolve(persisted);
     await harness.idle(12);
-    assert.equal(document.querySelector("#save-general").disabled, false);
+    assert.equal(document.querySelector("#language").disabled, false);
     assert.equal(document.querySelector("#save-models").disabled, false);
     document.querySelector('[data-section="models"]').click();
     document.querySelector("#save-models").click();
     await harness.idle(5);
     document.querySelector('[data-section="general"]').click();
-    document.querySelector("#save-general").click();
+    value(harness.dom, "language", "fr");
+    commit(harness.dom, "language");
     await harness.idle(5);
     assert.ok(callsFor(harness, "save_config_section").length >= 2, "normal saves should reach the native command");
   } finally { harness.close(); }
@@ -198,10 +206,11 @@ test("keeps settings writes disabled after a failed config load", async () => {
     await harness.idle(10);
     const document = harness.dom.window.document;
     assert.match(document.querySelector("#general-config-gate").textContent, /Editing is disabled/);
-    assert.equal(document.querySelector("#save-general").disabled, true);
+    assert.equal(document.querySelector("#language").disabled, true);
     assert.match(document.querySelector("#models-config-gate").textContent, /could not be loaded/);
     const before = callsFor(harness, "save_config_section").length;
-    await document.querySelector("#save-general").onclick();
+    commit(harness.dom, "language");
+    await harness.idle(2);
     assert.equal(callsFor(harness, "save_config_section").length, before);
     assert.match(document.querySelector("#section-status").textContent, /Editing is disabled because saved settings could not be loaded/);
   } finally { harness.close(); }
@@ -651,7 +660,7 @@ test("uses the global shortcut for custom instructions and never saves an undo s
     assert.equal(document.querySelector("#undo-hotkey"), null);
     assert.match(document.querySelector("#section-general").textContent, /Custom instruction hotkey/);
     value(harness.dom, "hotkey", "option+space");
-    document.querySelector("#save-general").click();
+    commit(harness.dom, "hotkey");
     await harness.idle(5);
     const save = callsFor(harness, "save_config_section").at(-1);
     assert.equal(save.args.section, "general");
@@ -1283,11 +1292,13 @@ test("requires confirmation to clear usage, blocks duplicate clears, and retains
     await harness.idle();
     harness.dom.window.confirm = () => false;
     document.querySelector("#usage-clear").click();
+    await harness.idle();
     assert.equal(callsFor(harness, "clear_usage").length, 0);
     harness.dom.window.confirm = () => true;
     document.querySelector("#usage-clear").click();
     document.querySelector("#usage-clear").click();
     document.querySelector("#usage-refresh").click();
+    await harness.idle();
     assert.equal(callsFor(harness, "clear_usage").length, 1);
     assert.equal(callsFor(harness, "usage_summary").length, 1);
     clear.reject(new Error("Could not clear usage"));
