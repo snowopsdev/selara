@@ -105,6 +105,16 @@ test("controls use the system accent color", async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
+for (const [accent, label] of [["#a550a7", "rgb(255, 255, 255)"], ["#007aff", "rgb(255, 255, 255)"], ["#ffc600", "rgb(29, 29, 31)"], ["#f7821b", "rgb(29, 29, 31)"]]) {
+  test(`accent ${accent} gets a readable button label`, async ({ page }) => {
+    const problems = await openSettings(page, "configured", `&accent=${encodeURIComponent(accent)}`);
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim())).toBe(accent);
+    await showSection(page, "commands");
+    expect(await page.locator("#cmd-new").evaluate((el) => getComputedStyle(el).color)).toBe(label);
+    expect(problems).toEqual([]);
+  });
+}
+
 test("groups and buttons follow macOS metrics", async ({ page }) => {
   const problems = await openSettings(page);
   await showSection(page, "general");
