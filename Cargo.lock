@@ -5248,6 +5248,7 @@ dependencies = [
  "anyhow",
  "flate2",
  "libc",
+ "objc2-app-kit 0.3.2",
  "selara-core",
  "selara-platform",
  "serde",

@@ -2,11 +2,49 @@
 
 Settings already uses the system font, disables text selection outside fields, keeps a `default` cursor almost everywhere, and has working sidebar vibrancy and traffic-light clearance. What still reads as "web page" is the surface and interaction model: shadowed floating cards and capsule buttons, a hard-coded blue beside system-accent controls, hover-driven chrome, explicit Save buttons with a status bar, a sidebar without arrow-key selection, and a responsive reflow at the minimum window size. One keyboard defect was reproduced: Tab can leave the command sheet.
 
-This report records findings only. No production UI code changed. Choose which findings to implement; each becomes a follow-up change.
+This report records the audit as found. The follow-up below lists what has since been implemented.
+
+## Implementation follow-up — September 23, 2026
+
+Findings 1, 3, 4, 5, and 7 are implemented:
+
+- **1:** the sheet's focus trap now moves focus on every Tab and Shift-Tab, so focus stays in the dialog whichever controls the platform puts in the Tab order. The expected-failure marker is gone and the test passes.
+- **3:** groups are flat, with no drop shadow or per-group blur. General and Limits use one group per heading, with the heading above the group. The page title is 15 px bold, level with the traffic lights and inside the drag strip, so it moves the window like a native title. Lead paragraphs are unchanged.
+- **4:** buttons, switches, links, and checkboxes now share the macOS accent color. **Correction to the recommendation above:** CSS `AccentColor` does not work here. In a WKWebView it always resolves to the default blue (`rgb(0, 122, 255)`), even when native checkboxes and switches in the same view draw in the user's accent; this was measured with Purple selected. The app now exposes `system_accent_color`, which reads `NSColor.controlAccentColor`. Settings applies it on load, when the window regains focus, and when the appearance changes. `#0a84ff` remains the fallback.
+- **5:** push buttons are 24 px rounded rectangles with regular-weight labels. They don't change on hover and only darken when pressed. Text fields, pop-ups, and the segmented control use the same height.
+- **7:** the sidebar is a source list. ↑, ↓, Home, and End change the page, and only the current item is a tab stop. The current item has `aria-current="page"` and a flat fill with no shadow or fade. Changing page also resets the scroll position, so each page opens at its title.
+
+The e2e suite covers each change.
+
+### Second pass
+
+Findings 2, 6, and 8–14 are implemented as well:
+
+- **2:** General and Limits save each field when it is committed (Return, leaving the field, or toggling), with inline errors beside the field that failed. Providers keeps **Save and use**. The footer stays, as chosen, but only shows problems. Routine messages such as "Saved" stay in its status region for VoiceOver and are hidden visually.
+- **6:** there are no hover rules left (the suite asserts none). Command rows show Duplicate/Delete only for keyboard focus and offer **Edit…**, **Duplicate**, and **Delete…** in a native right-click menu. Each History entry has one **Copy** button with a pull-down arrow. The arrow, or right-clicking the entry, opens a native menu with **Copy Result** and **Copy Original**.
+- **8:** Providers keeps its list and connection side by side at every size. The list is 180 px wide and the 820 px breakpoint is gone.
+- **9:** `<select>` is left to WebKit, which draws native macOS pop-up buttons. The provider switch has a gray track, a white knob, and a default cursor.
+- **10:** the command sheet drops from just under the title bar over a dimmed window without blur. The ⌘↩ keycap hint is gone; the shortcut still saves.
+- **11:** the four confirmations use a native alert (`confirm_action`, through the existing dialog plugin), with buttons named for the action: Clear Usage Data, Sign Out, Delete Command, Clear History.
+- **12:** kept per the owner's choice, but quieter (see 2).
+- **13:** the page title stays in the title bar while content scrolls, and gains a separator and fill once content passes beneath. It is a drag region, so dragging moves the window and double-clicking zooms it, as a title bar does.
+- **14:** Not applied and Paste unverified use a warning tint. Overview and Shortcuts no longer show a meaningless dot. The developer commands for running `serve` moved into a **Troubleshooting** disclosure.
+
+These changes were checked in an offscreen WKWebView as well as Playwright WebKit. The native menus and alerts come from Tauri and the dialog plugin; the mock records them for tests but doesn't draw them.
+
+The Settings UI rendered by WKWebView (the engine Tauri uses), against the mock with a Purple accent: native pop-up button and accent switches, and History's Copy control with warning badges.
+
+![Providers in WKWebView](screenshots/15-wkwebview-providers.png)
+
+![History in WKWebView](screenshots/16-wkwebview-history.png)
+
+The real window after the change, in the debug build with the system accent set to Purple, scrolled to show all four groups (captured before the scroll reset was added):
+
+![General after the change, real window](screenshots/14-native-after-general.png)
 
 ## Scope and evidence
 
-- **Browser pass.** `apps/selara-desktop/index.html` served by `npm run dev:mock` (the committed mock Tauri bridge in `apps/selara-desktop/dev/mock-tauri.js`) and driven by the Playwright suite in `apps/selara-desktop/e2e/`. WebKit 26.6, 920 × 640 and the 760 × 520 minimum, light and dark, four data scenarios (`configured`, `fresh`, `update`, `errors`). 52 checks pass, one of them the expected failure in finding 1. Numbers quoted as "native-lint" come from `e2e/native-lint.spec.mjs`, which measures computed styles per section.
+- **Browser pass.** `apps/selara-desktop/index.html` served by `npm run dev:mock` (the committed mock Tauri bridge in `apps/selara-desktop/dev/mock-tauri.js`) and driven by the Playwright suite in `apps/selara-desktop/e2e/`. WebKit 26.6, 920 × 640 and the 760 × 520 minimum, light and dark, four data scenarios (`configured`, `fresh`, `update`, `errors`). At audit time the suite had 52 checks, and the finding 1 test was marked as an expected failure. Since the follow-up it passes normally; the current suite is 122 checks plus 18 mock-contract checks that run in one project only. Numbers quoted as "native-lint" come from `e2e/native-lint.spec.mjs`, which measures computed styles per section.
 - **Native pass.** The installed Selara 0.6.0 (`/Applications/Selara.app`; `index.html` and `src-tauri/` are unchanged since that release) on macOS in dark appearance, captured with `screencapture -l` at 920 × 640 and resized to 760 × 520. View-only: no settings were saved; the sheet was cancelled; the window size was restored and the app, which was not running beforehand, was terminated.
 - **Harness limits.** Headless WebKit does not render `backdrop-filter`, so browser captures show the sheet and update popover as see-through; the native capture (screenshot 11) shows they blur correctly. No translucency finding is based on browser captures. The browser cannot show vibrancy, the title bar, or window chrome; the mock paints a neutral gradient behind the transparent page to stand in for the Sidebar material.
 
@@ -16,7 +54,7 @@ Priorities: **P1** = significant reliability or accessibility problem; **P2** = 
 
 | Order | Finding and evidence | Proposed native pattern | Priority / effort |
 |---|---|---|---|
-| 1 | **Tab leaves the command sheet.** With buttons not in the Tab order (WebKit's default, and WKWebView's when macOS Keyboard navigation is off), Tab goes Label → Prompt → Advanced → `<body>`. The trap in `sheetKeyHandler` only intercepts Tab on the first/last element of a list that includes buttons, so it never fires. Encoded as the expected-failure test `command sheet keeps Tab focus inside the dialog`. | Handle every Tab/Shift-Tab in the trap: `preventDefault()` and move to the next/previous entry of `sheetFocusableElements()`. Remove `test.fail` once it passes. | P1 / S |
+| 1 | **Tab leaves the command sheet.** With buttons not in the Tab order (WebKit's default, and WKWebView's when macOS Keyboard navigation is off), Tab goes Label → Prompt → Advanced → `<body>`. The trap in `sheetKeyHandler` only intercepts Tab on the first/last element of a list that includes buttons, so it never fires. Encoded at audit time as the expected-failure test `command sheet keeps Tab focus inside the dialog`, which now passes. | Handle every Tab/Shift-Tab in the trap: `preventDefault()` and move to the next/previous entry of `sheetFocusableElements()`. Remove `test.fail` once it passes. | P1 / S |
 | 2 | **Save buttons and a status bar.** General, Limits, and Providers need "Save changes" / "Save and use"; the footer shows "Loaded", "Saved", "Usage refreshed" regardless of page (screenshot 06 shows "Usage refreshed" on Limits). Start at login already applies immediately ("no save needed"), so one page mixes both models. | System Settings applies each change when committed (toggle, pop-up choice, Return/blur in a field) and reports only errors, inline beside the control. Keep an explicit action only where it switches the active provider. Keep `#save-status` / `#save-dot` in the DOM for errors. | P2 / M |
 | 3 | **Floating shadowed cards and page headings.** Each group is a card with `0 8px 24px` shadow plus its own blur (native-lint: 17 shadows and 5 backdrop filters on Status), under a 22 px in-page `h1` and a lead paragraph; groups contain bold in-card section labels. | Inset grouped form: flat rounded group (no drop shadow, no per-card blur), 1 px row separators, label left and control trailing, secondary footnote text under the group. Put the page name at title-bar height beside the traffic lights, as System Settings does, and shorten or drop lead paragraphs. | P2 / M |
 | 4 | **Hard-coded accent next to system-accent controls.** Buttons, switches, links, and the selected sidebar icon use `--accent: #0a84ff`, while checkboxes have no `accent-color` and follow the system accent, rendering purple in the test engine (screenshots 03, 06). Users with a non-blue accent see two accents. | Use the system accent everywhere: `--accent: AccentColor` with the current value as fallback, and `accent-color: var(--accent)` on checkboxes. `AccentColor` needs WebKit 16.4+; the app's minimum is macOS 11, so keep the fallback. | P2 / S |

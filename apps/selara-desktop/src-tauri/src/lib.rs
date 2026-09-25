@@ -1719,6 +1719,54 @@ fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// Ask before a destructive action with a native alert attached to the
+/// Settings window. The confirm button carries the action's name (for
+/// example "Clear History"), as macOS alerts do, rather than OK.
+#[tauri::command]
+async fn confirm_action(
+    app: AppHandle,
+    window: tauri::Window,
+    title: String,
+    message: String,
+    confirm_label: String,
+) -> bool {
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            confirm_label,
+            "Cancel".into(),
+        ))
+        .parent(&window)
+        .blocking_show()
+}
+
+/// The macOS accent color as `#rrggbb`, so custom controls match the native
+/// checkboxes and switches. WebKit's CSS `AccentColor` is always the default
+/// blue inside a WKWebView, so the UI cannot read the user's choice itself.
+#[tauri::command]
+fn system_accent_color() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSColor, NSColorSpace};
+        let color =
+            NSColor::controlAccentColor().colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
+        let channel = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        Some(format!(
+            "#{:02x}{:02x}{:02x}",
+            channel(color.redComponent()),
+            channel(color.greenComponent()),
+            channel(color.blueComponent())
+        ))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Report the version of the writing runtime staged with this app, without
 /// launching a system CLI or depending on the user's PATH.
 #[tauri::command]
@@ -1814,6 +1862,8 @@ pub fn run() {
             open_accessibility_settings,
             app_version,
             bundled_codex_version,
+            system_accent_color,
+            confirm_action,
             cli_provider_status,
             check_for_updates,
             update_status,
@@ -2094,6 +2144,17 @@ mod tests {
         configured_menu_accelerator, is_transport_error, menu_command_id, updater_configured,
         UPDATER_PUBKEY_PLACEHOLDER,
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_accent_color_is_an_srgb_hex() {
+        let hex = super::system_accent_color().expect("macOS always reports an accent color");
+        assert_eq!(hex.len(), 7, "{hex}");
+        assert!(
+            hex.starts_with('#') && hex[1..].chars().all(|c| c.is_ascii_hexdigit()),
+            "{hex}"
+        );
+    }
 
     #[test]
     fn menu_command_ids_preserve_the_configured_id() {

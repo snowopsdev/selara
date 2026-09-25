@@ -31,7 +31,7 @@ Inspired by [theJayTea/WritingTools](https://github.com/theJayTea/WritingTools).
 - **Size limits.** A soft warning, a replacement caution, and a hard maximum, so a stray select-all never sends 100k characters to a metered API. They apply to menu, custom-instruction, and shortcut runs alike.
 - **Secret guard.** If the selection looks like it holds an API key, a private key block, a JWT, or a card number, Selara asks before sending it to a hosted provider; local servers are exempt.
 - **Live config.** Everything lives in one TOML file. The `serve` process watches the config directory for changes and re-registers hotkeys as soon as the Settings app saves (with a 5-second poll as a fallback), while staying idle otherwise.
-- **Menu-bar Settings app.** A Tauri tray app with Status, General, Providers, Commands, History, Usage, and Limits tabs. A single-line footer keeps the app version and update controls on the left and the latest status on the right. No Dock icon, closes to the tray.
+- **Menu-bar Settings app.** A Tauri tray app with Status, General, Providers, Commands, History, Usage, and Limits tabs. A single-line footer keeps the app version and update controls on the left and reports problems on the right. No Dock icon, closes to the tray.
 - **Local usage and cost.** The Usage tab and `selara usage` show requests and reported token counts for today, the last 30 days, and all time, plus a breakdown by model and provider. Costs are estimates for known models on their vendor's API; subscription, local, and custom endpoints remain unpriced. The ledger stays on your device.
 - **Scriptable CLI.** `selara init`, `selara list-commands`, `selara run <command>`, `selara usage`, and `selara key set|clear|status` for pipelines and quick checks.
 - **Keys in the keychain.** API keys go into the OS credential store (macOS Keychain) by default; `config.toml` stays free of secrets unless you choose otherwise.
@@ -110,13 +110,13 @@ Orca worktree setup copies ignored `.env` and `.env.*` files from the main check
 
 ## Settings app tour
 
-Settings changes are saved to the same `config.toml`. If `serve` is running, saved changes apply within about a second.
+Settings changes are saved to the same `config.toml`. General and Limits save each field as soon as you press Return or leave it, the way System Settings does; Providers and the command editor save with their buttons. If `serve` is running, saved changes apply within about a second. Right-click a command or History entry for its actions, and use ↑/↓ to move between tabs in the sidebar.
 
 ### Status
 
 The tab the app opens on. Four cards show whether everything is ready:
 
-- **selara serve**: whether the shell is running, with its pid. `serve` writes `serve.pid` next to the config file while it runs and removes it on exit; the card shows the path and the command to start it.
+- **selara serve**: whether the shell is running, with its pid. `serve` writes `serve.pid` next to the config file while it runs and removes it on exit; **Troubleshooting** on the card shows that path and the Terminal command to run it yourself.
 - **Accessibility**: the grant reported by Selara's managed `serve` process, with an **Open Accessibility settings** button when needed. A process started outside Settings reports unknown trust; restart it under Settings management to inspect its grant.
 - **Provider**: the saved connection, model, endpoint or executable, and auth mode. **Check connection** lists API models, checks the Codex sign-in, or checks an external CLI's version. CLI version checks do not establish account or model access. The API key is never displayed.
 - **Shortcuts**: the custom-instruction hotkey and every command that has its own shortcut.
@@ -125,7 +125,7 @@ The tab the app opens on. Four cards show whether everything is ready:
 
 ### App version and updates
 
-The footer spans the whole window on every tab. The left side shows the installed version, update state, and a button to check for updates. When a release is available, **Install and restart** appears there. Download progress and expandable details keep update errors and release notes accessible. The right side shows the latest Settings status, such as **Saved** or **Status refreshed**. Development builds may have automatic updates disabled.
+The footer spans the whole window on every tab. The left side shows the installed version, update state, and a button to check for updates. When a release is available, **Install and restart** appears there. Download progress and expandable details keep update errors and release notes accessible. The right side stays empty unless something goes wrong, such as a failed save; routine updates like **Saved** are announced to VoiceOver without taking space. Development builds may have automatic updates disabled.
 
 ### General
 
@@ -174,7 +174,7 @@ apps = ["Mail", "com.apple.Notes"]
 
 ### History
 
-Each completed rewrite produced while `serve` runs is recorded: the time, the command, the app the selection came from, a preview of the original text and the result, and **Copy result** / **Copy original** buttons that put either back on the clipboard. **Clear history** deletes the whole list after a confirmation. Historical records from older releases remain readable.
+Each completed rewrite produced while `serve` runs is recorded: the time, the command, the app the selection came from, a preview of the original text and the result, and a **Copy** button that puts the result back on the clipboard. Its arrow, or right-clicking the entry, offers **Copy Result** and **Copy Original**. **Clear history** deletes the whole list after a native confirmation. Historical records from older releases remain readable.
 
 **Not applied** means the completed result did not reach the paste step. **Paste unverified** means a paste was attempted but Selara could not confirm the edit; check your document before copying that result. Selara keeps these results available without interrupting you with a popup or automatically retrying an uncertain paste.
 
@@ -196,7 +196,7 @@ The current Providers, Commands, shortcut-recorder, and Usage screenshots use ex
 
 ### Limits
 
-Guard rails for large selections. Set any value to `0` to disable the corresponding warning. The soft warn, replacement caution, and secret guard are compact confirmations shown before a request or replacement. A command is never sent past the hard maximum.
+Guard rails for large selections. Changes save as soon as you press Return or leave a field; **Reset to Defaults** restores the standard values. Set any value to `0` to disable the corresponding warning. The soft warn, replacement caution, and secret guard are compact confirmations shown before a request or replacement. A command is never sent past the hard maximum.
 
 | Setting | Default | Effect |
 | --- | --- | --- |

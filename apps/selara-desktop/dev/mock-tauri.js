@@ -6,9 +6,13 @@
 //   ?scenario=configured|fresh|update|errors   starting state (default configured)
 //   &fail=config                                make get_config reject too
 //   &delay=<ms>                                 per-call latency (default 150)
+//   &accent=<hex>                               system accent, e.g. %23bf5af2 (default: none)
 //
-// window.__selaraMock exposes { emit(event, payload), calls, state } for tests
-// and for poking at the UI from the console.
+// window.__selaraMock exposes { emit(event, payload), calls, state, menu,
+// chooseMenuItem(text) } for tests and for poking at the UI from the console.
+// Native menus are not drawn; `menu` holds the last one the UI opened.
+// Set state.confirm = false to answer native confirmations with Cancel, and
+// state.failSaves = true to make save_config_section fail until reset.
 (function () {
   "use strict";
   if (window.__TAURI_INTERNALS__ || (window.__TAURI__ && window.__TAURI__.core)) return;
@@ -18,6 +22,7 @@
   const failConfig = params.get("fail") === "config";
   const delayParam = params.has("delay") ? Number(params.get("delay")) : NaN;
   const delay = Number.isFinite(delayParam) && delayParam >= 0 ? delayParam : 150;
+  const accent = /^#[0-9a-f]{6}$/i.test(params.get("accent") || "") ? params.get("accent") : null;
   const now = Math.floor(Date.now() / 1000);
 
   const clone = (value) => (value === undefined ? value : JSON.parse(JSON.stringify(value)));
@@ -136,6 +141,7 @@
     auth: scenario === "configured" ? clone(connected) : clone(signedOut),
     ax: scenario === "fresh" ? "missing" : "granted",
     autostart: scenario !== "fresh",
+    confirm: true,
     serveRunning: running,
     history: makeHistory(),
     usage: makeUsage(),
@@ -275,7 +281,7 @@
         if (failConfig) throw "Could not read ~/.config/selara/config.toml: invalid TOML at line 12";
         return clone(state.config);
       case "save_config_section":
-        if (scenario === "errors") throw "Could not write ~/.config/selara/config.toml: Permission denied (os error 13)";
+        if (scenario === "errors" || state.failSaves) throw "Could not write ~/.config/selara/config.toml: Permission denied (os error 13)";
         return applySection(args.section, args.value);
       case "save_config":
         state.config = clone(args.config);
@@ -329,6 +335,8 @@
       case "open_accessibility_settings": return null;
       case "app_version": return "0.6.0";
       case "bundled_codex_version": return "0.153.4";
+      case "system_accent_color": return accent;
+      case "confirm_action": return state.confirm !== false;
       case "update_status": return clone(state.update);
       case "check_for_updates":
         if (scenario === "errors") throw "Update check failed: network unreachable";
@@ -347,9 +355,11 @@
 
   const calls = [];
   function invoke(cmd, args) {
-    calls.push({ cmd, args: clone(args) });
+    const call = { cmd, args: clone(args), startedAt: performance.now(), finishedAt: null };
+    calls.push(call);
     return new Promise((resolve, reject) => {
       setTimeout(() => {
+        call.finishedAt = performance.now();
         try { resolve(handle(cmd, args)); } catch (e) { reject(e); }
       }, delay);
     });
@@ -361,8 +371,39 @@
     return () => listeners.get(event).delete(callback);
   }
 
-  window.__TAURI__ = { core: { invoke }, event: { listen } };
-  window.__selaraMock = { emit, calls, state };
+  // Minimal stand-in for @tauri-apps/api/menu: records the menu instead of
+  // drawing it, so tests can pick an item with chooseMenuItem(text).
+  let lastMenu = null;
+  const menuApi = {
+    Menu: {
+      async new(opts) {
+        const items = (opts && opts.items) || [];
+        const menu = {
+          closed: false,
+          async popup(at) {
+            lastMenu = { at: at || null, items, menu };
+            mock.menu = items.map((item) => (item.item === "Separator" ? "-" : { text: item.text, enabled: item.enabled !== false }));
+            mock.menuIds = items.filter((item) => item.id).map((item) => item.id);
+          },
+          async close() { menu.closed = true; mock.closedMenus += 1; },
+        };
+        return menu;
+      },
+    },
+  };
+  function chooseMenuItem(text) {
+    if (lastMenu && lastMenu.menu.closed) throw new Error("the open menu was already closed");
+    const item = lastMenu && lastMenu.items.find((i) => i.text === text);
+    if (!item) throw new Error("no open menu item named " + text);
+    if (item.enabled === false) throw new Error(text + " is disabled");
+    lastMenu = null;
+    return item.action && item.action(item.id);
+  }
+  class LogicalPosition { constructor(x, y) { this.x = x; this.y = y; } }
+
+  window.__TAURI__ = { core: { invoke }, event: { listen }, menu: menuApi, dpi: { LogicalPosition } };
+  const mock = { emit, calls, state, menu: null, menuIds: [], closedMenus: 0, chooseMenuItem };
+  window.__selaraMock = mock;
 
   // The real window is transparent over NSVisualEffectMaterial::Sidebar. A
   // plain browser would show white behind the glass, so paint a neutral
