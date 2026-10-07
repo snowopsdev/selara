@@ -1,0 +1,64 @@
+name: Codex runtime freshness
+
+on:
+  schedule:
+    # Weekly, Monday 07:00 UTC, an hour after the cargo audit run.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-runtime-freshness
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: compare with latest Codex release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # The status file carries the upstream tag; bump.py validates it as
+      # rust-v<int>.<int>.<int> before any title or body is rendered.
+      - name: Compare pinned runtime with upstream
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/codex-runtime/bump.py check > "$RUNNER_TEMP/status.json"
+          cat "$RUNNER_TEMP/status.json"
+
+      - name: Open, update, or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LABEL: codex-runtime-update
+        run: |
+          status="$RUNNER_TEMP/status.json"
+          gh label create "$LABEL" --color FBCA04 --description "Bundled Codex runtime is behind upstream" --force
+          number=$(gh issue list --label "$LABEL" --state open --json number --jq '.[0].number // empty')
+          behind=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["behind"]).lower())' "$status")
+          if [ "$behind" = true ]; then
+            title=$(python3 scripts/codex-runtime/bump.py issue "$status" --title)
+            python3 scripts/codex-runtime/bump.py issue "$status" --body > "$RUNNER_TEMP/body.md"
+            if [ -n "$number" ]; then
+              gh issue edit "$number" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+            else
+              gh issue create --title "$title" --label "$LABEL" --body-file "$RUNNER_TEMP/body.md"
+            fi
+          elif [ -n "$number" ]; then
+            gh issue close "$number" --comment "The bundled Codex runtime now matches the latest stable release."
+          fi
