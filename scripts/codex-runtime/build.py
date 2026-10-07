@@ -20,6 +20,9 @@ def digest(path):
     with path.open('rb') as f:
         return hashlib.file_digest(f, 'sha256').hexdigest()
 
+def patch_set_digest(patches):
+    return hashlib.sha256(b''.join(p.name.encode() + b'\0' + p.read_bytes() for p in patches)).hexdigest()
+
 SOURCE_INVENTORY = '.selara-source-inventory.json'
 
 def source_inventory(source):
@@ -45,6 +48,21 @@ def source_complete(source):
     except (OSError, ValueError):
         return False
 
+def extract_archive(archive, stage):
+    # Reject absolute paths and escaping links before extracting anything.
+    with tarfile.open(archive) as tar:
+        for member in tar.getmembers():
+            path = Path(member.name)
+            if path.is_absolute() or '..' in path.parts:
+                raise SystemExit('unsafe source archive path')
+            if member.issym() or member.islnk():
+                destination = path.parent / member.linkname
+                if Path(member.linkname).is_absolute() or '..' in destination.parts:
+                    raise SystemExit('unsafe source archive link')
+        tar.extractall(stage, filter='data')
+    unpacked, = stage.iterdir()
+    return unpacked
+
 def prepare_source(source, archive, patches):
     if source_complete(source):
         return
@@ -52,17 +70,7 @@ def prepare_source(source, archive, patches):
     # Prepare completely before discarding an incomplete cached source tree.
     with tempfile.TemporaryDirectory(dir=source.parent) as temporary:
         stage = Path(temporary)
-        with tarfile.open(archive) as tar:
-            for member in tar.getmembers():
-                path = Path(member.name)
-                if path.is_absolute() or '..' in path.parts:
-                    raise SystemExit('unsafe source archive path')
-                if member.issym() or member.islnk():
-                    destination = path.parent / member.linkname
-                    if Path(member.linkname).is_absolute() or '..' in destination.parts:
-                        raise SystemExit('unsafe source archive link')
-            tar.extractall(stage, filter='data')
-        unpacked, = stage.iterdir()
+        unpacked = extract_archive(archive, stage)
         for patch in patches:
             subprocess.run(['patch', '-p1', '--batch', '--forward', '-i', str(patch)], cwd=unpacked, check=True)
         (unpacked / SOURCE_INVENTORY).write_text(json.dumps(source_inventory(unpacked), sort_keys=True))
@@ -76,7 +84,7 @@ def main():
     if os.uname().sysname != 'Darwin' or os.uname().machine != 'arm64':
         raise SystemExit('This runtime lock targets macOS ARM64 only')
     patches = sorted((VENDOR / 'patches').glob('*.patch'))
-    patch_digest = hashlib.sha256(b''.join(p.name.encode() + b'\0' + p.read_bytes() for p in patches)).hexdigest()
+    patch_digest = patch_set_digest(patches)
     if patch_digest != LOCK['patches_sha256']:
         raise SystemExit('runtime patch digest mismatch; review and update runtime.toml')
     cache = ROOT / 'target/codex-runtime'

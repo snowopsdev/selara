@@ -94,6 +94,10 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --exclude selara-desktop
 
+      # GNU patch path of the runtime pin tooling; desktop-package covers BSD patch.
+      - name: Test Codex runtime pin tooling
+        run: python3 scripts/codex-runtime/test-bump.py -v
+
   macos:
     name: build / clippy (macOS shell)
     runs-on: macos-latest
@@ -190,7 +194,9 @@ jobs:
         run: node --test scripts/release/*.test.mjs
 
       - name: Test native source cache recovery
-        run: python3 scripts/codex-runtime/test-build.py -v
+        run: |
+          python3 scripts/codex-runtime/test-build.py -v
+          python3 scripts/codex-runtime/test-bump.py -v
 
       - name: Install frontend dependencies
         working-directory: apps/selara-desktop

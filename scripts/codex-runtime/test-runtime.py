@@ -15,6 +15,9 @@ import tempfile
 import threading
 import time
 import unittest
+import tomllib
+
+VERSION = tomllib.loads((Path(__file__).resolve().parents[2] / 'vendor/codex-runtime/runtime.toml').read_text())['source_version']
 
 MODEL = {
     'slug': 'fixture-writing', 'display_name': 'Fixture Writing', 'description': None,
@@ -50,7 +53,7 @@ class Server(http.server.ThreadingHTTPServer):
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_): pass
     def do_GET(self):
-        assert self.path.startswith('/models?client_version=0.153.4'), self.path
+        assert self.path.startswith(f'/models?client_version={VERSION}'), self.path
         body = json.dumps({'models': [MODEL]}).encode()
         self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_POST(self):
@@ -72,7 +75,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             {'type': 'response.output_text.delta', 'delta': 'SHOULD_NOT_DUPLICATE'},
             {'type': 'response.output_item.done', 'item': item},
         ]
-        if mode != 'truncated':
+        if mode == 'interrupted-completion':
+            events.append({'type': 'response.incomplete', 'response': {'id': 'response_fixture', 'status': 'incomplete', 'output': [], 'incomplete_details': {'reason': 'interrupted'}, 'usage': {'input_tokens': 8, 'output_tokens': 3, 'total_tokens': 11}}})
+        elif mode != 'truncated':
             events.append({'type': 'response.completed', 'response': {'id': 'response_fixture', 'status': 'completed', 'output': [], 'usage': {'input_tokens': 8, 'output_tokens': 3, 'total_tokens': 11, 'input_tokens_details': {'cached_tokens': 2}}}})
         try:
             for event in events:
@@ -187,6 +192,11 @@ web_search_request = true
         self.assertIn('error',self.client.rpc('turn/start',{'threadId':thread,'input':[{'type':'localImage','path':'/tmp/fixture.png'}]}))
     def test_truncated_stream_never_reports_success_or_partial_text(self):
         self.server.mode='truncated';thread,turn=self.start(); events=self.finish(thread,turn)
+        self.assertTrue(self.server.started.is_set(), events)
+        self.assertEqual(events[-1]['params']['turn']['status'],'failed')
+        self.assertFalse(any(e.get('method') in ['item/completed','thread/tokenUsage/updated'] for e in events))
+    def test_interrupted_completion_never_reports_success_or_partial_text(self):
+        self.server.mode='interrupted-completion';thread,turn=self.start();events=self.finish(thread,turn)
         self.assertTrue(self.server.started.is_set(), events)
         self.assertEqual(events[-1]['params']['turn']['status'],'failed')
         self.assertFalse(any(e.get('method') in ['item/completed','thread/tokenUsage/updated'] for e in events))

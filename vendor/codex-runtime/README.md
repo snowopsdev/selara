@@ -1,12 +1,14 @@
 # Pinned Selara Codex runtime
 
-Selara bundles a writing-only binary built inside the official Codex 0.153.4
-workspace. `runtime.toml` pins the peeled upstream commit, archive SHA-256,
-ordered patch-set SHA-256, Rust 1.95.0, and macOS 11 ARM64 target. The patch
-adds a small `selara-writing` binary crate and maintains authentication fixes;
-it preserves the upstream package version. The release archive's workspace
-lockfile still contains 0.0.0 entries, so the patch also normalizes those local
-workspace versions to 0.153.4 without updating third-party dependencies.
+Selara bundles a writing-only binary built inside the official Codex release
+pinned by `source_version` in `runtime.toml`. `runtime.toml` pins the peeled
+upstream commit, archive SHA-256, ordered patch-set SHA-256, Rust toolchain, and
+macOS ARM64 target. The patch adds a small `selara-writing` binary crate and
+maintains authentication fixes; it preserves the upstream package version. The
+release archive's workspace lockfile still contains 0.0.0 entries, so the patch
+also normalizes those local workspace versions to the pinned version without
+updating third-party dependencies.
+
 
 Build with Python 3.12+ and the pinned Rust toolchain:
 
@@ -100,3 +102,23 @@ spawns separate processes against synthetic stores and delayed
 mock refresh responses to exercise refresh/logout, refresh/login, simultaneous
 refresh, and pending-callback/logout races. Tests do not use real credentials or
 contact a model service.
+
+## Updating Codex
+
+ChatGPT only lists models whose `minimal_client_version` is at or below the
+runtime's version, so a stale pin hides newer subscription models. The weekly
+`Codex runtime freshness` workflow opens an issue when a newer stable release
+exists.
+
+```sh
+python3 scripts/codex-runtime/bump.py check            # compare with upstream, dry-run the patches
+python3 scripts/codex-runtime/bump.py prepare X.Y.Z    # baseline + patches in target/codex-runtime/rebase-X.Y.Z
+# resolve and delete every *.rej in that tree, then make selara-codex compile
+python3 scripts/codex-runtime/bump.py finish X.Y.Z     # regenerate the patch, runtime.toml, and NOTICE
+scripts/codex-runtime/build.sh
+```
+
+`finish` squashes the maintained changes into one patch, drops patches that
+upstream already contains, lets Cargo refresh only workspace entries in
+`Cargo.lock`, and refuses if any upstream third-party pin changed. Then run
+every suite under "Verification".

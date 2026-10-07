@@ -36,7 +36,7 @@ function fixture(t, missing, {withOrb = true} = {}) {
       return '';
     }
     if(basename(program)==='selara')return 'selara 0.4.1';
-    if(basename(program)==='selara-codex')return 'selara-codex 0.153.4';
+    if(basename(program)==='selara-codex')return `selara-codex ${lock.match(/^source_version = "([^"]+)"/m)[1]}`;
     throw new Error('Unexpected verification command');
   };
   return {temp,root,content,archive,pack,provenance,calls,run};
@@ -88,4 +88,17 @@ test('recovered releases whose source predates the orb keep their original requi
  const f=fixture(t,undefined,{withOrb:false});
  verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',f.run);
  assert.equal(f.calls.filter(x=>x==='codesign').length,4);
+});
+
+test('bundled runtime version comes from the recovered release\'s own pin',
+  /** An older release must be checked against the Codex version its own source pinned. */
+  t=>{
+ const f=fixture(t);
+ const pin=join(f.root,'vendor/codex-runtime/runtime.toml');
+ writeFileSync(pin,readFileSync(pin,'utf8').replace(/^source_version = "[^"]+"/m,'source_version = "0.1.0"'));
+ const repository=fileURLToPath(new URL('../../',import.meta.url));
+ const currentVersion=readFileSync(join(repository,'vendor/codex-runtime/runtime.toml'),'utf8').match(/^source_version = "([^"]+)"/m)[1];
+ const runAs=version=>(p,a)=>basename(p)==='selara-codex'?`selara-codex ${version}`:f.run(p,a);
+ verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',runAs('0.1.0'));
+ assert.throws(()=>verifyCliArchive(f.archive,f.root,'v0.4.1','0123456789',runAs(currentVersion)),/Unexpected bundled Codex version/);
 });

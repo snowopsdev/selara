@@ -5,9 +5,12 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 binary = Path(sys.argv[1]).resolve()
-assert subprocess.check_output([binary, '--version'], text=True).strip() == 'selara-codex 0.153.4'
+ROOT = Path(__file__).resolve().parents[2]
+VERSION = tomllib.loads((ROOT / 'vendor/codex-runtime/runtime.toml').read_text())['source_version']
+assert subprocess.check_output([binary, '--version'], text=True).strip() == f'selara-codex {VERSION}'
 with tempfile.TemporaryDirectory(prefix='selara-production-smoke-') as temp:
     home = Path(temp)
     env = dict(os.environ, CODEX_HOME=temp, HOME=temp)

@@ -106,7 +106,7 @@ The checked-in configuration enables updater artifacts and contains the persiste
 
 ### Native Codex runtime
 
-The app and CLI carry a native writing-only build of Codex 0.153.4. Build it with `scripts/codex-runtime/build.sh`; source revision, archive digest, patch digest, Rust version, and macOS minimum are pinned in `vendor/codex-runtime/runtime.toml`. Review and update the patch deliberately when upgrading Codex, then run the actual process and authentication-lock suites. See [vendor/codex-runtime/README.md](vendor/codex-runtime/README.md).
+The app and CLI carry a native writing-only build of the Codex release pinned in vendor/codex-runtime/runtime.toml. Build it with `scripts/codex-runtime/build.sh`; source revision, archive digest, patch digest, Rust version, and macOS minimum are pinned in `vendor/codex-runtime/runtime.toml`. Review and update the patch deliberately when upgrading Codex, then run the actual process and authentication-lock suites. See [vendor/codex-runtime/README.md](vendor/codex-runtime/README.md).
 
 Settings account state is independent of unsaved provider settings. `provider.codex_home` selects an absolute shared Codex home before `CODEX_HOME`, then `~/.codex`. No separate Codex installation or Node runtime is needed. Remove legacy `CODEX_BIN` and `CODEX_AUTH_JSON` overrides; select the existing store directory rather than copying tokens. Selara's BYOK credentials are separate. Shared Codex sign-out removes credentials for the selected home across its supported official stores; other Codex processes can also observe that sign-out.
 
