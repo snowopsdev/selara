@@ -102,3 +102,23 @@ spawns separate processes against synthetic stores and delayed
 mock refresh responses to exercise refresh/logout, refresh/login, simultaneous
 refresh, and pending-callback/logout races. Tests do not use real credentials or
 contact a model service.
+
+## Updating Codex
+
+ChatGPT only lists models whose `minimal_client_version` is at or below the
+runtime's version, so a stale pin hides newer subscription models. The weekly
+`Codex runtime freshness` workflow opens an issue when a newer stable release
+exists.
+
+```sh
+python3 scripts/codex-runtime/bump.py check            # compare with upstream, dry-run the patches
+python3 scripts/codex-runtime/bump.py prepare X.Y.Z    # baseline + patches in target/codex-runtime/rebase-X.Y.Z
+# resolve and delete every *.rej in that tree, then make selara-codex compile
+python3 scripts/codex-runtime/bump.py finish X.Y.Z     # regenerate the patch, runtime.toml, and NOTICE
+scripts/codex-runtime/build.sh
+```
+
+`finish` squashes the maintained changes into one patch, drops patches that
+upstream already contains, lets Cargo refresh only workspace entries in
+`Cargo.lock`, and refuses if any upstream third-party pin changed. Then run
+every suite under "Verification".

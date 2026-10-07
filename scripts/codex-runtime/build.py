@@ -48,6 +48,21 @@ def source_complete(source):
     except (OSError, ValueError):
         return False
 
+def extract_archive(archive, stage):
+    # Reject absolute paths and escaping links before extracting anything.
+    with tarfile.open(archive) as tar:
+        for member in tar.getmembers():
+            path = Path(member.name)
+            if path.is_absolute() or '..' in path.parts:
+                raise SystemExit('unsafe source archive path')
+            if member.issym() or member.islnk():
+                destination = path.parent / member.linkname
+                if Path(member.linkname).is_absolute() or '..' in destination.parts:
+                    raise SystemExit('unsafe source archive link')
+        tar.extractall(stage, filter='data')
+    unpacked, = stage.iterdir()
+    return unpacked
+
 def prepare_source(source, archive, patches):
     if source_complete(source):
         return
@@ -55,17 +70,7 @@ def prepare_source(source, archive, patches):
     # Prepare completely before discarding an incomplete cached source tree.
     with tempfile.TemporaryDirectory(dir=source.parent) as temporary:
         stage = Path(temporary)
-        with tarfile.open(archive) as tar:
-            for member in tar.getmembers():
-                path = Path(member.name)
-                if path.is_absolute() or '..' in path.parts:
-                    raise SystemExit('unsafe source archive path')
-                if member.issym() or member.islnk():
-                    destination = path.parent / member.linkname
-                    if Path(member.linkname).is_absolute() or '..' in destination.parts:
-                        raise SystemExit('unsafe source archive link')
-            tar.extractall(stage, filter='data')
-        unpacked, = stage.iterdir()
+        unpacked = extract_archive(archive, stage)
         for patch in patches:
             subprocess.run(['patch', '-p1', '--batch', '--forward', '-i', str(patch)], cwd=unpacked, check=True)
         (unpacked / SOURCE_INVENTORY).write_text(json.dumps(source_inventory(unpacked), sort_keys=True))
