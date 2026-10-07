@@ -15,6 +15,9 @@ import tempfile
 import threading
 import time
 import unittest
+import tomllib
+
+VERSION = tomllib.loads((Path(__file__).resolve().parents[2] / 'vendor/codex-runtime/runtime.toml').read_text())['source_version']
 
 MODEL = {
     'slug': 'fixture-writing', 'display_name': 'Fixture Writing', 'description': None,
@@ -50,7 +53,7 @@ class Server(http.server.ThreadingHTTPServer):
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_): pass
     def do_GET(self):
-        assert self.path.startswith('/models?client_version=0.153.4'), self.path
+        assert self.path.startswith(f'/models?client_version={VERSION}'), self.path
         body = json.dumps({'models': [MODEL]}).encode()
         self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_POST(self):

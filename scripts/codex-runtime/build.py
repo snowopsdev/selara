@@ -20,6 +20,9 @@ def digest(path):
     with path.open('rb') as f:
         return hashlib.file_digest(f, 'sha256').hexdigest()
 
+def patch_set_digest(patches):
+    return hashlib.sha256(b''.join(p.name.encode() + b'\0' + p.read_bytes() for p in patches)).hexdigest()
+
 SOURCE_INVENTORY = '.selara-source-inventory.json'
 
 def source_inventory(source):
@@ -76,7 +79,7 @@ def main():
     if os.uname().sysname != 'Darwin' or os.uname().machine != 'arm64':
         raise SystemExit('This runtime lock targets macOS ARM64 only')
     patches = sorted((VENDOR / 'patches').glob('*.patch'))
-    patch_digest = hashlib.sha256(b''.join(p.name.encode() + b'\0' + p.read_bytes() for p in patches)).hexdigest()
+    patch_digest = patch_set_digest(patches)
     if patch_digest != LOCK['patches_sha256']:
         raise SystemExit('runtime patch digest mismatch; review and update runtime.toml')
     cache = ROOT / 'target/codex-runtime'

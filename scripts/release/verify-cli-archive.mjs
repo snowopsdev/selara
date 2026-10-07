@@ -34,9 +34,11 @@ export function verifyCliArchive(archive, root, tag, teamId, run = command) {
       run("codesign", ["--verify", "--strict", "-R", requirement, join(content, binary)]);
     }
     if (run(join(content, "selara"), ["--version"]).trim() !== `selara ${tag.slice(1)}`) throw new Error("Recovered CLI version does not match release");
-    if (run(join(content, "selara-codex"), ["--version"]).trim() !== "selara-codex 0.153.4") throw new Error("Unexpected bundled Codex version");
-    const provenance = JSON.parse(readFileSync(join(content, "selara-codex.provenance.json")));
     const pinned = readFileSync(join(root, "vendor/codex-runtime/runtime.toml"), "utf8");
+    const runtimeVersion = pinned.match(/^source_version = "([^"]+)"/m)?.[1];
+    if (!runtimeVersion) throw new Error("Pinned Codex version missing from runtime.toml");
+    if (run(join(content, "selara-codex"), ["--version"]).trim() !== `selara-codex ${runtimeVersion}`) throw new Error("Unexpected bundled Codex version");
+    const provenance = JSON.parse(readFileSync(join(content, "selara-codex.provenance.json")));
     for (const key of ["source_revision", "patches_sha256", "target", "minimum_macos"]) {
       if (provenance[key] !== pinned.match(new RegExp(`^${key} = "([^"]+)"`, "m"))?.[1]) throw new Error(`Recovered runtime provenance mismatch: ${key}`);
     }

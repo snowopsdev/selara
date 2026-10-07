@@ -73,5 +73,14 @@ class SourceCacheTests(unittest.TestCase):
         self.assertEqual(manifest.read_text(), 'incomplete source retained until replacement is ready')
 
 
+class PinConsistencyTests(unittest.TestCase):
+    def test_runtime_pin_files_agree(self):
+        lock = build.LOCK
+        self.assertTrue(lock['source_url'].endswith('/' + lock['source_revision']))
+        notice = (build.VENDOR / 'NOTICE').read_text()
+        self.assertIn(f"rust-v{lock['source_version']}", notice)
+        patches = sorted((build.VENDOR / 'patches').glob('*.patch'))
+        self.assertEqual(build.patch_set_digest(patches), lock['patches_sha256'])
+
 if __name__ == '__main__':
     unittest.main()

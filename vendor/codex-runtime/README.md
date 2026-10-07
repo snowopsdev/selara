@@ -1,12 +1,14 @@
 # Pinned Selara Codex runtime
 
-Selara bundles a writing-only binary built inside the official Codex 0.153.4
-workspace. `runtime.toml` pins the peeled upstream commit, archive SHA-256,
-ordered patch-set SHA-256, Rust 1.95.0, and macOS 11 ARM64 target. The patch
-adds a small `selara-writing` binary crate and maintains authentication fixes;
-it preserves the upstream package version. The release archive's workspace
-lockfile still contains 0.0.0 entries, so the patch also normalizes those local
-workspace versions to 0.153.4 without updating third-party dependencies.
+Selara bundles a writing-only binary built inside the official Codex release
+pinned by `source_version` in `runtime.toml`. `runtime.toml` pins the peeled
+upstream commit, archive SHA-256, ordered patch-set SHA-256, Rust toolchain, and
+macOS ARM64 target. The patch adds a small `selara-writing` binary crate and
+maintains authentication fixes; it preserves the upstream package version. The
+release archive's workspace lockfile still contains 0.0.0 entries, so the patch
+also normalizes those local workspace versions to the pinned version without
+updating third-party dependencies.
+
 
 Build with Python 3.12+ and the pinned Rust toolchain:
 
