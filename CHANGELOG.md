@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/snowopsdev/selara/compare/v0.7.0...v0.7.1) (2026-10-08)
+
+
+### Documentation
+
+* **readme:** Describe the 0.7 moment of use and Settings redesign ([#138](https://github.com/snowopsdev/selara/issues/138)) ([1cd465f](https://github.com/snowopsdev/selara/commit/1cd465f1deb7a4aab0ce86b6a777fa98707d56bd))
+
 ## [0.7.0](https://github.com/snowopsdev/selara/compare/v0.6.0...v0.7.0) (2026-10-08)
 
 
