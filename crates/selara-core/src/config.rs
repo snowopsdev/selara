@@ -6,6 +6,7 @@ use crate::commands::{builtin_commands, normalize_commands, WritingCommand};
 use crate::error::CoreError;
 use crate::providers::{provider_from_config, ChatGptCodexProvider, LlmProvider, ProviderKind};
 use crate::secrets;
+use crate::usage;
 
 /// Where `resolve_api_key` would take the key from, in priority order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,6 +485,26 @@ impl AppConfig {
             .map(str::trim)
             .filter(|m| !m.is_empty())
             .unwrap_or(&self.provider.model)
+    }
+
+    /// Label the active provider's requests carry in the usage ledger
+    /// (`UsageEvent::kind`), so a caller can match a run to its
+    /// `UsageSummary::providers` entry. Mirrors the choice
+    /// [`build_provider`](Self::build_provider) makes.
+    pub fn usage_kind(&self) -> &'static str {
+        match self.provider.kind {
+            ProviderKind::ClaudeCli => usage::KIND_CLAUDE_CLI,
+            ProviderKind::CursorCli => usage::KIND_CURSOR_CLI,
+            ProviderKind::OpenCodeCli => usage::KIND_OPEN_CODE_CLI,
+            ProviderKind::OpenAiCompatible
+                if matches!(self.provider.auth, ProviderAuth::ChatGpt) =>
+            {
+                usage::KIND_CHATGPT_CODEX
+            }
+            ProviderKind::OpenAiCompatible => usage::KIND_OPENAI_COMPATIBLE,
+            ProviderKind::OpenRouter => usage::KIND_OPENROUTER,
+            ProviderKind::Anthropic => usage::KIND_ANTHROPIC,
+        }
     }
 
     /// [`build_provider`](Self::build_provider) honouring the command's model override.
@@ -1166,6 +1187,38 @@ model = "gpt-4o-mini"
             .apply_section("limits", serde_json::json!({"soft_warn_chars": "many"}))
             .unwrap_err();
         assert!(err.to_string().contains("invalid `limits`"), "{err}");
+    }
+
+    #[test]
+    fn usage_kind_matches_the_provider_that_records() {
+        let mut cfg = AppConfig::default();
+        let cases = [
+            (
+                ProviderKind::OpenAiCompatible,
+                ProviderAuth::ApiKey,
+                "openai_compatible",
+            ),
+            (
+                ProviderKind::OpenAiCompatible,
+                ProviderAuth::ChatGpt,
+                "chatgpt_codex",
+            ),
+            (ProviderKind::OpenRouter, ProviderAuth::ApiKey, "openrouter"),
+            // ChatGPT sign-in only applies to the OpenAI-compatible kind.
+            (ProviderKind::Anthropic, ProviderAuth::ChatGpt, "anthropic"),
+            (ProviderKind::ClaudeCli, ProviderAuth::ApiKey, "claude_cli"),
+            (ProviderKind::CursorCli, ProviderAuth::ApiKey, "cursor_cli"),
+            (
+                ProviderKind::OpenCodeCli,
+                ProviderAuth::ApiKey,
+                "open_code_cli",
+            ),
+        ];
+        for (kind, auth, label) in cases {
+            cfg.provider.kind = kind;
+            cfg.provider.auth = auth;
+            assert_eq!(cfg.usage_kind(), label, "{kind:?} {auth:?}");
+        }
     }
 
     #[test]

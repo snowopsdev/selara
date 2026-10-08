@@ -115,6 +115,9 @@ pub const KIND_OPENAI_COMPATIBLE: &str = "openai_compatible";
 pub const KIND_OPENROUTER: &str = "openrouter";
 pub const KIND_ANTHROPIC: &str = "anthropic";
 pub const KIND_CHATGPT_CODEX: &str = "chatgpt_codex";
+pub const KIND_CLAUDE_CLI: &str = "claude_cli";
+pub const KIND_CURSOR_CLI: &str = "cursor_cli";
+pub const KIND_OPEN_CODE_CLI: &str = "open_code_cli";
 
 /// Newest events kept in memory (oldest are dropped past this).
 const IN_MEMORY_CAP: usize = 10_000;

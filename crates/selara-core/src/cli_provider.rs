@@ -401,9 +401,9 @@ impl LlmProvider for CliProvider {
         let out = run_process(cmd, input.as_bytes(), RUN_TIMEOUT).await?;
         let reply = parse_reply(self.kind, &out)?;
         let kind = match self.kind {
-            ProviderKind::ClaudeCli => "claude_cli",
-            ProviderKind::CursorCli => "cursor_cli",
-            _ => "open_code_cli",
+            ProviderKind::ClaudeCli => usage::KIND_CLAUDE_CLI,
+            ProviderKind::CursorCli => usage::KIND_CURSOR_CLI,
+            _ => usage::KIND_OPEN_CODE_CLI,
         };
         usage::record_timed(kind, &self.model, "", reply.usage, started.elapsed());
         Ok(reply.text)
