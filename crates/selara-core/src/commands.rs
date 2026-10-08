@@ -36,6 +36,18 @@ pub struct WritingCommand {
     /// the same matching style as `excluded_apps`. See [`command_applies_to`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apps: Vec<String>,
+    /// Short symbol shown for this command in Settings, the menu bar
+    /// preview, and History (one grapheme, e.g. "✂︎"). `None` means the UI
+    /// derives a monogram from the label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glyph: Option<String>,
+    /// Identity color as `#rrggbb`. `None` means the UI derives one from the id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Show the result as a diff near the selection and replace only after
+    /// the user accepts it, instead of replacing as soon as the reply arrives.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review: bool,
 }
 
 /// Normalize command data written by schema-1 builds.
@@ -128,6 +140,9 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         },
         WritingCommand {
             id: "rewrite".into(),
@@ -137,6 +152,9 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         },
         WritingCommand {
             id: "friendly".into(),
@@ -146,6 +164,9 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         },
         WritingCommand {
             id: "professional".into(),
@@ -155,6 +176,9 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         },
         WritingCommand {
             id: "concise".into(),
@@ -164,6 +188,9 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         },
         WritingCommand {
             id: "summary".into(),
@@ -173,6 +200,9 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         },
         WritingCommand {
             id: "key_points".into(),
@@ -182,6 +212,9 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         },
         WritingCommand {
             id: "table".into(),
@@ -191,6 +224,9 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         },
         WritingCommand {
             id: "translate".into(),
@@ -200,6 +236,9 @@ pub fn builtin_commands() -> Vec<WritingCommand> {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         },
     ]
 }
@@ -737,6 +776,9 @@ mod tests {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         }
     }
 
@@ -749,6 +791,9 @@ mod tests {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         }
     }
 
@@ -1012,6 +1057,9 @@ mod tests {
             hotkey: None,
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         }
     }
 
@@ -1128,6 +1176,9 @@ mod tests {
             hotkey: hotkey.map(str::to_string),
             model: None,
             apps: Vec::new(),
+            glyph: None,
+            color: None,
+            review: false,
         }
     }
 

@@ -1,4 +1,7 @@
+mod native_apps;
+mod share_image;
 mod shortcut_recording;
+mod try_run;
 mod update_backup;
 
 use selara_core::app_server;
@@ -1767,6 +1770,23 @@ fn system_accent_color() -> Option<String> {
     }
 }
 
+/// Run a draft command on sample text with the active provider (the model
+/// override when given), through the same cleanup as a real run. Counts
+/// toward Usage. Errors are user-readable.
+#[tauri::command]
+async fn try_command(
+    prompt: String,
+    text: String,
+    model: Option<String>,
+) -> Result<try_run::TryResult, String> {
+    // A ChatGPT-backed try would start the Codex runtime while an account
+    // change or update is replacing it, like the other app-server commands.
+    if MAINTENANCE.load(Ordering::SeqCst) {
+        return Err("An account change or update is in progress".into());
+    }
+    try_run::run(prompt, text, model).await
+}
+
 /// Report the version of the writing runtime staged with this app, without
 /// launching a system CLI or depending on the user's PATH.
 #[tauri::command]
@@ -1867,7 +1887,13 @@ pub fn run() {
             cli_provider_status,
             check_for_updates,
             update_status,
-            install_update
+            install_update,
+            try_command,
+            native_apps::app_icon,
+            native_apps::running_apps,
+            native_apps::choose_app,
+            share_image::copy_png,
+            share_image::save_png
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]

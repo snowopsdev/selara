@@ -53,7 +53,15 @@ fn main() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
         .collect::<Vec<_>>();
     sources.sort();
-    sources.push(native.join("Progress.swift"));
+    // Every top-level Swift file in native/ is part of the module (Progress,
+    // the selection overlay, the instruction popover, ...); Tests/ is not.
+    let mut shell = std::fs::read_dir(&native)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
+        .collect::<Vec<_>>();
+    shell.sort();
+    sources.extend(shell);
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     output(
         Command::new(&swift)

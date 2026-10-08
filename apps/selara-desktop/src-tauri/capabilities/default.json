@@ -46,6 +46,12 @@
     "allow-update-status",
     "allow-install-update",
     "allow-usage-summary",
-    "allow-clear-usage"
+    "allow-clear-usage",
+    "allow-try-command",
+    "allow-app-icon",
+    "allow-running-apps",
+    "allow-choose-app",
+    "allow-copy-png",
+    "allow-save-png"
   ]
 }

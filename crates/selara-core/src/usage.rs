@@ -1,13 +1,15 @@
 //! Local usage ledger: token counts per request, kept on this machine only.
 //!
-//! Providers call [`record`] with whatever token counts the API reported.
+//! Providers call [`record_timed`] with whatever token counts the API reported
+//! and how long the request took.
 //! Events go to an in-memory list and, once [`set_store`] has been given a
 //! path, are appended as one JSON line each to `usage.jsonl` next to the
 //! config file (owner-only). Nothing here talks to the network; the numbers
 //! never leave the machine. [`summary`] aggregates the file into per-model
 //! totals plus `today` (the user's local calendar day) / `last_30_days` /
 //! `all_time` buckets, with an estimated cost from [`price_per_million`]
-//! where the model is known *and* the request went to that vendor's own API.
+//! where the model is known *and* the request went to that vendor's own API,
+//! plus a 30-day local daily series and per-provider recency and latency.
 
 use crate::error::CoreError;
 use serde::{Deserialize, Serialize};
@@ -15,7 +17,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Tokens billed for one request, as the provider reported them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +44,10 @@ pub struct UsageEvent {
     /// The request completed, but its provider did not report token counts.
     #[serde(default)]
     pub tokens_missing: bool,
+    /// Wall-clock time from sending the request to the complete reply.
+    /// Absent on events recorded before timing was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// Totals for one time window (or one model).
@@ -68,6 +74,28 @@ pub struct ModelUsage {
     pub totals: UsageBucket,
 }
 
+/// Totals for one local calendar day.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DailyUsage {
+    /// Local date as `YYYY-MM-DD`.
+    pub day: String,
+    pub requests: u64,
+    pub cost_usd: Option<f64>,
+}
+
+/// Recency and timing for one provider label (`UsageEvent::kind`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderActivity {
+    pub kind: String,
+    /// Unix seconds of the newest event.
+    pub last_ts: u64,
+    /// Median `duration_ms` over the newest timed events, if any were timed.
+    pub median_ms: Option<u64>,
+    /// Newest timed durations, oldest first (at most 20).
+    pub recent_ms: Vec<u64>,
+    pub last_30_days: UsageBucket,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageSummary {
     pub path: String,
@@ -75,6 +103,11 @@ pub struct UsageSummary {
     pub last_30_days: UsageBucket,
     pub all_time: UsageBucket,
     pub models: Vec<ModelUsage>,
+    /// The 30 local days ending today, oldest first, including empty days.
+    #[serde(default)]
+    pub daily: Vec<DailyUsage>,
+    #[serde(default)]
+    pub providers: Vec<ProviderActivity>,
 }
 
 /// Provider labels used in the ledger.
@@ -82,10 +115,17 @@ pub const KIND_OPENAI_COMPATIBLE: &str = "openai_compatible";
 pub const KIND_OPENROUTER: &str = "openrouter";
 pub const KIND_ANTHROPIC: &str = "anthropic";
 pub const KIND_CHATGPT_CODEX: &str = "chatgpt_codex";
+pub const KIND_CLAUDE_CLI: &str = "claude_cli";
+pub const KIND_CURSOR_CLI: &str = "cursor_cli";
+pub const KIND_OPEN_CODE_CLI: &str = "open_code_cli";
 
 /// Newest events kept in memory (oldest are dropped past this).
 const IN_MEMORY_CAP: usize = 10_000;
 const DAY_SECS: u64 = 86_400;
+/// Local days in [`UsageSummary::daily`], today included.
+pub const DAILY_DAYS: usize = 30;
+/// Timed requests per provider kept for its latency sparkline and median.
+pub const RECENT_TIMINGS: usize = 20;
 
 static EVENTS: Mutex<Vec<UsageEvent>> = Mutex::new(Vec::new());
 static STORE: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -99,7 +139,7 @@ pub fn usage_path(config_path: &Path) -> PathBuf {
     config_path.with_file_name("usage.jsonl")
 }
 
-/// Set (or unset) the file every later [`record`] appends to.
+/// Set (or unset) the file every later [`record_timed`] appends to.
 pub fn set_store(path: Option<PathBuf>) {
     *lock(&STORE) = path;
 }
@@ -141,11 +181,34 @@ fn url_host(url: &str) -> String {
 /// logged and otherwise ignored: usage accounting must never fail a
 /// completion.
 pub fn record(kind: &str, model: &str, base_url: &str, usage: TokenUsage) {
-    record_optional(kind, model, base_url, Some(usage));
+    push_event(kind, model, base_url, Some(usage), None);
 }
 
 /// Count a completed request even when the CLI omits token metadata.
 pub fn record_optional(kind: &str, model: &str, base_url: &str, usage: Option<TokenUsage>) {
+    push_event(kind, model, base_url, usage, None);
+}
+
+/// [`record_optional`] plus how long the request took, from sending it to the
+/// complete reply. The Providers page derives its latency median from these.
+pub fn record_timed(
+    kind: &str,
+    model: &str,
+    base_url: &str,
+    usage: Option<TokenUsage>,
+    elapsed: Duration,
+) {
+    let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    push_event(kind, model, base_url, usage, Some(ms));
+}
+
+fn push_event(
+    kind: &str,
+    model: &str,
+    base_url: &str,
+    usage: Option<TokenUsage>,
+    duration_ms: Option<u64>,
+) {
     let host = url_host(base_url);
     let tokens = usage.unwrap_or_default();
     let event = UsageEvent {
@@ -156,6 +219,7 @@ pub fn record_optional(kind: &str, model: &str, base_url: &str, usage: Option<To
         input: tokens.input,
         output: tokens.output,
         tokens_missing: usage.is_none(),
+        duration_ms,
     };
     {
         let mut events = lock(&EVENTS);
@@ -251,9 +315,124 @@ fn local_day_start(now: u64) -> u64 {
     u64::try_from(start).unwrap_or(0)
 }
 
+/// Local calendar date of a Unix timestamp, in the zone in effect at that
+/// instant. Falls back to the UTC date out of chrono's range.
+fn local_date(ts: u64) -> chrono::NaiveDate {
+    let utc = chrono::DateTime::from_timestamp(ts as i64, 0).unwrap_or_default();
+    utc.with_timezone(&chrono::Local).date_naive()
+}
+
+/// `YYYY-MM-DD`, without depending on chrono's formatting feature.
+fn day_label(date: chrono::NaiveDate) -> String {
+    use chrono::Datelike;
+    format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())
+}
+
+/// The [`DAILY_DAYS`] local days ending with the one containing `now`, oldest
+/// first, empty days included. Each event lands on its own local date (via
+/// `date_of`) rather than on fixed 24 h slices back from midnight, so a DST
+/// change inside the window shifts no request into the neighbouring day.
+fn daily_series(
+    events: &[UsageEvent],
+    now: u64,
+    date_of: impl Fn(u64) -> chrono::NaiveDate,
+) -> Vec<DailyUsage> {
+    let today = date_of(now);
+    let days: Vec<chrono::NaiveDate> = (0..DAILY_DAYS as u64)
+        .rev()
+        .map(|back| {
+            today
+                .checked_sub_days(chrono::Days::new(back))
+                .unwrap_or(today)
+        })
+        .collect();
+    let mut out: Vec<DailyUsage> = days
+        .iter()
+        .map(|d| DailyUsage {
+            day: day_label(*d),
+            ..Default::default()
+        })
+        .collect();
+    let first = days[0];
+    for e in events {
+        let date = date_of(e.ts);
+        if date < first || date > today {
+            continue;
+        }
+        let idx = (date - first).num_days() as usize;
+        let Some(slot) = out.get_mut(idx) else {
+            continue;
+        };
+        slot.requests += 1;
+        if let Some(c) = event_cost(e) {
+            slot.cost_usd = Some(slot.cost_usd.unwrap_or(0.0) + c);
+        }
+    }
+    out
+}
+
+/// Median of `values` (the mean of the middle two for an even count).
+fn median(values: &[u64]) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let mid = sorted.len() / 2;
+    Some(if sorted.len() % 2 == 1 {
+        sorted[mid]
+    } else {
+        // Widen so two huge durations cannot overflow the sum.
+        ((u128::from(sorted[mid - 1]) + u128::from(sorted[mid])) / 2) as u64
+    })
+}
+
+/// One [`ProviderActivity`] per `kind` in the ledger, most recently used
+/// first. `month_start` is the same trailing-window start as the summary's
+/// `last_30_days`, so a provider's bucket adds up to its share of that tile.
+fn provider_activity(events: &[UsageEvent], month_start: u64) -> Vec<ProviderActivity> {
+    // (ts, ledger position, ms): ledger order breaks ties between same-second
+    // events so "newest" stays the most recently written.
+    let mut timings: BTreeMap<&str, Vec<(u64, usize, u64)>> = BTreeMap::new();
+    let mut per_kind: BTreeMap<&str, ProviderActivity> = BTreeMap::new();
+    for (pos, e) in events.iter().enumerate() {
+        let entry = per_kind
+            .entry(e.kind.as_str())
+            .or_insert_with(|| ProviderActivity {
+                kind: e.kind.clone(),
+                ..Default::default()
+            });
+        entry.last_ts = entry.last_ts.max(e.ts);
+        if e.ts >= month_start {
+            entry.last_30_days.add(e, event_cost(e));
+        }
+        if let Some(ms) = e.duration_ms {
+            timings
+                .entry(e.kind.as_str())
+                .or_default()
+                .push((e.ts, pos, ms));
+        }
+    }
+    let mut out: Vec<ProviderActivity> = per_kind
+        .into_iter()
+        .map(|(kind, mut activity)| {
+            if let Some(mut timed) = timings.remove(kind) {
+                timed.sort_unstable();
+                let skip = timed.len().saturating_sub(RECENT_TIMINGS);
+                activity.recent_ms = timed[skip..].iter().map(|(_, _, ms)| *ms).collect();
+                activity.median_ms = median(&activity.recent_ms);
+            }
+            activity
+        })
+        .collect();
+    // Stable sort over the kind-ordered map keeps ties alphabetical.
+    out.sort_by_key(|p| std::cmp::Reverse(p.last_ts));
+    out
+}
+
 /// Aggregate `events` as of `now` (Unix seconds). "Today" is the local
 /// calendar day containing `now`; "last 30 days" is the trailing 30 × 24 h
-/// window.
+/// window; `daily` holds the 30 local days ending today.
 pub fn summarize(path: &Path, events: &[UsageEvent], now: u64) -> UsageSummary {
     let day_start = local_day_start(now);
     let month_start = now.saturating_sub(30 * DAY_SECS);
@@ -284,6 +463,8 @@ pub fn summarize(path: &Path, events: &[UsageEvent], now: u64) -> UsageSummary {
             totals,
         })
         .collect();
+    out.daily = daily_series(events, now, local_date);
+    out.providers = provider_activity(events, month_start);
     out
 }
 
@@ -386,6 +567,7 @@ mod tests {
             input,
             output,
             tokens_missing: false,
+            duration_ms: None,
         }
     }
 
@@ -595,5 +777,200 @@ mod tests {
                 .unwrap()
                 .tokens_missing
         );
+    }
+
+    fn timed(ts: u64, kind: &str, ms: Option<u64>) -> UsageEvent {
+        UsageEvent {
+            kind: kind.into(),
+            duration_ms: ms,
+            ..ev(ts, "gpt-4o-mini", 10, 10)
+        }
+    }
+
+    #[test]
+    fn duration_round_trips_and_old_lines_still_parse() {
+        let mut e = ev(100, "gpt-4o", 1, 2);
+        let untimed = serde_json::to_string(&e).unwrap();
+        assert!(!untimed.contains("duration_ms"), "{untimed}");
+        e.duration_ms = Some(1234);
+        let line = serde_json::to_string(&e).unwrap();
+        assert!(line.contains(r#""duration_ms":1234"#), "{line}");
+        assert_eq!(serde_json::from_str::<UsageEvent>(&line).unwrap(), e);
+        // A line written before timing (and before endpoint/tokens_missing).
+        let old = r#"{"ts":5,"kind":"anthropic","model":"m","input":1,"output":2}"#;
+        let parsed = serde_json::from_str::<UsageEvent>(old).unwrap();
+        assert_eq!(parsed.duration_ms, None);
+        assert_eq!(parsed.input, 1);
+    }
+
+    #[test]
+    fn record_timed_keeps_milliseconds() {
+        let model = "usage-unit-record-timed";
+        record_timed(
+            KIND_ANTHROPIC,
+            model,
+            "https://api.anthropic.com",
+            None,
+            Duration::from_micros(1_500_900),
+        );
+        record(KIND_ANTHROPIC, model, "", TokenUsage::default());
+        let mine: Vec<UsageEvent> = in_memory()
+            .into_iter()
+            .filter(|e| e.model == model)
+            .collect();
+        assert_eq!(mine.len(), 2);
+        assert_eq!(mine[0].duration_ms, Some(1500));
+        assert!(mine[0].tokens_missing);
+        assert_eq!(mine[0].endpoint.as_deref(), Some("api.anthropic.com"));
+        assert_eq!(mine[1].duration_ms, None, "untimed record stays untimed");
+    }
+
+    #[test]
+    fn empty_ledger_still_has_thirty_empty_days_ending_today() {
+        let now = 1_800_000_123;
+        let s = summarize(Path::new("/x"), &[], now);
+        assert_eq!(s.daily.len(), DAILY_DAYS);
+        assert!(s
+            .daily
+            .iter()
+            .all(|d| d.requests == 0 && d.cost_usd.is_none()));
+        assert_eq!(s.daily.last().unwrap().day, day_label(local_date(now)));
+        assert!(s.providers.is_empty());
+        // Consecutive local dates, oldest first.
+        for pair in s.daily.windows(2) {
+            let a = chrono::NaiveDate::parse_from_str(&pair[0].day, "%Y-%m-%d").unwrap();
+            let b = chrono::NaiveDate::parse_from_str(&pair[1].day, "%Y-%m-%d").unwrap();
+            assert_eq!(b - a, chrono::TimeDelta::days(1));
+        }
+    }
+
+    #[test]
+    fn daily_buckets_by_local_day_and_sums_cost() {
+        let now = 1_800_000_123;
+        let today = local_day_start(now);
+        let events = vec![
+            ev(today + 5, "gpt-4o-mini", 1_000_000, 1_000_000), // $0.75
+            ev(today + 9, "gpt-4o-mini", 1_000_000, 1_000_000), // $0.75
+            at(today + 7, "llama3.1:8b", "localhost", 5, 5),    // unpriced
+            at(today - 3600, "llama3.1:8b", "localhost", 5, 5), // yesterday, unpriced only
+            ev(today - 28 * DAY_SECS + 3600, "gpt-4o", 1, 1),   // oldest day kept
+            ev(today - 40 * DAY_SECS, "gpt-4o", 1, 1),          // outside the window
+        ];
+        let s = summarize(Path::new("/x"), &events, now);
+        assert_eq!(s.daily.len(), DAILY_DAYS);
+        let last = &s.daily[DAILY_DAYS - 1];
+        assert_eq!(last.requests, 3);
+        assert_eq!(last.requests, s.today.requests, "today matches its tile");
+        assert!((last.cost_usd.unwrap() - 1.5).abs() < 1e-9);
+        let yesterday = &s.daily[DAILY_DAYS - 2];
+        assert_eq!(yesterday.requests, 1);
+        assert_eq!(yesterday.cost_usd, None, "only unpriced events that day");
+        assert_eq!(s.daily[1].requests, 1);
+        assert_eq!(s.daily.iter().map(|d| d.requests).sum::<u64>(), 5);
+    }
+
+    #[test]
+    fn daily_follows_each_events_own_local_date_across_dst() {
+        // A zone at UTC-5 that springs forward to UTC-4 at `shift`: every
+        // event falls on the date its own offset gives, so neither the day
+        // before nor after the change loses or gains a request.
+        let base = 1_800_000_000 - 1_800_000_000 % DAY_SECS; // a UTC midnight
+        let shift = base + 7 * 3600;
+        let date_of = |ts: u64| {
+            let offset: i64 = if ts < shift { -5 * 3600 } else { -4 * 3600 };
+            chrono::DateTime::from_timestamp(ts as i64 + offset, 0)
+                .unwrap()
+                .date_naive()
+        };
+        let now = base + 2 * DAY_SECS + 12 * 3600;
+        let events = vec![
+            ev(base + 4 * 3600 + 59 * 60, "m", 0, 0), // 23:59 local, day before the change
+            ev(base + 5 * 3600, "m", 0, 0),           // 00:00 local, change day
+            ev(base + DAY_SECS + 3 * 3600 + 59 * 60, "m", 0, 0), // 23:59 (UTC-4), change day
+            ev(base + DAY_SECS + 4 * 3600, "m", 0, 0), // 00:00 (UTC-4), day after
+        ];
+        let daily = daily_series(&events, now, date_of);
+        let by_day: Vec<(String, u64)> = daily[DAILY_DAYS - 4..]
+            .iter()
+            .map(|d| (d.day.clone(), d.requests))
+            .collect();
+        let label = |ts: u64| day_label(date_of(ts));
+        assert_eq!(
+            by_day,
+            vec![
+                (label(base + 4 * 3600), 1),
+                (label(base + 5 * 3600), 2),
+                (label(base + DAY_SECS + 4 * 3600), 1),
+                (label(now), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn providers_report_recency_timing_and_their_month() {
+        let now = 1_800_000_123;
+        let mut events = Vec::new();
+        // 25 timed anthropic requests, one per minute: only the newest 20 stay.
+        for i in 0..25u64 {
+            events.push(timed(now - 3_000 + i * 60, KIND_ANTHROPIC, Some(100 + i)));
+        }
+        // An untimed event in between must not displace a timing.
+        events.push(timed(now - 100, KIND_ANTHROPIC, None));
+        // Codex: untimed only, most recent of all.
+        events.push(timed(now - 10, KIND_CHATGPT_CODEX, None));
+        // OpenRouter: old activity outside the 30-day window, one timing.
+        events.push(timed(now - 40 * DAY_SECS, KIND_OPENROUTER, Some(900)));
+
+        let s = summarize(Path::new("/x"), &events, now);
+        let kinds: Vec<&str> = s.providers.iter().map(|p| p.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![KIND_CHATGPT_CODEX, KIND_ANTHROPIC, KIND_OPENROUTER],
+            "most recently used first"
+        );
+
+        let codex = &s.providers[0];
+        assert_eq!(codex.last_ts, now - 10);
+        assert_eq!(codex.median_ms, None, "untimed events have no median");
+        assert!(codex.recent_ms.is_empty());
+        assert_eq!(codex.last_30_days.requests, 1);
+
+        let anthropic = &s.providers[1];
+        assert_eq!(anthropic.last_ts, now - 100);
+        assert_eq!(anthropic.recent_ms.len(), RECENT_TIMINGS);
+        assert_eq!(anthropic.recent_ms.first(), Some(&105), "oldest kept first");
+        assert_eq!(anthropic.recent_ms.last(), Some(&124));
+        assert_eq!(anthropic.median_ms, Some(114)); // (114 + 115) / 2
+        assert_eq!(anthropic.last_30_days.requests, 26);
+
+        let openrouter = &s.providers[2];
+        assert_eq!(openrouter.median_ms, Some(900));
+        assert_eq!(openrouter.recent_ms, vec![900]);
+        assert_eq!(openrouter.last_30_days, UsageBucket::default());
+
+        let month: u64 = s.providers.iter().map(|p| p.last_30_days.requests).sum();
+        assert_eq!(month, s.last_30_days.requests);
+    }
+
+    #[test]
+    fn recent_timings_follow_time_not_ledger_order() {
+        let now = 1_800_000_123;
+        let events = vec![
+            timed(now - 10, KIND_ANTHROPIC, Some(3)),
+            timed(now - 30, KIND_ANTHROPIC, Some(1)),
+            timed(now - 20, KIND_ANTHROPIC, Some(2)),
+        ];
+        let s = summarize(Path::new("/x"), &events, now);
+        assert_eq!(s.providers[0].recent_ms, vec![1, 2, 3]);
+        assert_eq!(s.providers[0].last_ts, now - 10);
+    }
+
+    #[test]
+    fn median_handles_odd_even_and_extremes() {
+        assert_eq!(median(&[]), None);
+        assert_eq!(median(&[7]), Some(7));
+        assert_eq!(median(&[9, 1, 5]), Some(5));
+        assert_eq!(median(&[4, 1, 3, 2]), Some(2));
+        assert_eq!(median(&[u64::MAX, u64::MAX]), Some(u64::MAX));
     }
 }
