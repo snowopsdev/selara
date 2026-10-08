@@ -297,7 +297,7 @@
       ? { state: "available", current: "0.7.0", version: "0.8.0", date: "2026-10-22T00:00:00Z", notes: "### Features\n\n* Faster command menu\n* Native shortcut recorder\n\n### Fixes\n\n* Keep drafts after a failed save" }
       : null,
     log: running
-      ? ["[serve] selara serve 0.6.0 starting", "[serve] accessibility trust: granted", "[serve] 6 commands registered, 4 shortcuts", "[serve] ready"]
+      ? ["[serve] selara serve 0.7.0 starting", "[serve] accessibility trust: granted", "[serve] 6 commands registered, 4 shortcuts", "[serve] ready"]
       : [],
   };
 
@@ -519,7 +519,7 @@
       case "update_status": return clone(state.update);
       case "check_for_updates":
         if (scenario === "errors") throw "Update check failed: network unreachable";
-        state.update = state.update && state.update.state === "available" ? state.update : { state: "up_to_date", current: "0.6.0" };
+        state.update = state.update && state.update.state === "available" ? state.update : { state: "up_to_date", current: "0.7.0" };
         return clone(state.update);
       case "install_update": runMockInstall(); return null;
       case "set_shortcut_recording": return null;
