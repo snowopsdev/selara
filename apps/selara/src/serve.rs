@@ -201,6 +201,9 @@ fn adhoc_command(text: &str) -> WritingCommand {
         hotkey: None,
         model: None,
         apps: Vec::new(),
+        glyph: None,
+        color: None,
+        review: false,
     }
 }
 
@@ -277,6 +280,9 @@ fn command_from_instruction(text: &str, kind: CommandKind, existing: &[String]) 
         hotkey: None,
         model: None,
         apps: Vec::new(),
+        glyph: None,
+        color: None,
+        review: false,
     }
 }
 

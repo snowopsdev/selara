@@ -42,6 +42,10 @@ pub struct UsageEvent {
     /// The request completed, but its provider did not report token counts.
     #[serde(default)]
     pub tokens_missing: bool,
+    /// Wall-clock time from sending the request to the complete reply.
+    /// Absent on events recorded before timing was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// Totals for one time window (or one model).
@@ -68,6 +72,28 @@ pub struct ModelUsage {
     pub totals: UsageBucket,
 }
 
+/// Totals for one local calendar day.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DailyUsage {
+    /// Local date as `YYYY-MM-DD`.
+    pub day: String,
+    pub requests: u64,
+    pub cost_usd: Option<f64>,
+}
+
+/// Recency and timing for one provider label (`UsageEvent::kind`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderActivity {
+    pub kind: String,
+    /// Unix seconds of the newest event.
+    pub last_ts: u64,
+    /// Median `duration_ms` over the newest timed events, if any were timed.
+    pub median_ms: Option<u64>,
+    /// Newest timed durations, oldest first (at most 20).
+    pub recent_ms: Vec<u64>,
+    pub last_30_days: UsageBucket,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageSummary {
     pub path: String,
@@ -75,6 +101,11 @@ pub struct UsageSummary {
     pub last_30_days: UsageBucket,
     pub all_time: UsageBucket,
     pub models: Vec<ModelUsage>,
+    /// The 30 local days ending today, oldest first, including empty days.
+    #[serde(default)]
+    pub daily: Vec<DailyUsage>,
+    #[serde(default)]
+    pub providers: Vec<ProviderActivity>,
 }
 
 /// Provider labels used in the ledger.
@@ -156,6 +187,7 @@ pub fn record_optional(kind: &str, model: &str, base_url: &str, usage: Option<To
         input: tokens.input,
         output: tokens.output,
         tokens_missing: usage.is_none(),
+        duration_ms: None,
     };
     {
         let mut events = lock(&EVENTS);
@@ -386,6 +418,7 @@ mod tests {
             input,
             output,
             tokens_missing: false,
+            duration_ms: None,
         }
     }
 
