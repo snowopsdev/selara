@@ -44,3 +44,24 @@ build because the upstream Swift package lives in a repository subdirectory.
 See `../apps/selara/native/ThinkingOrbsKit/UPSTREAM.md` for the exact revision
 and provenance. No web view, npm packages, or runtime network request is
 needed.
+
+## Moment of use: Ink Sweep, orb fallback, Ghost Diff
+
+`sh examples/run-native-moment-preview.sh` builds the production overlay
+sources (`apps/selara/native/*.swift`) with a small harness
+(`native-progress-preview/Moment/main.swift`) and runs them over a real
+`NSTextView` with a selected paragraph. Line bounds come from the text view's
+layout, the same rectangles Accessibility reports for AppKit text.
+
+| `--mode` | Shows |
+|---|---|
+| `sweep-working` | Accent tint and specular shimmer over each selected line, chip above the first line |
+| `sweep-done` | Green afterglow wiping over the replaced range, “Replaced · ⌘Z to undo” receipt |
+| `orb-fallback` | Implausible bounds (zero-size rect) fall back to today's orb in the editor gutter |
+| `ghost-skeleton` | Review card with the skeleton shimmer |
+| `ghost-diff` | Review card with the word diff (it becomes key) |
+| `cycle` (default) | All of the above, repeating |
+
+Add `--appearance dark`, `--reduce-motion`, or `--capture <png>` (screenshot
+the window region, then exit). The preview window floats so captures on a
+busy desktop show only the preview.
