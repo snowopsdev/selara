@@ -1,5 +1,5 @@
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -506,9 +506,17 @@ impl OpenAiCompatibleProvider {
         }
     }
 
-    fn record_usage(&self, value: &serde_json::Value) {
-        if let Some(u) = parse_openai_usage(value) {
-            usage::record(self.usage_kind(), &self.model, &self.base_url, u);
+    /// Ledger entry for a reply that reported usage; `started` is when the
+    /// request was sent.
+    fn record_usage(&self, used: Option<TokenUsage>, started: Instant) {
+        if let Some(u) = used {
+            usage::record_timed(
+                self.usage_kind(),
+                &self.model,
+                &self.base_url,
+                Some(u),
+                started.elapsed(),
+            );
         }
     }
 }
@@ -545,12 +553,13 @@ pub fn parse_anthropic_usage(value: &serde_json::Value) -> Option<TokenUsage> {
 impl LlmProvider for OpenAiCompatibleProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
         let builder = self.request(&req, false)?;
+        let started = Instant::now();
         let resp = send_with_retry(builder, "chat completion", Idempotency::NonIdempotent).await?;
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
         }
-        self.record_usage(&value);
+        self.record_usage(parse_openai_usage(&value), started);
         Self::parse_response(&value)
     }
 
@@ -560,13 +569,14 @@ impl LlmProvider for OpenAiCompatibleProvider {
         on_delta: &mut DeltaSink<'_>,
     ) -> Result<String, CoreError> {
         let builder = self.request(&req, true)?;
+        let started = Instant::now();
         let resp = send_with_retry(builder, "chat completion", Idempotency::NonIdempotent).await?;
         if !resp.status().is_success() {
             return Err(http_error(resp).await);
         }
         if is_json_response(&resp) {
             let (_, value) = json_or_raw(resp).await?;
-            self.record_usage(&value);
+            self.record_usage(parse_openai_usage(&value), started);
             let out = Self::parse_response(&value)?;
             on_delta(&out);
             return Ok(out);
@@ -609,9 +619,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             Ok(())
         })
         .await?;
-        if let Some(u) = used {
-            usage::record(self.usage_kind(), &self.model, &self.base_url, u);
-        }
+        self.record_usage(used, started);
         // Drain the whole stream first so the connection closes cleanly, but
         // never hand back partial text: the caller would write it over the selection.
         if truncated {
@@ -667,6 +675,20 @@ impl AnthropicProvider {
         Ok(builder)
     }
 
+    /// Ledger entry for a reply that reported usage; `started` is when the
+    /// request was sent.
+    fn record_usage(&self, used: Option<TokenUsage>, started: Instant) {
+        if let Some(u) = used {
+            usage::record_timed(
+                usage::KIND_ANTHROPIC,
+                &self.model,
+                &self.base_url,
+                Some(u),
+                started.elapsed(),
+            );
+        }
+    }
+
     /// Text of a buffered Messages reply, or the truncation error.
     fn parse_response(value: &serde_json::Value) -> Result<String, CoreError> {
         if value.get("stop_reason").and_then(|v| v.as_str()) == Some("max_tokens") {
@@ -692,15 +714,14 @@ impl AnthropicProvider {
 impl LlmProvider for AnthropicProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
         let builder = self.request(&req, false)?;
+        let started = Instant::now();
         let resp =
             send_with_retry(builder, "anthropic messages", Idempotency::NonIdempotent).await?;
         let (status, value) = json_or_raw(resp).await?;
         if !status.is_success() {
             return Err(CoreError::Provider(format!("HTTP {status}: {value}")));
         }
-        if let Some(u) = parse_anthropic_usage(&value) {
-            usage::record(usage::KIND_ANTHROPIC, &self.model, &self.base_url, u);
-        }
+        self.record_usage(parse_anthropic_usage(&value), started);
         Self::parse_response(&value)
     }
 
@@ -710,6 +731,7 @@ impl LlmProvider for AnthropicProvider {
         on_delta: &mut DeltaSink<'_>,
     ) -> Result<String, CoreError> {
         let builder = self.request(&req, true)?;
+        let started = Instant::now();
         let resp =
             send_with_retry(builder, "anthropic messages", Idempotency::NonIdempotent).await?;
         if !resp.status().is_success() {
@@ -717,9 +739,7 @@ impl LlmProvider for AnthropicProvider {
         }
         if is_json_response(&resp) {
             let (_, value) = json_or_raw(resp).await?;
-            if let Some(u) = parse_anthropic_usage(&value) {
-                usage::record(usage::KIND_ANTHROPIC, &self.model, &self.base_url, u);
-            }
+            self.record_usage(parse_anthropic_usage(&value), started);
             let out = Self::parse_response(&value)?;
             on_delta(&out);
             return Ok(out);
@@ -787,9 +807,7 @@ impl LlmProvider for AnthropicProvider {
             Ok(())
         })
         .await?;
-        if let Some(u) = used {
-            usage::record(usage::KIND_ANTHROPIC, &self.model, &self.base_url, u);
-        }
+        self.record_usage(used, started);
         if truncated {
             return Err(truncation_error("stop_reason=max_tokens"));
         }
@@ -819,15 +837,17 @@ impl ChatGptCodexProvider {
 #[async_trait]
 impl LlmProvider for ChatGptCodexProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<String, CoreError> {
+        let started = Instant::now();
         let completed =
             crate::app_server::complete_at(&self.codex_home, &self.model, &req.system, &req.user)
                 .await?;
         if let Some(tokens) = completed.usage {
-            usage::record(
+            usage::record_timed(
                 usage::KIND_CHATGPT_CODEX,
                 &self.model,
                 "https://chatgpt.com",
-                tokens,
+                Some(tokens),
+                started.elapsed(),
             );
         }
         Ok(completed.text)
@@ -1681,6 +1701,16 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
                 .unwrap_or_else(|| panic!("`{model}` is in the ledger: {:?}", s.models))
         }
 
+        /// `duration_ms` of every ledger line for `model`.
+        fn durations(&self, model: &str) -> Vec<Option<u64>> {
+            usage::read_events(&self.path)
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.model == model)
+                .map(|e| e.duration_ms)
+                .collect()
+        }
+
         fn model_totals(&self, model: &str) -> Option<(u64, u64, u64)> {
             let s = usage::summary(&self.path).unwrap();
             s.models
@@ -1714,6 +1744,10 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
         let m = store.model(&s, "usage-test-openai-buffered");
         assert_eq!(m.kind, usage::KIND_OPENAI_COMPATIBLE);
         assert_eq!(m.totals.cost_usd, None, "unknown model has no cost");
+        assert!(
+            store.durations("usage-test-openai-buffered")[0].is_some(),
+            "a completed request is timed"
+        );
     }
 
     #[tokio::test]
@@ -1750,6 +1784,7 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
             store.model_totals("usage-test-openai-stream"),
             Some((1, 20, 5))
         );
+        assert!(store.durations("usage-test-openai-stream")[0].is_some());
     }
 
     #[tokio::test]
@@ -1765,6 +1800,7 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
         .complete(simple_req())
         .await
         .unwrap();
+        assert!(store.durations("usage-test-anthropic-buffered")[0].is_some());
         assert_eq!(
             store.model_totals("usage-test-anthropic-buffered"),
             Some((1, 30, 7))
@@ -1806,6 +1842,7 @@ data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\npartial",
             store.model_totals("usage-test-anthropic-stream"),
             Some((1, 41, 9))
         );
+        assert!(store.durations("usage-test-anthropic-stream")[0].is_some());
     }
 
     #[test]

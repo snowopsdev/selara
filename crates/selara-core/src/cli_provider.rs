@@ -397,6 +397,7 @@ impl LlmProvider for CliProvider {
             .tempdir()?;
         let cmd = self.command(&binary, dir.path())?;
         let input = format!("You are a text transformation service. Do not use tools. Return only the finished replacement text, with no commentary.\n\n{}\n\nText to transform:\n{}", req.system, req.user);
+        let started = std::time::Instant::now();
         let out = run_process(cmd, input.as_bytes(), RUN_TIMEOUT).await?;
         let reply = parse_reply(self.kind, &out)?;
         let kind = match self.kind {
@@ -404,7 +405,7 @@ impl LlmProvider for CliProvider {
             ProviderKind::CursorCli => "cursor_cli",
             _ => "open_code_cli",
         };
-        usage::record_optional(kind, &self.model, "", reply.usage);
+        usage::record_timed(kind, &self.model, "", reply.usage, started.elapsed());
         Ok(reply.text)
     }
 }
@@ -564,7 +565,8 @@ mod tests {
             .unwrap();
         assert!(status.installed);
         assert_eq!(status.version.as_deref(), Some("1.2.3"));
-        let p = CliProvider::new(ProviderKind::ClaudeCli, "model".into(), Some(path));
+        let model = "cli-round-trip-timing";
+        let p = CliProvider::new(ProviderKind::ClaudeCli, model.into(), Some(path));
         assert_eq!(
             p.complete(CompletionRequest {
                 system: "Proofread.".into(),
@@ -574,6 +576,14 @@ mod tests {
             .unwrap(),
             "Corrected."
         );
+        // Counted without token metadata, but timed.
+        let recorded = usage::in_memory()
+            .into_iter()
+            .find(|e| e.model == model)
+            .expect("the run is in the ledger");
+        assert_eq!(recorded.kind, "claude_cli");
+        assert!(recorded.tokens_missing);
+        assert!(recorded.duration_ms.is_some());
     }
 
     #[cfg(unix)]
