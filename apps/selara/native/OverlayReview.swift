@@ -299,9 +299,13 @@ final class ReviewCard {
             }
         case (.diff, .accept):
             // Give key focus back before Rust pastes into the source app.
+            // Ordering out drops the card's key status, but having been key
+            // can leave Selara active, and a posted ⌘V would then still come
+            // here. Deactivating hands activation back to the source app.
             state = .hidden
             resignKeyQuietly()
             panel.orderOut(nil)
+            if NSApp.isActive { NSApp.deactivate() }
         case (.diff, .anotherTake):
             resignKeyQuietly()
         case (.diff, _), (.skeleton, .discard), (.skeleton, .dismissed):

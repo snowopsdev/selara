@@ -385,10 +385,18 @@ showReview()
 pump(0.4)
 expect(reviewResult(reviewJSON))
 pump(0.1)
+let activeWhileKey = NSApp.isActive
 press(windows("Selara Review").first!, 36, "\r")
 expect(progressTakeReviewAction(sweepHandle) == 1, "↩ accepts")
 pump(0.05)
 expect(windows("Selara Review").isEmpty, "accept hands focus back by hiding the card at once")
+// The key card can leave Selara active while another app stays frontmost;
+// Rust's ⌘V must not reach Selara, so accepting gives activation back.
+expect(!NSApp.isActive && !progressAppIsActive(),
+       "accepting the card deactivates Selara (active while key: \(activeWhileKey))")
+progressAppDeactivate()
+pump(0.05)
+expect(!NSApp.isActive && notActivated(), "deactivating an inactive Selara changes nothing")
 progressSucceedRange(sweepHandle, -1, -1)
 pump(0.2)
 expect(windows("Selara Afterglow").count == 1 && windows("Selara Receipt").count == 1,

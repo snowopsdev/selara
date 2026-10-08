@@ -26,6 +26,8 @@ unsafe extern "C" {
     fn selara_progress_hide(handle: *mut c_void);
     fn selara_progress_succeed_range(handle: *mut c_void, location: i64, length: i64);
     fn selara_progress_take_cancelled(handle: *mut c_void) -> bool;
+    fn selara_progress_app_is_active() -> bool;
+    fn selara_progress_app_deactivate();
 }
 
 /// Config labels and model names may contain NUL; don't let one end a C string.
@@ -108,6 +110,22 @@ impl ProgressPanel {
     pub fn hide(&self) {
         // SAFETY: main-thread access; also invalidates queued animation frames.
         unsafe { selara_progress_hide(self.handle.as_ptr()) }
+    }
+
+    /// Whether Selara is the active app. After the review card was key this
+    /// can stay true while NSWorkspace already reports the source app as
+    /// frontmost; keystrokes (and a posted ⌘V) still reach Selara then.
+    /// A method so the `!Send` panel proves it runs on the AppKit thread.
+    pub fn app_is_active(&self) -> bool {
+        // SAFETY: main-thread read of `NSApp.isActive`.
+        unsafe { selara_progress_app_is_active() }
+    }
+
+    /// Hand activation back to the app that had it before Selara. No-op
+    /// while Selara is not active.
+    pub fn deactivate_app(&self) {
+        // SAFETY: main-thread `NSApp.deactivate()`, only when active.
+        unsafe { selara_progress_app_deactivate() }
     }
 
     pub fn take_cancelled(&self) -> bool {

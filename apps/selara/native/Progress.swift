@@ -462,6 +462,21 @@ public func progressSucceed(_ handle: UnsafeMutableRawPointer) { progressControl
 public func progressSucceedRange(_ handle: UnsafeMutableRawPointer, _ location: Int64, _ length: Int64) {
     progressController(handle).succeed(location: Int(clamping: location), length: Int(clamping: length))
 }
+/// Whether Selara is the active app. A key non-activating panel (the review
+/// card) can leave Selara active without changing NSWorkspace's frontmost
+/// app, and keystrokes, including a posted ⌘V, then still reach Selara.
+@_cdecl("selara_progress_app_is_active")
+public func progressAppIsActive() -> Bool {
+    precondition(Thread.isMainThread)
+    return NSApplication.shared.isActive
+}
+/// Give activation back to the app that had it before Selara (the source).
+/// No-op when Selara is not active, so it never moves focus on its own.
+@_cdecl("selara_progress_app_deactivate")
+public func progressAppDeactivate() {
+    precondition(Thread.isMainThread)
+    if NSApplication.shared.isActive { NSApplication.shared.deactivate() }
+}
 @_cdecl("selara_progress_take_cancelled")
 public func progressTakeCancelled(_ handle: UnsafeMutableRawPointer) -> Bool {
     let view = progressController(handle)

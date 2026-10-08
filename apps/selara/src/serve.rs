@@ -350,7 +350,8 @@ fn apply_verified_replacement(
 }
 
 /// After ↩ in the review card, let key focus settle back in the source app
-/// before the verified replacement posts ⌘V there.
+/// before the verified replacement posts ⌘V there. The `Restoring` gate also
+/// waits until Selara is no longer active; this is only the minimum.
 const REVIEW_FOCUS_SETTLE: Duration = Duration::from_millis(80);
 
 enum UiPhase {
@@ -361,12 +362,15 @@ enum UiPhase {
         label: String,
         partial: String,
     },
-    /// Waiting for the source app to be frontmost (and, after a review
-    /// accept, for `not_before`) before replacing.
+    /// Waiting for the source app to be frontmost and Selara inactive (and,
+    /// after a review accept, for `not_before`) before replacing.
     Restoring {
         text: String,
         deadline: Instant,
         not_before: Instant,
+        /// Selara already deactivated itself and asked the source app to
+        /// activate; don't repeat that every frame.
+        released: bool,
     },
     /// A review command's result is on screen in the Ghost Diff card.
     Review {
@@ -432,6 +436,46 @@ fn restoring(text: String, now: Instant, settle: Duration) -> UiPhase {
         text,
         deadline: now + Duration::from_secs(2),
         not_before: now + settle,
+        released: false,
+    }
+}
+
+/// One frame of the `Restoring` gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreStep {
+    /// Keep waiting.
+    Wait,
+    /// Selara still holds activation: deactivate it and ask the source app
+    /// to activate, then keep waiting.
+    Release,
+    /// Keyboard focus is back in the source app: replace there.
+    Replace,
+    /// The deadline passed: keep the result in History instead.
+    GiveUp,
+}
+
+/// Decide one frame of the `Restoring` gate. The source app being frontmost
+/// is not enough before ⌘V: a key non-activating panel (the review card)
+/// never changes the frontmost app, so Selara must also be inactive, or the
+/// paste would still go to Selara.
+fn restore_step(
+    now: Instant,
+    not_before: Instant,
+    deadline: Instant,
+    source_frontmost: bool,
+    selara_active: bool,
+    released: bool,
+) -> RestoreStep {
+    if now < not_before {
+        RestoreStep::Wait
+    } else if source_frontmost && !selara_active {
+        RestoreStep::Replace
+    } else if now >= deadline {
+        RestoreStep::GiveUp
+    } else if selara_active && !released {
+        RestoreStep::Release
+    } else {
+        RestoreStep::Wait
     }
 }
 
@@ -1726,28 +1770,47 @@ impl eframe::App for ServeApp {
             if let UiPhase::Restoring {
                 deadline,
                 not_before,
+                released,
                 ..
-            } = &self.phase
+            } = &mut self.phase
             {
-                let now = Instant::now();
-                let restored = frontmost_pid() == self.target_pid && self.target_pid.is_some();
-                if now >= *not_before && (restored || now >= *deadline) {
-                    // Take the text out directly (not `set_phase`): both
-                    // branches record it themselves, as Applied or not.
-                    if let UiPhase::Restoring { text, .. } =
-                        std::mem::replace(&mut self.phase, UiPhase::Hidden)
-                    {
-                        if restored {
-                            self.apply_completed_rewrite(ctx, text);
-                        } else {
-                            self.finish_unapplied_rewrite(
-                                ctx,
-                                PendingReplacement {
-                                    text,
-                                    message: "The source app could not receive focus.".into(),
-                                    outcome: ReplacementOutcome::NotApplied,
-                                },
-                            );
+                let step = restore_step(
+                    Instant::now(),
+                    *not_before,
+                    *deadline,
+                    self.target_pid.is_some() && frontmost_pid() == self.target_pid,
+                    self.progress.app_is_active(),
+                    *released,
+                );
+                match step {
+                    RestoreStep::Wait => {}
+                    RestoreStep::Release => {
+                        // Only reached while Selara is active, so this never
+                        // moves focus away from an app the user chose.
+                        *released = true;
+                        self.progress.deactivate_app();
+                        if let Some(pid) = self.target_pid {
+                            let _ = request_activate_pid(pid);
+                        }
+                    }
+                    RestoreStep::Replace | RestoreStep::GiveUp => {
+                        // Take the text out directly (not `set_phase`): both
+                        // branches record it themselves, as Applied or not.
+                        if let UiPhase::Restoring { text, .. } =
+                            std::mem::replace(&mut self.phase, UiPhase::Hidden)
+                        {
+                            if step == RestoreStep::Replace {
+                                self.apply_completed_rewrite(ctx, text);
+                            } else {
+                                self.finish_unapplied_rewrite(
+                                    ctx,
+                                    PendingReplacement {
+                                        text,
+                                        message: "The source app could not receive focus.".into(),
+                                        outcome: ReplacementOutcome::NotApplied,
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -2298,6 +2361,45 @@ mod tests {
         assert!(matches!(taken, super::UiPhase::Restoring { .. }));
         run.cancel();
         assert!(run.not_applied.is_empty());
+    }
+
+    #[test]
+    fn restoring_waits_for_selara_to_give_up_activation_before_pasting() {
+        use super::{restore_step, RestoreStep};
+        let start = Instant::now();
+        let not_before = start + super::REVIEW_FOCUS_SETTLE;
+        let deadline = start + Duration::from_secs(2);
+        let step = |at: Duration, frontmost, active, released| {
+            restore_step(
+                start + at,
+                not_before,
+                deadline,
+                frontmost,
+                active,
+                released,
+            )
+        };
+        // Nothing happens during the settle time, even with focus back.
+        assert_eq!(step(Duration::ZERO, true, false, false), RestoreStep::Wait);
+        // The source app is frontmost and Selara inactive: paste.
+        let settled = Duration::from_millis(100);
+        assert_eq!(step(settled, true, false, false), RestoreStep::Replace);
+        // A key non-activating panel leaves the source frontmost while
+        // Selara is still active: release once, then wait, never paste.
+        assert_eq!(step(settled, true, true, false), RestoreStep::Release);
+        assert_eq!(step(settled, true, true, true), RestoreStep::Wait);
+        assert_eq!(step(settled, false, true, false), RestoreStep::Release);
+        // Selara inactive but another app frontmost: wait, don't steal focus.
+        assert_eq!(step(settled, false, false, false), RestoreStep::Wait);
+        assert_eq!(
+            step(Duration::from_millis(1500), true, false, true),
+            RestoreStep::Replace
+        );
+        // Past the deadline without focus the result goes to History.
+        let late = Duration::from_secs(2);
+        assert_eq!(step(late, true, true, true), RestoreStep::GiveUp);
+        assert_eq!(step(late, false, false, false), RestoreStep::GiveUp);
+        assert_eq!(step(late, true, false, true), RestoreStep::Replace);
     }
 
     #[test]
