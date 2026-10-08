@@ -161,10 +161,8 @@ final class MiniOrbView: NSView {
         gradient.type = .conic
         gradient.startPoint = CGPoint(x: 0.5, y: 0.5)
         gradient.endPoint = CGPoint(x: 0.5, y: 1)
-        gradient.colors = [0x0a84ff, 0xbf5af2, 0xff375f, 0x0a84ff].map { hex in
-            NSColor(srgbRed: CGFloat((hex >> 16) & 0xff) / 255, green: CGFloat((hex >> 8) & 0xff) / 255,
-                    blue: CGFloat(hex & 0xff) / 255, alpha: 1).cgColor
-        }
+        let hexes: [UInt32] = [0x0a84ff, 0xbf5af2, 0xff375f, 0x0a84ff]
+        gradient.colors = hexes.map(MiniOrbView.cgColor(hex:))
         gradient.cornerRadius = 5
         gradient.masksToBounds = true
         layer?.addSublayer(gradient)
@@ -175,6 +173,15 @@ final class MiniOrbView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("unused") }
+
+    // Spelled out step by step: the one-expression form exceeded the type
+    // checker's time limit on CI's Swift toolchain.
+    private static func cgColor(hex: UInt32) -> CGColor {
+        let red: CGFloat = CGFloat((hex >> 16) & 0xff) / 255
+        let green: CGFloat = CGFloat((hex >> 8) & 0xff) / 255
+        let blue: CGFloat = CGFloat(hex & 0xff) / 255
+        return NSColor(srgbRed: red, green: green, blue: blue, alpha: 1).cgColor
+    }
 
     override func layout() {
         super.layout()
