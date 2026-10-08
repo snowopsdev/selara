@@ -597,6 +597,12 @@
           "markdownDescription": "Read the macOS accent color so Settings controls match the system"
         },
         {
+          "description": "Run a draft command on sample text with the active provider (counts toward usage)",
+          "type": "string",
+          "const": "allow-try-command",
+          "markdownDescription": "Run a draft command on sample text with the active provider (counts toward usage)"
+        },
+        {
           "description": "Read the current update progress without starting another check",
           "type": "string",
           "const": "allow-update-status",

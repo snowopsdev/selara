@@ -182,3 +182,8 @@ commands.allow = ["system_accent_color"]
 identifier = "allow-confirm-action"
 description = "Show a native confirmation alert before a destructive Settings action"
 commands.allow = ["confirm_action"]
+
+[[permission]]
+identifier = "allow-try-command"
+description = "Run a draft command on sample text with the active provider (counts toward usage)"
+commands.allow = ["try_command"]

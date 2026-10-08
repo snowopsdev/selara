@@ -1,4 +1,5 @@
 mod shortcut_recording;
+mod try_run;
 mod update_backup;
 
 use selara_core::app_server;
@@ -1767,6 +1768,18 @@ fn system_accent_color() -> Option<String> {
     }
 }
 
+/// Run a draft command on sample text with the active provider (the model
+/// override when given), through the same cleanup as a real run. Counts
+/// toward Usage. Errors are user-readable.
+#[tauri::command]
+async fn try_command(
+    prompt: String,
+    text: String,
+    model: Option<String>,
+) -> Result<try_run::TryResult, String> {
+    try_run::run(prompt, text, model).await
+}
+
 /// Report the version of the writing runtime staged with this app, without
 /// launching a system CLI or depending on the user's PATH.
 #[tauri::command]
@@ -1867,7 +1880,8 @@ pub fn run() {
             cli_provider_status,
             check_for_updates,
             update_status,
-            install_update
+            install_update,
+            try_command
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
