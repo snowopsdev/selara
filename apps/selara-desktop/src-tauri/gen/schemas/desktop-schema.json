@@ -399,6 +399,12 @@
           "markdownDescription": "Report where the provider API key comes from (never the key itself)"
         },
         {
+          "description": "Look up an installed app's icon by name or bundle id",
+          "type": "string",
+          "const": "allow-app-icon",
+          "markdownDescription": "Look up an installed app's icon by name or bundle id"
+        },
+        {
           "description": "Read the running app's version",
           "type": "string",
           "const": "allow-app-version",
@@ -441,6 +447,12 @@
           "markdownDescription": "Check the release feed for a newer Selara build (no download)"
         },
         {
+          "description": "Pick an app bundle in a native open panel",
+          "type": "string",
+          "const": "allow-choose-app",
+          "markdownDescription": "Pick an app bundle in a native open panel"
+        },
+        {
           "description": "Remove the provider API key from the OS keychain",
           "type": "string",
           "const": "allow-clear-api-key",
@@ -469,6 +481,12 @@
           "type": "string",
           "const": "allow-confirm-action",
           "markdownDescription": "Show a native confirmation alert before a destructive Settings action"
+        },
+        {
+          "description": "Put the Usage share image on the clipboard",
+          "type": "string",
+          "const": "allow-copy-png",
+          "markdownDescription": "Put the Usage share image on the clipboard"
         },
         {
           "description": "Write the command list to a file chosen in a save dialog",
@@ -531,6 +549,12 @@
           "markdownDescription": "Open System Settings on the Accessibility privacy pane"
         },
         {
+          "description": "List the regular apps running now, by name and bundle id",
+          "type": "string",
+          "const": "allow-running-apps",
+          "markdownDescription": "List the regular apps running now, by name and bundle id"
+        },
+        {
           "description": "Save Selara config",
           "type": "string",
           "const": "allow-save-config",
@@ -541,6 +565,12 @@
           "type": "string",
           "const": "allow-save-config-section",
           "markdownDescription": "Save one section of the Selara config, leaving the rest as on disk"
+        },
+        {
+          "description": "Save the Usage share image to a file chosen in a save panel",
+          "type": "string",
+          "const": "allow-save-png",
+          "markdownDescription": "Save the Usage share image to a file chosen in a save panel"
         },
         {
           "description": "Read the last lines `selara serve` printed while supervised by the app",

@@ -187,3 +187,28 @@ commands.allow = ["confirm_action"]
 identifier = "allow-try-command"
 description = "Run a draft command on sample text with the active provider (counts toward usage)"
 commands.allow = ["try_command"]
+
+[[permission]]
+identifier = "allow-app-icon"
+description = "Look up an installed app's icon by name or bundle id"
+commands.allow = ["app_icon"]
+
+[[permission]]
+identifier = "allow-running-apps"
+description = "List the regular apps running now, by name and bundle id"
+commands.allow = ["running_apps"]
+
+[[permission]]
+identifier = "allow-choose-app"
+description = "Pick an app bundle in a native open panel"
+commands.allow = ["choose_app"]
+
+[[permission]]
+identifier = "allow-copy-png"
+description = "Put the Usage share image on the clipboard"
+commands.allow = ["copy_png"]
+
+[[permission]]
+identifier = "allow-save-png"
+description = "Save the Usage share image to a file chosen in a save panel"
+commands.allow = ["save_png"]

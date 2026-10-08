@@ -1,3 +1,5 @@
+mod native_apps;
+mod share_image;
 mod shortcut_recording;
 mod try_run;
 mod update_backup;
@@ -1881,7 +1883,12 @@ pub fn run() {
             check_for_updates,
             update_status,
             install_update,
-            try_command
+            try_command,
+            native_apps::app_icon,
+            native_apps::running_apps,
+            native_apps::choose_app,
+            share_image::copy_png,
+            share_image::save_png
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]

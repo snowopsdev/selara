@@ -29,11 +29,31 @@ libc = "0.2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Already in the tree through tauri; encodes app icons as data URLs and
+# decodes the share image the webview renders.
+base64 = "0.22"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 selara-platform = { path = "../../../crates/selara-platform" }
-# Already in the tree through tao/wry; used to read the system accent color.
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSColor", "NSColorSpace", "objc2-core-foundation"] }
+# Already in the tree through tao/wry: the system accent color, app icons and
+# running apps for the per-app lists, and the share image on the pasteboard.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSData", "NSDictionary", "NSGeometry", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSBitmapImageRep",
+  "NSColor",
+  "NSColorSpace",
+  "NSGraphics",
+  "NSGraphicsContext",
+  "NSImage",
+  "NSImageRep",
+  "NSPasteboard",
+  "NSRunningApplication",
+  "NSWorkspace",
+  "libc",
+  "objc2-core-foundation",
+] }
