@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.0](https://github.com/snowopsdev/selara/compare/v0.6.0...v0.7.0) (2026-10-08)
+
+
+### Features
+
+* **core:** Time requests and add Settings backend commands ([#135](https://github.com/snowopsdev/selara/issues/135)) ([602683d](https://github.com/snowopsdev/selara/commit/602683d0b2527f38d243eb401941ef30d69d2d51))
+* **desktop:** Make Settings controls and layout feel native on macOS ([#125](https://github.com/snowopsdev/selara/issues/125)) ([2e94bc2](https://github.com/snowopsdev/selara/commit/2e94bc2b958b28881be9703f6242936436a96661))
+* **desktop:** Redesign Settings with readiness, try-it, and sharing ([#137](https://github.com/snowopsdev/selara/issues/137)) ([076582c](https://github.com/snowopsdev/selara/commit/076582c03a7b9882c179c7631a0d8f6683c64c99))
+* **desktop:** Save as you go with native menus and alerts ([#126](https://github.com/snowopsdev/selara/issues/126)) ([318f266](https://github.com/snowopsdev/selara/commit/318f266b633ff8ad8fbfba5ab51eb92a6de0a590))
+* **serve:** Show progress at the selection and anchor the popover ([#136](https://github.com/snowopsdev/selara/issues/136)) ([cd56f24](https://github.com/snowopsdev/selara/commit/cd56f24458bd14d86d0f857b6ddd7962a8e54f96))
+
+
+### Bug fixes
+
+* **runtime:** Update bundled Codex to 0.160.1 for newer ChatGPT models ([#133](https://github.com/snowopsdev/selara/issues/133)) ([c9e8529](https://github.com/snowopsdev/selara/commit/c9e85293aaed0fd0806bab9074cd97e3d4da8681))
+
 ## [0.6.0](https://github.com/snowopsdev/selara/compare/v0.5.0...v0.6.0) (2026-09-15)
 
 
