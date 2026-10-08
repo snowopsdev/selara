@@ -688,9 +688,9 @@ test("normalizes legacy command modes and saves every command as replacement", a
     row.click();
     await harness.idle(2);
     assert.equal(document.querySelector("#cmd-kind"), null);
-    assert.match(document.querySelector("#sheet-root").textContent, /Always replace the selected text/);
+    assert.match(document.querySelector("#cmd-editor").textContent, /Always replace the selected text/);
     value(harness.dom, "cmd-prompt", "Summarize this in one sentence");
-    document.querySelector("#cmd-save").click();
+    commit(harness.dom, "cmd-prompt");
     await harness.idle(5);
     const save = callsFor(harness, "save_config_section").at(-1);
     assert.equal(save.args.section, "commands");
@@ -720,7 +720,7 @@ test("keeps legacy history readable without picker or custom undo controls", asy
   } finally { harness.close(); }
 });
 
-test("keeps a failed command save draft open and retries the same draft", async () => {
+test("keeps a failed command save draft in the editor and retries it on the next commit", async () => {
   const original = { id: "proofread", label: "Proofread", prompt: "Fix grammar", kind: "replace", apps: [] };
   const saved = { ...original, label: "Proofread gently", prompt: "Fix grammar gently" };
   const firstSave = deferred();
@@ -732,19 +732,17 @@ test("keeps a failed command save draft open and retries the same draft", async 
     await harness.ready();
     const { document } = harness.dom.window;
     document.querySelector('[data-section="commands"]').click();
-    const opener = document.querySelector('[data-id="proofread"]');
-    opener.focus();
-    opener.click();
+    document.querySelector('[data-id="proofread"]').click();
     await harness.idle(3);
     value(harness.dom, "cmd-label", saved.label);
     value(harness.dom, "cmd-prompt", saved.prompt);
-    document.querySelector("#cmd-save").click();
+    commit(harness.dom, "cmd-label");
     await harness.idle(3);
     assert.equal(callsFor(harness, "save_config_section").length, 1);
+    assert.equal(callsFor(harness, "save_config_section")[0].args.value[0].prompt, saved.prompt, "a commit saves the whole editor draft");
 
     firstSave.reject(new Error("commands write failed"));
     await harness.idle(6);
-    assert.ok(document.querySelector("#sheet-root"), "a failed save keeps the editor open");
     assert.equal(document.querySelector("#cmd-label").value, saved.label);
     assert.equal(document.querySelector("#cmd-prompt").value, saved.prompt);
     const unchangedRow = document.querySelector('[data-id="proofread"]');
@@ -754,45 +752,40 @@ test("keeps a failed command save draft open and retries the same draft", async 
     assert.ok(saveError, "failed command saves show an inline error");
     assert.equal(saveError.getAttribute("role"), "alert");
     assert.match(saveError.textContent, /commands write failed/);
-    assert.equal(document.querySelector("#cmd-save").disabled, false, "the same Save button is available for retry");
+    assert.equal(document.querySelector("#commands-error").hidden, true, "the editor's failure stays in the editor");
 
-    document.querySelector("#cmd-save").click();
+    commit(harness.dom, "cmd-prompt");
     await harness.idle(8);
     assert.equal(callsFor(harness, "save_config_section").length, 2);
-    assert.equal(document.querySelector("#sheet-root"), null, "a successful retry closes the editor");
-    const updatedRow = document.querySelector('[data-id="proofread"]');
-    assert.match(updatedRow.textContent, /Proofread gently/);
-    assert.equal(document.activeElement, updatedRow, "success restores focus to the rerendered opener row");
+    assert.match(document.querySelector('[data-id="proofread"]').textContent, /Proofread gently/);
+    assert.equal(document.querySelector("#cmd-save-error").hidden, true, "a successful retry clears the error");
   } finally { harness.close(); }
 });
 
-test("serializes deferred command saves so duplicate submits invoke one native write", async () => {
+test("serializes editor commits so a later commit saves after the earlier one with every field", async () => {
   const original = { id: "proofread", label: "Proofread", prompt: "Fix grammar", kind: "replace", apps: [] };
-  const saved = { ...original, label: "Proofread once", prompt: "Fix grammar once" };
   const pendingSave = deferred();
   const harness = makeHarness({
     config: config({ commands: [original] }),
-    saveQueue: [pendingSave],
+    saveQueue: [pendingSave, config({ commands: [{ ...original, label: "Proofread once", prompt: "Fix grammar once" }] })],
   });
   try {
     await harness.ready();
     const { document } = harness.dom.window;
     document.querySelector('[data-section="commands"]').click();
-    document.querySelector('[data-id="proofread"]').click();
+    value(harness.dom, "cmd-label", "Proofread once");
+    commit(harness.dom, "cmd-label");
+    value(harness.dom, "cmd-prompt", "Fix grammar once");
+    commit(harness.dom, "cmd-prompt");
     await harness.idle(3);
-    value(harness.dom, "cmd-label", saved.label);
-    value(harness.dom, "cmd-prompt", saved.prompt);
-    const save = document.querySelector("#cmd-save");
-    save.click();
-    save.click();
-    await harness.idle(3);
-    assert.equal(callsFor(harness, "save_config_section").length, 1, "double submit is single-flight");
-    assert.equal(save.disabled, true, "Save is disabled while the native write is pending");
+    assert.equal(callsFor(harness, "save_config_section").length, 1, "the second commit waits for the first save");
 
-    pendingSave.resolve(config({ commands: [saved] }));
+    pendingSave.resolve(config({ commands: [{ ...original, label: "Proofread once" }] }));
     await harness.idle(8);
-    assert.equal(callsFor(harness, "save_config_section").length, 1);
-    assert.equal(document.querySelector("#sheet-root"), null);
+    const saves = callsFor(harness, "save_config_section");
+    assert.equal(saves.length, 2);
+    assert.equal(saves[1].args.value[0].label, "Proofread once");
+    assert.equal(saves[1].args.value[0].prompt, "Fix grammar once");
     assert.match(document.querySelector('[data-id="proofread"]').textContent, /Proofread once/);
   } finally { harness.close(); }
 });
@@ -837,53 +830,36 @@ test("failed command duplicate and delete leave the saved list unchanged", async
   } finally { harness.close(); }
 });
 
-test("traps dialog focus, excludes collapsed advanced fields, and restores Escape or Cancel opener focus", async () => {
-  const command = { id: "focus-command", label: "Focus command", prompt: "Keep focus here", kind: "replace", apps: [] };
-  const harness = makeHarness({ config: config({ commands: [command] }) });
+test("edits inline beside the list: no modal, arrow keys select, Advanced holds model, apps, and review", async () => {
+  const commands = [
+    { id: "first", label: "First", prompt: "One", kind: "replace", apps: [] },
+    { id: "second", label: "Second", prompt: "Two", kind: "replace", apps: [], model: "gpt-x" },
+  ];
+  const harness = makeHarness({ config: config({ commands }) });
   try {
     await harness.ready();
     const { document, KeyboardEvent } = harness.dom.window;
     document.querySelector('[data-section="commands"]').click();
-    const opener = document.querySelector('[data-id="focus-command"]');
-    opener.focus();
-    opener.click();
-    await harness.idle(3);
+    assert.equal(document.querySelector("#sheet-root"), null, "there is no modal sheet");
     const app = document.querySelector("#app");
-    assert.ok(app.hasAttribute("inert") || app.inert === true, "the background app is inert while editing");
-    assert.equal(app.getAttribute("aria-hidden"), "true");
-    const dialog = document.querySelector("#sheet-root [role=\"dialog\"]");
-    assert.ok(dialog);
-    const advanced = dialog.querySelector("details");
-    assert.ok(advanced, "model and app controls are grouped in a disclosure");
+    assert.equal(app.hasAttribute("inert"), false);
+    assert.equal(document.querySelector('[data-id="first"]').getAttribute("aria-current"), "true", "the first command opens selected");
+    assert.equal(document.querySelector("#cmd-label").value, "First");
+
+    const row = document.querySelector('[data-id="first"]');
+    row.focus();
+    row.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    await harness.idle(2);
+    assert.equal(document.querySelector("#cmd-label").value, "Second");
+    assert.equal(document.activeElement, document.querySelector('[data-id="second"]'));
+    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    assert.equal(document.activeElement, document.querySelector("#cmd-label"), "Enter moves into the editor");
+
+    const advanced = document.querySelector("#cmd-advanced");
     assert.equal(advanced.open, false, "advanced controls start collapsed");
-    const focusables = dialogFocusables(dialog);
-    assert.ok(focusables.length >= 4);
-    assert.equal(focusables.some((el) => el.id === "cmd-model"), false, "collapsed model field is excluded from Tab order");
-    assert.equal(focusables.some((el) => el.id === "cmd-apps"), false, "collapsed app field is excluded from Tab order");
-
-    const first = focusables[0];
-    const last = focusables.at(-1);
-    last.focus();
-    last.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
-    assert.equal(document.activeElement, first, "Tab wraps from the last dialog control to the first");
-    first.focus();
-    first.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
-    assert.equal(document.activeElement, last, "Shift+Tab wraps from the first dialog control to the last");
-
-    first.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
-    await harness.idle(2);
-    assert.equal(document.querySelector("#sheet-root"), null);
-    assert.equal(document.activeElement, document.querySelector('[data-id="focus-command"]'), "Escape restores the opener row");
-    assert.equal(app.hasAttribute("inert") || app.inert === true, false);
-    assert.notEqual(app.getAttribute("aria-hidden"), "true");
-
-    const openerAgain = document.querySelector('[data-id="focus-command"]');
-    openerAgain.focus();
-    openerAgain.click();
-    await harness.idle(3);
-    document.querySelector("#cmd-cancel").click();
-    await harness.idle(2);
-    assert.equal(document.activeElement, document.querySelector('[data-id="focus-command"]'), "Cancel restores the opener row");
+    for (const id of ["cmd-model", "cmd-apps", "cmd-review"]) assert.ok(advanced.querySelector("#" + id), id + " lives under Advanced");
+    assert.equal(document.querySelector("#cmd-model").value, "gpt-x");
+    assert.equal(callsFor(harness, "save_config_section").length, 0, "selecting commands never saves");
   } finally { harness.close(); }
 });
 
@@ -979,9 +955,7 @@ test("keeps the command editor draft after failed Delete and restores focus to N
     await harness.ready();
     const { document } = harness.dom.window;
     document.querySelector('[data-section="commands"]').click();
-    const opener = document.querySelector('[data-id="delete-me"]');
-    opener.focus();
-    opener.click();
+    document.querySelector('[data-id="delete-me"]').click();
     await harness.idle(3);
     value(harness.dom, "cmd-label", "Draft kept after delete failure");
     value(harness.dom, "cmd-prompt", "Draft prompt kept after delete failure");
@@ -991,7 +965,6 @@ test("keeps the command editor draft after failed Delete and restores focus to N
     assert.equal(document.querySelector("#cmd-delete").disabled, true);
     failedDelete.reject(new Error("delete service failed"));
     await harness.idle(6);
-    assert.ok(document.querySelector("#sheet-root"), "failed Delete keeps the editor open");
     assert.equal(document.querySelector("#cmd-label").value, "Draft kept after delete failure");
     assert.equal(document.querySelector("#cmd-prompt").value, "Draft prompt kept after delete failure");
     assert.equal(document.querySelector("#cmd-delete").disabled, false);
@@ -1005,9 +978,9 @@ test("keeps the command editor draft after failed Delete and restores focus to N
     const successfulDelete = harness.calls.filter((call) => call.command === "save_config_section").at(-1);
     assert.deepEqual(successfulDelete.args.value, []);
     await harness.idle(2);
-    assert.equal(document.querySelector("#sheet-root"), null);
+    assert.equal(document.querySelector("#cmd-label"), null, "no command is left to edit");
     assert.equal(document.querySelector('[data-id="delete-me"]'), null);
-    assert.equal(document.activeElement, document.querySelector("#cmd-new"), "deleting the opener restores focus to New command");
+    assert.equal(document.activeElement, document.querySelector("#cmd-new"), "deleting the last command restores focus to New command");
   } finally { harness.close(); }
 });
 
@@ -1321,21 +1294,24 @@ test("presents Providers with bundled Codex version and preserves drafts across 
     const { document } = harness.dom.window;
     assert.equal(document.querySelector('[data-section="models"]').textContent.trim(), "Providers");
     assert.equal(document.querySelector("#section-models h1").textContent, "Providers");
-    assert.match(document.querySelector('[data-provider-choice="codex"]').textContent, /v0.153.4.*Bundled/);
-    assert.ok(document.querySelector('[data-provider-choice="openai"] .status-dot.ok'));
+    assert.match(document.querySelector('[data-provider-choice="codex"] .provider-line').textContent, /Sign in/);
+    assert.ok(document.querySelector('[data-provider-choice="openai"] .provider-in-use:not([hidden])'), "the active connection says In use");
+    assert.equal(document.querySelectorAll('.provider-list .provider-in-use:not([hidden])').length, 1);
     document.querySelector('[data-section="models"]').click();
     value(harness.dom, "model", "unsaved-api-model");
     value(harness.dom, "base_url", "https://unsaved.example/v1");
     document.querySelector('[data-provider-choice="codex"]').click();
-    assert.equal(document.querySelector("#provider-detail-title").textContent, "Codex");
+    assert.equal(document.querySelector("#provider-detail-title").textContent, "ChatGPT (Codex)");
     assert.equal(document.querySelector("#provider-runtime-version").textContent, "v0.153.4");
+    assert.equal(document.querySelector("#provider-detail-description").textContent, "Bundled Codex runtime");
     assert.equal(document.querySelector("#provider-auth").value, "chatgpt");
     assert.equal(document.querySelector('[data-provider-choice="codex"]').getAttribute("aria-pressed"), "true");
     document.querySelector('[data-provider-choice="anthropic"]').click();
     assert.equal(document.querySelector("#provider-kind").value, "anthropic");
     assert.equal(document.querySelector("#provider-auth").value, "api_key");
     assert.equal(document.querySelector("#provider-detail-title").textContent, "Anthropic");
-    assert.equal(document.querySelector("#provider-runtime-version").textContent, "API");
+    assert.equal(document.querySelector("#provider-runtime-version").textContent, "API key");
+    assert.equal(document.querySelector("#provider-detail-description").textContent, "api.anthropic.com");
     value(harness.dom, "model", "claude-draft");
     document.querySelector('[data-provider-choice="openai"]').click();
     assert.equal(document.querySelector("#model").value, "unsaved-api-model");
@@ -1366,8 +1342,10 @@ test("saves the selected provider through the existing config command and update
     assert.equal(saves[0].args.section, "provider");
     assert.equal(saves[0].args.value.kind, "anthropic");
     assert.equal(saves[0].args.value.model, "claude-selected");
-    assert.ok(document.querySelector('[data-provider-choice="anthropic"] .status-dot.ok'));
-    assert.equal(document.querySelector('[data-provider-choice="openai"] .status-dot.ok'), null);
+    assert.ok(document.querySelector('[data-provider-choice="anthropic"] .provider-in-use:not([hidden])'));
+    assert.ok(document.querySelector('[data-provider-choice="openai"] .provider-in-use[hidden]'));
+    assert.match(document.querySelector('[data-provider-choice="anthropic"] .provider-line').textContent, /claude-selected/);
+    assert.equal(document.querySelector("#save-models").textContent, "In Use ✓");
   } finally { harness.close(); }
 });
 
@@ -1443,6 +1421,8 @@ test("counts requests with unavailable token metadata and labels their tokens n/
   } finally { harness.close(); }
 });
 
+// 5A moved enable/disable out of the list: one "Enabled" switch in the
+// detail pane follows the selected connection, and rows carry one status line.
 test("provider switches save independently, serialize writes, and preserve unsaved fields", async () => {
   const pending = deferred();
   const initial = config();
@@ -1451,17 +1431,22 @@ test("provider switches save independently, serialize writes, and preserve unsav
   try {
     await harness.ready();
     const { document } = harness.dom.window;
-    const toggle = (id) => document.querySelector(`[data-provider-enabled="${id}"]`);
-    assert.equal(document.querySelectorAll('[role="switch"][data-provider-enabled]').length, 7);
-    assert.equal(toggle("openai").getAttribute("aria-checked"), "true", "existing active connection remains enabled");
-    assert.equal(toggle("claude").getAttribute("aria-checked"), "false");
-    assert.equal(toggle("claude").closest("[data-provider-choice]"), null, "switch is a separate control");
+    const toggle = () => document.querySelector("#provider-enabled-toggle");
+    assert.equal(document.querySelectorAll('[role="switch"][data-provider-enabled]').length, 1, "one switch, in the detail pane");
+    assert.equal(toggle().dataset.providerEnabled, "openai");
+    assert.equal(toggle().getAttribute("aria-checked"), "true", "existing active connection remains enabled");
+    assert.equal(toggle().closest("[data-provider-choice]"), null, "switch is a separate control");
     value(harness.dom, "model", "unsaved-model");
     value(harness.dom, "api_key", "unsaved-key");
-    toggle("claude").click();
-    assert.ok(toggle("cursor").disabled);
+    assert.equal(document.querySelector("#save-models").textContent, "Save Changes", "edits to the connection in use offer Save Changes");
+    document.querySelector('[data-provider-choice="claude"]').click();
+    assert.equal(toggle().dataset.providerEnabled, "claude");
+    assert.equal(toggle().getAttribute("aria-checked"), "false");
+    assert.equal(document.querySelector("#save-models").textContent, "Use for Commands");
+    toggle().click();
+    assert.ok(toggle().disabled);
     assert.ok(document.querySelector("#save-models").disabled);
-    toggle("cursor").click();
+    toggle().click();
     document.querySelector("#save-models").click();
     assert.equal(callsFor(harness, "save_config_section").length, 1);
     const request = callsFor(harness, "save_config_section")[0].args;
@@ -1469,13 +1454,15 @@ test("provider switches save independently, serialize writes, and preserve unsav
     assert.deepEqual(JSON.parse(JSON.stringify(request.value)), { kind: "claude_cli", auth: "api_key", enabled: true });
     pending.resolve(enabled);
     await harness.idle();
-    assert.equal(toggle("claude").getAttribute("aria-checked"), "true");
+    assert.equal(toggle().getAttribute("aria-checked"), "true");
+    assert.ok(document.querySelector('[data-provider-choice="claude"] .provider-in-use[hidden]'), "enabling does not make it the one in use");
+    document.querySelector('[data-provider-choice="openai"]').click();
     assert.equal(document.querySelector("#model").value, "unsaved-model");
     assert.equal(document.querySelector("#api_key").value, "unsaved-key");
-    assert.ok(document.querySelector('[data-provider-choice="openai"] .status-dot.ok'));
-    assert.equal(document.querySelector('[data-provider-choice="claude"] .status-dot'), null);
+    assert.ok(document.querySelector('[data-provider-choice="openai"] .provider-in-use:not([hidden])'));
     assert.equal(callsFor(harness, "store_api_key").length, 0);
-    assert.equal(document.querySelector("#save-models").textContent, "Save and use");
+    assert.equal(document.querySelector("#save-models").textContent, "Save Changes");
+    await harness.idle();
   } finally { harness.close(); }
 });
 
@@ -1485,17 +1472,21 @@ test("failed provider toggles retain saved state and recover after navigation", 
   try {
     await harness.ready();
     const { document } = harness.dom.window;
-    document.querySelector('[data-provider-enabled="openai"]').click();
+    const toggle = () => document.querySelector("#provider-enabled-toggle");
+    toggle().click();
     document.querySelector('[data-provider-choice="claude"]').click();
     value(harness.dom, "cli-binary", "/my/claude");
-    assert.ok(document.querySelector('[data-provider-enabled="claude"]').disabled);
+    assert.equal(toggle().dataset.providerEnabled, "claude");
+    assert.ok(toggle().disabled);
     pending.reject(new Error("Could not write config"));
     await harness.idle();
-    assert.equal(document.querySelector('[data-provider-enabled="openai"]').getAttribute("aria-checked"), "true");
     assert.equal(document.querySelector("#cli-binary").value, "/my/claude");
     assert.equal(document.querySelector('[data-provider-choice="claude"]').getAttribute("aria-pressed"), "true");
-    assert.equal(document.querySelector('[data-provider-enabled="claude"]').disabled, false);
+    assert.equal(toggle().disabled, false);
     assert.match(document.querySelector("#save-status").textContent, /Could not write config/);
+    document.querySelector('[data-provider-choice="openai"]').click();
+    assert.equal(toggle().getAttribute("aria-checked"), "true");
+    await harness.idle();
   } finally { harness.close(); }
 });
 
@@ -1506,7 +1497,9 @@ test("disabled active providers show disabled status and Save and use explicitly
     await harness.ready();
     const { document } = harness.dom.window;
     assert.equal(document.querySelector('[data-provider-enabled="claude"]').getAttribute("aria-checked"), "false");
-    assert.match(document.querySelector('[data-provider-choice="claude"]').textContent, /Active · Disabled/);
+    assert.match(document.querySelector('[data-provider-choice="claude"] .provider-line').textContent, /Disabled/);
+    assert.ok(document.querySelector('[data-provider-choice="claude"] .provider-in-use[hidden]'), "a turned-off connection is not In use");
+    assert.equal(document.querySelector("#save-models").textContent, "Use for Commands");
     assert.match(document.querySelector("#status-provider").textContent, /Disabled/);
     assert.ok(document.querySelector("#status-check-provider").disabled);
     document.querySelector("#save-models").click();
@@ -1671,12 +1664,16 @@ test("history preserves incomplete rewrites with accurate recovery guidance", as
     document.querySelector('[data-section="history"]').click();
     await harness.idle(2);
     const rows = document.querySelectorAll(".hist-item");
-    assert.match(rows[0].textContent, /Not applied/);
-    assert.match(rows[0].textContent, /Your selection was not changed/);
+    assert.match(rows[0].textContent, /Not applied: your text is unchanged/);
     assert.match(rows[0].textContent, /Saved rewrite/);
-    assert.match(rows[1].textContent, /Paste unverified/);
-    assert.match(rows[1].textContent, /paste may have completed/);
+    assert.match(rows[1].textContent, /Check the app: paste may have worked/);
+    assert.match(rows[1].querySelector(".badge.warn").title, /Paste unverified/);
     assert.equal(rows[1].querySelector('[data-act="copy-result"]').disabled, false);
+    assert.equal(rows[1].querySelector('[data-act="copy-result"]').textContent, "Copy result", "problem entries offer one primary Copy result");
+    const menu = rows[1].querySelector('[data-act="copy-menu"]');
+    assert.ok(menu, "problem entries keep a keyboard path to Copy Original");
+    assert.equal(menu.getAttribute("aria-haspopup"), "menu");
+    assert.equal(menu.classList.contains("secondary"), false, "the arrow matches the primary Copy result");
   } finally { harness.close(); }
 });
 
@@ -1716,8 +1713,8 @@ test("records a pressed command shortcut, waits for release, and saves its canon
     await harness.idle();
     assert.equal(callsFor(harness, "set_shortcut_recording").at(-1).args.active, false);
     assert.equal(button.getAttribute("aria-pressed"), "false");
-    harness.dom.window.document.querySelector("#cmd-save").click();
-    await harness.idle();
+    assert.equal(button.textContent, "⇧⌘P", "the recorder shows the chord as keycaps");
+    assert.equal(callsFor(harness, "save_config_section").length, 1, "releasing the keys saves the shortcut");
     assert.equal(callsFor(harness, "save_config_section")[0].args.value[0].hotkey, "shift+cmd+p");
   } finally { harness.close(); }
 });
@@ -1756,7 +1753,7 @@ test("shortcut capture handles physical Option keys and ignores modifiers, repea
   } finally { harness.close(); }
 });
 
-test("Escape cancels recording without closing the sheet and Cmd-Enter records without saving", async () => {
+test("Escape cancels recording without leaving the editor and Cmd-Enter records without saving", async () => {
   const harness = makeHarness({ config: config({ commands: [shortcutCommand] }) });
   try {
     const button = await openShortcutRecorder(harness);
@@ -1766,12 +1763,13 @@ test("Escape cancels recording without closing the sheet and Cmd-Enter records w
     pressShortcut(harness, { key: "Escape", code: "Escape" });
     await harness.idle();
     assert.equal(button.value, shortcutCommand.hotkey);
-    assert.ok(harness.dom.window.document.querySelector("#sheet-root"));
+    assert.ok(harness.dom.window.document.querySelector("#cmd-editor #cmd-hotkey"));
     assert.equal(callsFor(harness, "set_shortcut_recording").at(-1).args.active, false);
+    assert.equal(callsFor(harness, "save_config_section").length, 0, "a cancelled capture saves nothing");
   } finally { harness.close(); }
 });
 
-test("Delete clears a recorded shortcut and Clear saves no shortcut", async () => {
+test("Delete clears a recorded shortcut and saves no shortcut", async () => {
   const harness = makeHarness({ config: config({ commands: [shortcutCommand] }) });
   try {
     const button = await openShortcutRecorder(harness);
@@ -1781,39 +1779,38 @@ test("Delete clears a recorded shortcut and Clear saves no shortcut", async () =
     assert.equal(button.value, "");
     assert.equal(button.textContent, "Record shortcut");
     assert.match(harness.dom.window.document.querySelector("#cmd-hotkey-hint").textContent, /cleared/);
-    harness.dom.window.document.querySelector("#cmd-save").click();
-    await harness.idle();
     assert.equal(callsFor(harness, "save_config_section")[0].args.value[0].hotkey, null);
   } finally { harness.close(); }
 });
 
-test("Tab, focus loss, and closing the sheet release shortcut recording", async () => {
-  for (const end of ["tab", "blur", "close"]) {
+test("Tab, focus loss, and leaving Commands release shortcut recording", async () => {
+  for (const end of ["tab", "blur", "leave"]) {
     const harness = makeHarness({ config: config({ commands: [shortcutCommand] }) });
     try {
       const button = await openShortcutRecorder(harness);
       const document = harness.dom.window.document;
       if (end === "tab") pressShortcut(harness, { key: "Tab", code: "Tab" });
       if (end === "blur") document.querySelector("#cmd-label").focus();
-      if (end === "close") document.querySelector("#cmd-cancel").click();
+      if (end === "leave") document.querySelector('[data-section="general"]').click();
       await harness.idle();
       assert.equal(callsFor(harness, "set_shortcut_recording").at(-1).args.active, false, end);
-      if (end !== "close") assert.equal(button.getAttribute("aria-pressed"), "false");
+      assert.equal(button.getAttribute("aria-pressed"), "false");
+      assert.equal(callsFor(harness, "save_config_section").length, 0, end + " without a new chord saves nothing");
     } finally { harness.close(); }
   }
 });
 
-test("a late recorder start acknowledgement cannot reactivate a closed sheet", async () => {
+test("a late recorder start acknowledgement cannot reactivate recording after leaving", async () => {
   const pending = deferred();
   const harness = makeHarness({ config: config({ commands: [shortcutCommand] }), recordShortcut: ({ active }) => active ? pending.promise : Promise.resolve() });
   try {
     await openShortcutRecorder(harness);
     const document = harness.dom.window.document;
     assert.equal(document.querySelector("#cmd-hotkey").textContent, "Preparing…");
-    document.querySelector("#cmd-cancel").click();
+    document.querySelector('[data-section="general"]').click();
     pending.resolve();
     await harness.idle(5);
-    assert.equal(document.querySelector("#sheet-root"), null);
+    assert.equal(document.querySelector("#cmd-hotkey").getAttribute("aria-pressed"), "false");
     assert.deepEqual(callsFor(harness, "set_shortcut_recording").map(({ args }) => args.active), [true, false]);
   } finally { harness.close(); }
 });

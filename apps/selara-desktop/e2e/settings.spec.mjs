@@ -41,35 +41,32 @@ for (const scenario of SCENARIOS) {
   });
 }
 
-test("command sheet closes on Escape and returns focus to the opener", async ({ page }, testInfo) => {
+test("commands edit inline beside the list, with no modal sheet", async ({ page }, testInfo) => {
   const problems = await openSettings(page);
   await showSection(page, "commands");
-  const opener = page.locator("#cmd-new");
-  await opener.click();
-  await expect(page.locator("#sheet-root [role=dialog]")).toBeVisible();
-  await expect(page.locator("#cmd-label")).toBeFocused();
-  await settle(page);
-  await page.screenshot({ path: artifactPath(testInfo, "flow-command-sheet.png") });
-  await page.keyboard.press("Escape");
+  await expect(page.locator(".cmd-item[aria-current=true]")).toHaveAttribute("data-id", "proofread");
+  await expect(page.locator("#cmd-label")).toHaveValue("Proofread");
+  await page.locator('.cmd-item[data-id="professional"]').click();
+  await expect(page.locator("#cmd-label")).toHaveValue("Professional");
   await expect(page.locator("#sheet-root")).toHaveCount(0);
-  await expect(opener).toBeFocused();
+  expect(await page.locator("#app").getAttribute("inert")).toBeNull();
+  await settle(page);
+  await page.screenshot({ path: artifactPath(testInfo, "flow-command-editor.png") });
   expect(problems).toEqual([]);
 });
 
-test("command sheet keeps Tab focus inside the dialog", async ({ page }) => {
-  // WebKit, like WKWebView with macOS keyboard navigation off, leaves buttons
-  // out of the native Tab order; the trap must still keep focus in the sheet.
-  await openSettings(page);
+test("the source list moves the selection with the arrow keys", async ({ page }) => {
+  const problems = await openSettings(page);
   await showSection(page, "commands");
-  await page.locator("#cmd-new").click();
+  await page.locator('.cmd-item[data-id="proofread"]').focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator('.cmd-item[data-id="rewrite"]')).toBeFocused();
+  await expect(page.locator("#cmd-label")).toHaveValue("Rewrite");
+  await page.keyboard.press("End");
+  await expect(page.locator("#cmd-label")).toHaveValue("Translate");
+  await page.keyboard.press("Enter");
   await expect(page.locator("#cmd-label")).toBeFocused();
-  const focusInsideSheet = () => page.evaluate(() => !!document.activeElement && !!document.activeElement.closest("#sheet-root"));
-  for (const key of ["Tab", "Shift+Tab"]) {
-    for (let i = 0; i < 12; i += 1) {
-      await page.keyboard.press(key);
-      expect(await focusInsideSheet(), `${key} #${i + 1} left the sheet`).toBe(true);
-    }
-  }
+  expect(problems).toEqual([]);
 });
 
 test("sidebar behaves like a source list", async ({ page }) => {
@@ -144,8 +141,10 @@ test("General saves each field when it is committed", async ({ page }) => {
   const problems = await openSettings(page);
   await showSection(page, "general");
   await expect(page.locator("#save-general")).toHaveCount(0);
-  await page.locator("#language").fill("es");
-  await page.locator("#language").press("Enter");
+  // Language is a combo box over the saved code: type to filter, Return picks.
+  await page.locator("#language-picker").fill("es");
+  await page.locator("#language-picker").press("Enter");
+  await expect(page.locator("#language-picker")).toHaveValue("Español");
   await expect(page.locator("#save-status")).toHaveText("Saved");
   await expect(page.locator(".nav-feedback")).toHaveClass(/quiet/);
   const saved = await page.evaluate(() =>
@@ -175,8 +174,8 @@ test("update scenario offers install and shows release notes", async ({ page }, 
 test("errors scenario reports a failed save", async ({ page }, testInfo) => {
   const problems = await openSettings(page, "errors");
   await showSection(page, "general");
-  await page.locator("#language").fill("fr");
-  await page.locator("#language").press("Enter");
+  await page.locator("#language-picker").fill("fr");
+  await page.locator("#language-picker").press("Enter");
   await expect(page.locator("#section-general .field-error")).toContainText("Permission denied");
   await expect(page.locator("#language")).toHaveValue("fr");
   await expect(page.locator(".nav-feedback")).not.toHaveClass(/quiet/);
@@ -304,6 +303,8 @@ test("Providers keeps its list beside the connection at every size", async ({ pa
 
 test("the page title stays in the title bar while content scrolls", async ({ page }) => {
   const problems = await openSettings(page);
+  // Status fits a full-size window now; a short one makes it scroll.
+  await page.setViewportSize({ width: page.viewportSize().width, height: 260 });
   const title = page.locator("#section-status > h1");
   await expect(title).toHaveAttribute("data-tauri-drag-region", "");
   await page.locator("main.content").evaluate((el) => { el.scrollTop = 300; });
@@ -317,9 +318,11 @@ test("the page title stays in the title bar while content scrolls", async ({ pag
 test("Status explains serve without developer commands up front", async ({ page }) => {
   const problems = await openSettings(page, "fresh");
   const serve = page.locator("#status-serve");
-  await expect(serve.locator("> .field-hint").first()).toHaveText("Hotkeys only work while it runs.");
+  await serve.locator(".pip-face").click();
+  await expect(serve.locator(".pip-pop > .field-hint").first()).toHaveText("Hotkeys only work while it runs.");
   await expect(serve.locator("details summary", { hasText: "Troubleshooting" })).toBeVisible();
-  await expect(page.locator("#status-shortcuts .status-dot")).toHaveCount(0);
+  // The shortcuts dot now means "live right now": gray while serve is stopped.
+  await expect(page.locator("#status-shortcuts .status-dot")).toHaveClass(/off/);
   await showSection(page, "usage");
   await expect(page.locator("#status-usage .status-dot")).toHaveCount(0);
   expect(problems).toEqual([]);
@@ -364,12 +367,14 @@ test("a successful save clears every field error in the section", async ({ page 
   const problems = await openSettings(page);
   await showSection(page, "general");
   await page.evaluate(() => { window.__selaraMock.state.failSaves = true; });
-  await page.locator("#language").fill("de");
-  await page.locator("#language").press("Enter");
+  await page.locator("#language-picker").fill("de");
+  await page.locator("#language-picker").press("Enter");
   await expect(page.locator("#section-general .field-error")).toHaveCount(1);
   await page.evaluate(() => { window.__selaraMock.state.failSaves = false; });
-  await page.locator("#hotkey").fill("ctrl+alt+space");
-  await page.locator("#hotkey").press("Enter");
+  // The hotkey is a keycap recorder now: click it, then press the keys.
+  await page.locator("#hotkey").click();
+  await expect(page.locator("#hotkey-hint")).toContainText("Recording");
+  await page.keyboard.press("Control+Alt+Space");
   await expect.poll(() => page.evaluate(() => window.__selaraMock.state.config.hotkey)).toBe("ctrl+alt+space");
   expect(await page.evaluate(() => window.__selaraMock.state.config.language)).toBe("de");
   await expect(page.locator("#section-general .field-error")).toHaveCount(0);

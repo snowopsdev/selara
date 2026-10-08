@@ -7,12 +7,20 @@
 //   &fail=config                                make get_config reject too
 //   &delay=<ms>                                 per-call latency (default 150)
 //   &accent=<hex>                               system accent, e.g. %23bf5af2 (default: none)
+//   &serve=external                             serve was started in Terminal, not by
+//                                               Settings: running but unmanaged, so
+//                                               accessibility_status is "unknown"
 //
 // window.__selaraMock exposes { emit(event, payload), calls, state, menu,
 // chooseMenuItem(text) } for tests and for poking at the UI from the console.
 // Native menus are not drawn; `menu` holds the last one the UI opened.
 // Set state.confirm = false to answer native confirmations with Cancel, and
 // state.failSaves = true to make save_config_section fail until reset.
+// try_command returns a deterministic rewrite chosen by the prompt's wording,
+// records usage like the real command, and uses the backend's error strings.
+// state.chooseApp answers choose_app (null = Cancel); state.pngCopies and
+// state.pngSaves record copy_png / save_png, and state.saveCancelled = true
+// makes the save panel return null.
 (function () {
   "use strict";
   if (window.__TAURI_INTERNALS__ || (window.__TAURI__ && window.__TAURI__.core)) return;
@@ -23,6 +31,7 @@
   const delayParam = params.has("delay") ? Number(params.get("delay")) : NaN;
   const delay = Number.isFinite(delayParam) && delayParam >= 0 ? delayParam : 150;
   const accent = /^#[0-9a-f]{6}$/i.test(params.get("accent") || "") ? params.get("accent") : null;
+  const externalServe = params.get("serve") === "external";
   const now = Math.floor(Date.now() / 1000);
 
   const clone = (value) => (value === undefined ? value : JSON.parse(JSON.stringify(value)));
@@ -40,12 +49,14 @@
   }
 
   const baseCommands = [
-    command("proofread", "Proofread", "Fix spelling, grammar, and punctuation. Keep the original meaning and tone.", "ctrl+alt+p"),
-    command("rewrite", "Rewrite", "Rewrite the text to read more clearly.", "ctrl+alt+r"),
+    // glyph/color/review are optional; Friendly leaves them unset so the UI
+    // shows its derived monogram and color.
+    command("proofread", "Proofread", "Fix spelling, grammar, and punctuation. Keep the original meaning and tone.", "ctrl+alt+p", { glyph: "✓", color: "#34c759" }),
+    command("rewrite", "Rewrite", "Rewrite the text to read more clearly.", "ctrl+alt+r", { glyph: "↻", color: "#0a84ff" }),
     command("friendly", "Friendly", "Rewrite the text in a warm, friendly tone."),
-    command("professional", "Professional", "Rewrite the text in a clear, professional tone.", "ctrl+alt+shift+p"),
-    command("concise", "Concise", "Make the text shorter without losing meaning.", null, { model: "gpt-5.4-mini" }),
-    command("translate", "Translate", "Translate the text to English.", null, { apps: ["com.apple.mail", "com.tinyspeck.slackmacgap"] }),
+    command("professional", "Professional", "Rewrite the text in a clear, professional tone suited to {{app}}. Reply in {{language}}.", "ctrl+alt+shift+p", { glyph: "◆", color: "#5e5ce6", review: true }),
+    command("concise", "Concise", "Make the text shorter without losing meaning.", null, { model: "gpt-5.4-mini", glyph: "✂︎", color: "#ff375f" }),
+    command("translate", "Translate", "Translate the text to English.", null, { apps: ["com.apple.mail", "com.tinyspeck.slackmacgap"], glyph: "文", color: "#30b0c7", review: true }),
   ];
 
   // The nine commands a new config.toml starts with (selara-core builtin_commands).
@@ -97,9 +108,41 @@
     return { requests, input, output, cost_usd: cost, unpriced: 0, tokens_missing: 0 };
   }
 
+  // The 30 local days ending today, oldest first, as usage_summary reports them.
+  function localDay(offset) {
+    const d = new Date();
+    d.setHours(12, 0, 0, 0);
+    d.setDate(d.getDate() - offset);
+    return d;
+  }
+  function dayKey(d) {
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  }
+  function emptyDaily() {
+    return Array.from({ length: 30 }, (_, i) => ({ day: dayKey(localDay(29 - i)), requests: 0, cost_usd: null }));
+  }
+  // Deterministic and plausible: weekends lighter, `today` today, `total` in all.
+  function sampleDaily(total, today, cost) {
+    const days = Array.from({ length: 30 }, (_, i) => localDay(29 - i));
+    const weekend = (d) => d.getDay() === 0 || d.getDay() === 6;
+    let seed = 7;
+    const weights = days.slice(0, 29).map((d) => {
+      seed = (seed * 9301 + 49297) % 233280;
+      return (0.45 + seed / 233280) * (weekend(d) ? 0.3 : 1);
+    });
+    const sum = weights.reduce((a, b) => a + b, 0);
+    const counts = weights.map((w) => Math.max(1, Math.floor((w / sum) * (total - today))));
+    let short = total - today - counts.reduce((a, b) => a + b, 0);
+    for (let i = 0; short > 0; i = (i + 1) % counts.length) {
+      if (!weekend(days[i])) { counts[i] += 1; short -= 1; }
+    }
+    counts.push(today);
+    return days.map((d, i) => ({ day: dayKey(d), requests: counts[i], cost_usd: counts[i] ? Math.round(counts[i] * (cost / total) * 10000) / 10000 : null }));
+  }
+
   function emptyUsage() {
     const empty = () => bucket(0, 0, 0, null);
-    return { path: "~/Library/Application Support/selara/usage.jsonl", today: empty(), last_30_days: empty(), all_time: empty(), models: [] };
+    return { path: "~/Library/Application Support/selara/usage.jsonl", today: empty(), last_30_days: empty(), all_time: empty(), models: [], daily: emptyDaily(), providers: [] };
   }
 
   function makeUsage() {
@@ -110,11 +153,19 @@
       path: "~/Library/Application Support/selara/usage.jsonl",
       today: bucket(12, 4180, 3920, 0.0061),
       last_30_days: bucket(284, 102455, 96120, 0.1482),
-      all_time: { ...bucket(1031, 391204, 370880, 0.5427), unpriced: 42, tokens_missing: 3 },
+      all_time: { ...bucket(1031, 391204, 370880, 0.5427), unpriced: 170, tokens_missing: 3 },
       models: [
         { kind: "openai_compatible", model: "gpt-5.4-mini", ...bucket(861, 330100, 311540, 0.5427) },
         { kind: "claude_cli", model: "", ...bucket(128, 48920, 47110, null), unpriced: 128 },
         { kind: "openrouter", model: "anthropic/claude-opus-5", ...bucket(42, 12184, 12230, null), unpriced: 42, tokens_missing: 3 },
+      ],
+      daily: sampleDaily(284, 12, 0.1482),
+      // Timed requests (duration_ms) exist for the API key and Claude Code;
+      // the OpenRouter runs predate timing, so it has none.
+      providers: [
+        { kind: "openai_compatible", last_ts: now - 120, median_ms: 1100, recent_ms: [980, 1240, 870, 1530, 1090, 1180, 760, 1420, 1010, 940, 1300, 1110, 890, 1650, 1020, 1150, 990, 1270, 1080, 1100], last_30_days: bucket(236, 85010, 79800, 0.1482) },
+        { kind: "claude_cli", last_ts: now - 3600 * 3 - 600, median_ms: 4200, recent_ms: [3900, 4600, 3800, 5200, 4100, 4300, 3700, 4900, 4200, 4000, 4500, 4150], last_30_days: { ...bucket(38, 13880, 12900, null), unpriced: 38 } },
+        { kind: "openrouter", last_ts: now - 86400 * 6, median_ms: null, recent_ms: [], last_30_days: { ...bucket(10, 3565, 3420, null), unpriced: 10 } },
       ],
     };
   }
@@ -129,10 +180,99 @@
     ];
   }
 
+  // Per-provider activity (UsageSummary.providers): one entry per usage kind
+  // label seen. Added only when the fixture doesn't carry its own.
+  function withProviderActivity(usage) {
+    if (Array.isArray(usage.providers)) return usage;
+    const recent = (base) => Array.from({ length: 20 }, (_, i) => base + ((i * 137) % 900) - 300);
+    const providers = scenario === "fresh" ? [] : [
+      { kind: "openai_compatible", last_ts: now - 90, median_ms: 1140, recent_ms: recent(1140), last_30_days: bucket(231, 84120, 79010, 0.1482) },
+      { kind: "claude_cli", last_ts: now - 86400 * 2, median_ms: 3820, recent_ms: recent(3820), last_30_days: { ...bucket(41, 15900, 14880, null), unpriced: 41 } },
+      { kind: "openrouter", last_ts: now - 86400 * 9, median_ms: null, recent_ms: [], last_30_days: { ...bucket(12, 2435, 2230, null), unpriced: 12, tokens_missing: 3 } },
+    ];
+    return { ...usage, providers };
+  }
+
+  // try_command: a deterministic stand-in for a model run. The rewrite
+  // follows the prompt's wording; errors use the backend's exact strings.
+  const KNOWN_REWRITES = {
+    "hey can u send the numbers asap": {
+      professional: "Could you send the numbers when you have a moment?",
+      friendly: "Hey! Could you send over the numbers when you get a chance? Thanks so much!",
+      concise: "Please send the numbers ASAP.",
+      proofread: "Hey, can you send the numbers ASAP?",
+    },
+    "Thanks for you're help with the launch, its been great.": {
+      professional: "Thank you for your help with the launch; it has been a great success.",
+      friendly: "Thanks so much for your help with the launch, it's been great!",
+      concise: "Thanks for your help with the launch.",
+      proofread: "Thanks for your help with the launch; it's been great.",
+    },
+  };
+  function tidy(text) {
+    let t = " " + text.trim() + " ";
+    for (const [a, b] of [[" u ", " you "], [" ur ", " your "], [" you're help", " your help"], [", its ", "; it's "], [" its ", " it's "], [" asap", " ASAP"], [" i ", " I "], [" dont ", " don't "], [" cant ", " can't "]]) t = t.split(a).join(b);
+    t = t.trim();
+    t = t.charAt(0).toUpperCase() + t.slice(1);
+    return /[.!?]$/.test(t) ? t : t + ".";
+  }
+  function fakeRewrite(prompt, text) {
+    const p = prompt.toLowerCase();
+    const style = /translat/.test(p) ? "translate" : /professional|formal/.test(p) ? "professional" : /friendly|warm/.test(p) ? "friendly"
+      : /concise|shorter|shorten/.test(p) ? "concise" : /summar|key points|bullet|table/.test(p) ? "summary" : /proofread|grammar|spelling/.test(p) ? "proofread" : "rewrite";
+    const known = KNOWN_REWRITES[text.trim()];
+    if (known && known[style]) return known[style];
+    if (style === "translate") return { "Merci beaucoup pour votre patience.": "Thank you very much for your patience." }[text.trim()] || tidy(text);
+    if (style === "summary") return "- " + tidy(text.split(/(?<=[.!?])\s/)[0]);
+    if (style === "concise") {
+      const words = tidy(text).replace(/\b(just|really|quickly|very|actually|basically) /gi, "").split(" ");
+      return words.slice(0, Math.max(4, Math.ceil(words.length * 0.6))).join(" ").replace(/[,;:.]?$/, ".");
+    }
+    if (style === "friendly") return "Hi! " + tidy(text).replace(/\.$/, "!");
+    if (style === "professional") return tidy(text).replace(/^Hey,? /, "Hello, ").replace(/^Thanks\b/, "Thank you");
+    return tidy(text);
+  }
+  function usageLabel(p) {
+    if (p.kind === "open_ai_compatible") return p.auth === "chatgpt" ? "chatgpt_codex" : "openai_compatible";
+    return p.kind === "open_router" ? "openrouter" : p.kind;
+  }
+  function tryCommand(args) {
+    const prompt = String(args.prompt || "");
+    const text = String(args.text || "");
+    if (!prompt.trim()) throw "Write an instruction for the command first.";
+    if (!text.trim()) throw "Enter some sample text to try the command on.";
+    const max = Number(state.config.limits && state.config.limits.hard_max_chars) || 0;
+    if (max && text.length > max) throw "Sample is " + text.length + " characters, over your hard limit of " + max + ". Shorten it or change Limits in Settings.";
+    const p = state.config.provider;
+    const kind = usageLabel(p);
+    // Otherwise the provider's own message, as the real command reports it.
+    if (kind === "openai_compatible" && !state.keychain.includes(p.kind) && !p.api_key) throw "OpenAI-compatible request failed: 401 Unauthorized (no API key configured)";
+    if (kind === "chatgpt_codex" && !state.auth.logged_in) throw "Codex is not signed in. Sign in with ChatGPT in Providers.";
+    const model = String(args.model || p.model || "").trim() || (CLI_KINDS.includes(p.kind) ? "default" : "gpt-4o-mini");
+    const elapsed = 600 + ((text.length * 37 + prompt.length * 11) % 1400);
+    const result = fakeRewrite(prompt, text);
+    // A run records usage, like the real command.
+    const input = Math.ceil(text.length / 4) + Math.ceil(prompt.length / 4);
+    const output = Math.ceil(result.length / 4);
+    for (const key of ["today", "last_30_days", "all_time"]) {
+      const b = state.usage[key];
+      b.requests += 1; b.input += input; b.output += output;
+    }
+    state.usage.providers = state.usage.providers || [];
+    let entry = state.usage.providers.find((e) => e.kind === kind);
+    if (!entry) { entry = { kind, last_ts: 0, median_ms: null, recent_ms: [], last_30_days: bucket(0, 0, 0, null) }; state.usage.providers.push(entry); }
+    entry.last_ts = Math.floor(Date.now() / 1000);
+    entry.recent_ms = [...entry.recent_ms, elapsed].slice(-20);
+    const sorted = [...entry.recent_ms].sort((a, b) => a - b);
+    entry.median_ms = sorted[Math.floor(sorted.length / 2)];
+    entry.last_30_days.requests += 1;
+    return { result, elapsed_ms: elapsed, model, provider: kind };
+  }
+
   const signedOut = { state: "signed_out", logged_in: false, via_chatgpt: false, message: "No ChatGPT account is signed in" };
   const connected = { state: "connected", logged_in: true, via_chatgpt: true, email: "user@example.test", plan: "pro", message: "ChatGPT account connected" };
 
-  const running = scenario === "configured" || scenario === "update";
+  const running = externalServe || scenario === "configured" || scenario === "update";
   const state = {
     scenario,
     config: makeConfig(),
@@ -142,9 +282,17 @@
     ax: scenario === "fresh" ? "missing" : "granted",
     autostart: scenario !== "fresh",
     confirm: true,
+    // choose_app answers with this app; null acts as Cancel.
+    chooseApp: { name: "Keychain Access", bundle_id: "com.apple.keychainaccess" },
+    // copy_png / save_png record what reached the pasteboard and the save panel.
+    pngCopies: [],
+    pngSaves: [],
+    saveCancelled: false,
     serveRunning: running,
+    // A serve started outside Settings: the app can't inspect its grant.
+    serveExternal: externalServe,
     history: makeHistory(),
-    usage: makeUsage(),
+    usage: withProviderActivity(makeUsage()),
     update: scenario === "update"
       ? { state: "available", current: "0.6.0", version: "0.7.0", date: "2026-09-22T00:00:00Z", notes: "### Features\n\n* Faster command menu\n* Native shortcut recorder\n\n### Fixes\n\n* Keep drafts after a failed save" }
       : null,
@@ -152,6 +300,33 @@
       ? ["[serve] selara serve 0.6.0 starting", "[serve] accessibility trust: granted", "[serve] 6 commands registered, 4 shortcuts", "[serve] ready"]
       : [],
   };
+
+  // Regular (Dock) apps, sorted by name, without Selara: running_apps.
+  const RUNNING_APPS = [
+    { name: "1Password", bundle_id: "com.1password.1password" },
+    { name: "Finder", bundle_id: "com.apple.finder" },
+    { name: "Mail", bundle_id: "com.apple.mail" },
+    { name: "Messages", bundle_id: "com.apple.MobileSMS" },
+    { name: "Notes", bundle_id: "com.apple.Notes" },
+    { name: "Safari", bundle_id: "com.apple.Safari" },
+    { name: "Slack", bundle_id: "com.tinyspeck.slackmacgap" },
+    { name: "Terminal", bundle_id: "com.apple.Terminal" },
+    { name: "Visual Studio Code", bundle_id: "com.microsoft.VSCode" },
+  ];
+  const ICON_COLORS = { "1password": "#0572ec", finder: "#1e90ff", mail: "#2f8cff", messages: "#34c759", notes: "#e9b500", safari: "#0a84ff", slack: "#4a154b", terminal: "#1d1d1f", "visual studio code": "#1f8ad2", "keychain access": "#8e8e93" };
+  // app_icon: a 64×64 image for a name or bundle id; null for globs and
+  // unknown apps, where NSWorkspace has nothing to show.
+  function appIcon(app) {
+    const raw = String(app || "").trim();
+    if (!raw || raw.includes("*")) return null;
+    const known = [...RUNNING_APPS, { name: "Keychain Access", bundle_id: "com.apple.keychainaccess" }]
+      .find((a) => a.bundle_id.toLowerCase() === raw.toLowerCase() || a.name.toLowerCase() === raw.toLowerCase());
+    if (!known) return null;
+    const letters = /^\d/.test(known.name) ? known.name.slice(0, 2).toUpperCase() : known.name[0];
+    const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><rect x='4' y='4' width='56' height='56' rx='13' fill='" + (ICON_COLORS[known.name.toLowerCase()] || "#8e8e93") + "'/>" +
+      "<text x='32' y='42' font-family='-apple-system,Helvetica,sans-serif' font-size='26' font-weight='700' fill='white' text-anchor='middle'>" + letters + "</text></svg>";
+    return "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+  }
 
   // The native command reports the active provider's source only.
   function keySource() {
@@ -209,6 +384,7 @@
 
   function supervisorStatus() {
     if (!state.serveRunning) return { managed: false, pid: null, external: false, last_error: scenario === "errors" ? "serve exited with status 1" : null, child_status: null };
+    if (state.serveExternal) return { managed: false, pid: null, external: true, last_error: null, child_status: null };
     return {
       managed: true,
       pid: 48213,
@@ -312,7 +488,8 @@
         if (args.kind === "open_router") return ["anthropic/claude-opus-5", "openai/gpt-5.4", "google/gemini-2.5-pro"];
         return ["gpt-5.4", "gpt-5.4-mini", "gpt-4o-mini"];
       case "usage_summary": return clone(state.usage);
-      case "clear_usage": state.usage = emptyUsage(); return clone(state.usage);
+      case "clear_usage": state.usage = { ...emptyUsage(), providers: [] }; return clone(state.usage);
+      case "try_command": return tryCommand(args);
       case "serve_status": return { running: state.serveRunning, pid: state.serveRunning ? 48213 : null, pidfile: "~/Library/Application Support/selara/serve.pid" };
       case "serve_supervisor_status": return supervisorStatus();
       case "serve_log": return state.log.slice();
@@ -320,6 +497,7 @@
       case "serve_restart":
         if (scenario === "errors") throw "selara serve exited during startup: Accessibility permission is missing";
         state.serveRunning = true;
+        state.serveExternal = false;
         state.log.push("[serve] ready");
         setTimeout(() => emit("serve-changed", null), 0);
         return null;
@@ -331,7 +509,8 @@
       case "serve_quiesce":
       case "serve_resume":
         return null;
-      case "accessibility_status": return state.ax;
+      // Like the backend: only a managed serve reports its grant.
+      case "accessibility_status": return state.serveRunning && state.serveExternal ? "unknown" : state.ax;
       case "open_accessibility_settings": return null;
       case "app_version": return "0.6.0";
       case "bundled_codex_version": return "0.153.4";
@@ -344,6 +523,15 @@
         return clone(state.update);
       case "install_update": runMockInstall(); return null;
       case "set_shortcut_recording": return null;
+      case "app_icon": return appIcon(args.app);
+      case "running_apps": return clone(RUNNING_APPS);
+      case "choose_app": return clone(state.chooseApp);
+      case "copy_png":
+        state.pngCopies.push(String(args.png_base64 || "").length);
+        return null;
+      case "save_png":
+        state.pngSaves.push({ suggested_name: args.suggested_name, bytes: String(args.png_base64 || "").length });
+        return state.saveCancelled ? null : "~/Downloads/" + args.suggested_name;
       case "plugin:autostart|is_enabled": return state.autostart;
       case "plugin:autostart|enable": state.autostart = true; return null;
       case "plugin:autostart|disable": state.autostart = false; return null;
