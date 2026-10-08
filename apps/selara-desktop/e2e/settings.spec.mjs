@@ -162,7 +162,7 @@ test("General saves each field when it is committed", async ({ page }) => {
 
 test("update scenario offers install and shows release notes", async ({ page }, testInfo) => {
   const problems = await openSettings(page, "update");
-  await expect(page.locator("#status-updates-state")).toHaveText("v0.7.0 available");
+  await expect(page.locator("#status-updates-state")).toHaveText("v0.8.0 available");
   await expect(page.locator("#status-install-update")).toBeVisible();
   await page.locator("#update-details-toggle").click();
   await expect(page.locator(".update-popover")).toBeVisible();

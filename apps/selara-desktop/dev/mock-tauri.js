@@ -294,7 +294,7 @@
     history: makeHistory(),
     usage: withProviderActivity(makeUsage()),
     update: scenario === "update"
-      ? { state: "available", current: "0.6.0", version: "0.7.0", date: "2026-09-22T00:00:00Z", notes: "### Features\n\n* Faster command menu\n* Native shortcut recorder\n\n### Fixes\n\n* Keep drafts after a failed save" }
+      ? { state: "available", current: "0.7.0", version: "0.8.0", date: "2026-10-22T00:00:00Z", notes: "### Features\n\n* Faster command menu\n* Native shortcut recorder\n\n### Fixes\n\n* Keep drafts after a failed save" }
       : null,
     log: running
       ? ["[serve] selara serve 0.6.0 starting", "[serve] accessibility trust: granted", "[serve] 6 commands registered, 4 shortcuts", "[serve] ready"]
@@ -368,7 +368,7 @@
   // Walk the states the native updater emits, ending where the real app
   // would relaunch.
   function runMockInstall() {
-    const version = state.update && state.update.version || "0.7.0";
+    const version = state.update && state.update.version || "0.8.0";
     const total = 18 * 1024 * 1024;
     const steps = [
       { state: "downloading", version, downloaded: total / 3, total },
@@ -390,7 +390,7 @@
       pid: 48213,
       external: false,
       last_error: null,
-      child_status: { version: "0.6.0", id: "serve-48213", readiness: "ready", ax_trust: state.ax, generation: 1, external: false },
+      child_status: { version: "0.7.0", id: "serve-48213", readiness: "ready", ax_trust: state.ax, generation: 1, external: false },
     };
   }
 
@@ -512,7 +512,7 @@
       // Like the backend: only a managed serve reports its grant.
       case "accessibility_status": return state.serveRunning && state.serveExternal ? "unknown" : state.ax;
       case "open_accessibility_settings": return null;
-      case "app_version": return "0.6.0";
+      case "app_version": return "0.7.0";
       case "bundled_codex_version": return "0.153.4";
       case "system_accent_color": return accent;
       case "confirm_action": return state.confirm !== false;
