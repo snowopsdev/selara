@@ -28,6 +28,7 @@ use selara_platform::macos::{
 };
 use selara_platform::SelectionService;
 
+use crate::instruction::InstructionEvent;
 use crate::review::{self, ReviewAction, ReviewStep};
 
 const DIALOG_SIZE: (f32, f32) = (400.0, 280.0);
@@ -300,23 +301,6 @@ fn push_history(history: &mut VecDeque<String>, text: &str) {
     history.truncate(HISTORY_CAP);
 }
 
-/// Where ↑ (`delta > 0`, older) or ↓ (`delta < 0`, newer) lands while walking
-/// a history of `len` entries stored newest first. `None` is the empty box:
-/// ↑ from there recalls the newest entry and ↓ from the newest returns to it.
-/// Walking past the oldest entry stays on it.
-fn history_step(current: Option<usize>, len: usize, delta: isize) -> Option<usize> {
-    if len == 0 {
-        return None;
-    }
-    match (current, delta.signum()) {
-        (None, 1) => Some(0),
-        (Some(i), 1) => Some((i + 1).min(len - 1)),
-        (Some(0), -1) => None,
-        (Some(i), -1) => Some(i - 1),
-        (current, _) => current,
-    }
-}
-
 /// `1234567` → `1,234,567`, for the streaming progress counter.
 fn format_thousands(n: usize) -> String {
     let digits = n.to_string();
@@ -502,13 +486,12 @@ struct ServeApp {
     job_tx: Sender<JobResult>,
     active_job: Option<(u64, tokio::task::AbortHandle)>,
     runtime: tokio::runtime::Runtime,
-    instruction: String,
-    focus_instruction: bool,
+    /// ↑-recall list for the instruction popover, newest first. The popover
+    /// gets a copy on open; only `start_command` records into it.
     instruction_history: VecDeque<String>,
-    history_cursor: Option<usize>,
     unsaved_history: VecDeque<history::PendingEntry>,
     last_history_retry: Instant,
-    notice: String,
+    popover: crate::instruction::InstructionPanel,
     protocol: Option<Receiver<ProtocolInput>>,
     gate: WorkGate,
     pending_quiesce: Vec<String>,
@@ -579,6 +562,7 @@ impl ServeApp {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
+        let popover = crate::instruction::InstructionPanel::new(&egui_ctx);
         Ok(Self {
             request_config: config.clone(),
             config,
@@ -609,13 +593,10 @@ impl ServeApp {
             job_tx,
             active_job: None,
             runtime,
-            instruction: String::new(),
-            focus_instruction: false,
             instruction_history: VecDeque::new(),
-            history_cursor: None,
             unsaved_history: VecDeque::new(),
             last_history_retry: Instant::now(),
-            notice: String::new(),
+            popover,
             protocol: None,
             gate: WorkGate::default(),
             pending_quiesce: Vec::new(),
@@ -1247,13 +1228,13 @@ impl ServeApp {
         self.hide(ctx);
         self.target_pid = Some(target);
         self.progress.capture_anchor(self.target_pid);
+        if command_id.is_none() {
+            self.popover.capture_anchor(self.target_pid);
+        }
         self.request_config = self.config.clone();
         self.soft_warn_acked = false;
         self.secret_guard_acked = false;
         self.replace_warn_acked = false;
-        self.instruction.clear();
-        self.notice.clear();
-        self.history_cursor = None;
         let snapshot = self
             .runtime
             .block_on(self.selection.read_selection())
@@ -1275,8 +1256,12 @@ impl ServeApp {
             Some(cmd) => self.prepare_command(ctx, cmd, CommandOrigin::Configured),
             None => {
                 self.phase = UiPhase::Instruction;
-                self.focus_instruction = true;
-                self.show_dialog(ctx);
+                let chars = self.selection_chars();
+                self.popover.show(
+                    self.captured_app.as_deref(),
+                    chars,
+                    &self.instruction_history,
+                );
                 Ok(())
             }
         }
@@ -1571,8 +1556,10 @@ impl ServeApp {
         self.hide(ctx);
     }
 
-    fn save_instruction(&mut self) {
-        let prompt = self.instruction.trim().to_string();
+    /// ⌘S in the instruction popover: save `text` as a configured command
+    /// and show the outcome in the popover's meta row.
+    fn save_instruction(&mut self, text: &str) {
+        let prompt = text.trim().to_string();
         if prompt.is_empty() {
             return;
         }
@@ -1588,10 +1575,49 @@ impl ServeApp {
             latest.commands.push(command);
             Ok(())
         });
-        self.notice = match result {
-            Ok(_) => format!("Saved as “{label}”. Edit it in Settings → Commands."),
-            Err(e) => format!("Could not save command: {e}"),
-        };
+        match result {
+            Ok(_) => self
+                .popover
+                .set_notice(&format!("Saved as command “{label}”"), true),
+            Err(e) => self
+                .popover
+                .set_notice(&format!("Could not save command: {e}"), false),
+        }
+    }
+
+    /// Drain the instruction popover's events. Submit hands the text to the
+    /// same guarded path the egui dialog used; Confirm/Working/Error follow.
+    fn poll_instruction(&mut self, ctx: &egui::Context) {
+        while let Some(event) = self.popover.take_event() {
+            if !matches!(self.phase, UiPhase::Instruction) {
+                continue;
+            }
+            match event {
+                InstructionEvent::Submit(text) => {
+                    // Swift already ordered the panel out; make sure before
+                    // the selection is revalidated and, later, pasted.
+                    self.popover.hide();
+                    if let Err(message) =
+                        self.prepare_command(ctx, adhoc_command(&text), CommandOrigin::Instruction)
+                    {
+                        self.fail(ctx, message);
+                    }
+                }
+                InstructionEvent::Save(text) => self.save_instruction(&text),
+                InstructionEvent::Cancel => {
+                    self.hide(ctx);
+                    // The panel never activates Selara, so the source app is
+                    // normally still frontmost. Only refocus it if something
+                    // made Selara frontmost meanwhile.
+                    if frontmost_pid() == Some(std::process::id() as i32) {
+                        if let Some(pid) = self.target_pid {
+                            let _ = request_activate_pid(pid);
+                        }
+                    }
+                }
+                InstructionEvent::Dismiss => self.hide(ctx),
+            }
+        }
     }
 }
 impl eframe::App for ServeApp {
@@ -1607,6 +1633,7 @@ impl eframe::App for ServeApp {
         if matches!(
             self.phase,
             UiPhase::Hidden
+                | UiPhase::Instruction
                 | UiPhase::Working { .. }
                 | UiPhase::Restoring { .. }
                 | UiPhase::Review { .. }
@@ -1619,6 +1646,7 @@ impl eframe::App for ServeApp {
         if let Some(action) = self.progress.take_review_action() {
             self.handle_review_action(ctx, action);
         }
+        self.poll_instruction(ctx);
         self.hotkey.poll();
         self.poll_config();
         if !self.unsaved_history.is_empty()
@@ -1637,6 +1665,13 @@ impl eframe::App for ServeApp {
         } else if let Some(action) = self.hotkey.take_pending() {
             if !self.gate.quiescing {
                 let result = match action {
+                    // Pressing the instruction hotkey again closes the popover.
+                    HotkeyAction::CustomInstruction
+                        if matches!(self.phase, UiPhase::Instruction) =>
+                    {
+                        self.hide(ctx);
+                        Ok(())
+                    }
                     HotkeyAction::CustomInstruction => self.begin_run(ctx, None, None),
                     HotkeyAction::Command(id) => self.begin_run(ctx, Some(&id), None),
                     HotkeyAction::Cancel => {
@@ -1704,6 +1739,11 @@ impl eframe::App for ServeApp {
                 self.fail(ctx, message);
             }
         }
+        // Every exit from the Instruction phase (hide, fail, quiesce, a new
+        // command) also closes the native popover.
+        if !matches!(self.phase, UiPhase::Instruction) && self.popover.is_visible() {
+            self.popover.hide();
+        }
         self.finish_protocol_frame(ctx);
         ctx.request_repaint_after(
             if self.shortcut_recording.is_some() || self.hotkey_restore_pending {
@@ -1722,7 +1762,10 @@ impl eframe::App for ServeApp {
         if self.gate.quiescing
             || matches!(
                 self.phase,
-                UiPhase::Hidden | UiPhase::Restoring { .. } | UiPhase::Review { .. }
+                UiPhase::Hidden
+                    | UiPhase::Instruction
+                    | UiPhase::Restoring { .. }
+                    | UiPhase::Review { .. }
             )
         {
             return;
@@ -1732,66 +1775,9 @@ impl eframe::App for ServeApp {
             self.hide(&ctx);
             return;
         }
-        let mut run = false;
-        let mut save = false;
         let mut confirm = false;
         let mut dismiss = false;
         match &self.phase {
-            UiPhase::Instruction => {
-                ui.heading("Custom instruction");
-                ui.label(format!(
-                    "Transform the selection in {}.",
-                    self.captured_app.as_deref().unwrap_or("the source app")
-                ));
-                let recall = ctx.input(|i| {
-                    if i.key_pressed(egui::Key::ArrowUp)
-                        && (self.instruction.is_empty() || self.history_cursor.is_some())
-                    {
-                        1
-                    } else if i.key_pressed(egui::Key::ArrowDown) && self.history_cursor.is_some() {
-                        -1
-                    } else {
-                        0
-                    }
-                });
-                if recall != 0 {
-                    self.history_cursor =
-                        history_step(self.history_cursor, self.instruction_history.len(), recall);
-                    self.instruction = self
-                        .history_cursor
-                        .and_then(|i| self.instruction_history.get(i))
-                        .cloned()
-                        .unwrap_or_default();
-                }
-                let edit = ui.add(
-                    egui::TextEdit::multiline(&mut self.instruction)
-                        .hint_text("What should change?")
-                        .desired_rows(4),
-                );
-                if self.focus_instruction {
-                    edit.request_focus();
-                    self.focus_instruction = false;
-                }
-                if edit.changed() {
-                    self.history_cursor = None;
-                }
-                if !self.notice.is_empty() {
-                    ui.small(&self.notice);
-                }
-                let has_text = !self.instruction.trim().is_empty();
-                ui.horizontal(|ui| {
-                    run = ui
-                        .add_enabled(has_text, egui::Button::new("Replace selection"))
-                        .clicked();
-                    save = ui
-                        .add_enabled(has_text, egui::Button::new("Save as command…"))
-                        .clicked();
-                    dismiss = ui.button("Cancel").clicked();
-                });
-                run |= has_text
-                    && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
-                ui.small("⌘Enter to run · ↑ recalls recent instructions");
-            }
             UiPhase::Confirm => {
                 ui.heading("Confirm replacement");
                 if self.needs_secret_warn() {
@@ -1828,22 +1814,16 @@ impl eframe::App for ServeApp {
                 ui.label(message);
                 dismiss = ui.button("Close").clicked();
             }
-            UiPhase::Hidden | UiPhase::Restoring { .. } | UiPhase::Review { .. } => {}
+            UiPhase::Hidden
+            | UiPhase::Instruction
+            | UiPhase::Restoring { .. }
+            | UiPhase::Review { .. } => {}
         }
         if dismiss {
             self.hide(&ctx);
             return;
         }
-        if save {
-            self.save_instruction();
-        }
-        let result = if run {
-            self.prepare_command(
-                &ctx,
-                adhoc_command(&self.instruction),
-                CommandOrigin::Instruction,
-            )
-        } else if confirm {
+        let result = if confirm {
             self.soft_warn_acked = true;
             self.secret_guard_acked = true;
             self.replace_warn_acked = true;
@@ -2038,10 +2018,10 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::{
-        adhoc_command, can_cancel, command_from_instruction, format_thousands, history_step,
-        instruction_label, place_near, push_history, remove_pidfile, replace_progress,
-        secret_banner, selected_text, should_apply_job, slugify, unique_command_id,
-        validate_shortcut_recording_request, write_pidfile, ShortcutRecordingLease, HISTORY_CAP,
+        adhoc_command, can_cancel, command_from_instruction, format_thousands, instruction_label,
+        place_near, push_history, remove_pidfile, replace_progress, secret_banner, selected_text,
+        should_apply_job, slugify, unique_command_id, validate_shortcut_recording_request,
+        write_pidfile, ShortcutRecordingLease, HISTORY_CAP,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -2418,18 +2398,6 @@ mod tests {
         assert_eq!(h.len(), HISTORY_CAP);
         assert_eq!(h.front().map(String::as_str), Some("n19"));
         assert_eq!(h.back().map(String::as_str), Some("n10"));
-    }
-
-    #[test]
-    fn history_step_walks_back_from_the_empty_box_and_forward_to_it() {
-        assert_eq!(history_step(None, 0, 1), None);
-        assert_eq!(history_step(None, 3, 1), Some(0));
-        assert_eq!(history_step(Some(0), 3, 1), Some(1));
-        assert_eq!(history_step(Some(2), 3, 1), Some(2));
-        assert_eq!(history_step(Some(2), 3, -1), Some(1));
-        assert_eq!(history_step(Some(0), 3, -1), None);
-        assert_eq!(history_step(None, 3, -1), None);
-        assert_eq!(history_step(Some(1), 3, 0), Some(1));
     }
 
     #[test]

@@ -9,6 +9,8 @@ use selara_core::secrets;
 use selara_core::usage;
 
 #[cfg(target_os = "macos")]
+mod instruction;
+#[cfg(target_os = "macos")]
 mod progress;
 mod review;
 #[cfg(target_os = "macos")]
