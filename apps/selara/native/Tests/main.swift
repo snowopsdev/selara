@@ -53,12 +53,94 @@ func checkWorkingOrbGeometry() {
     print("Working orb geometry matches upstream golden samples")
 }
 
+/// Ink Sweep plausibility (orb fallback decision), coordinate conversion,
+/// overlay placement, and the review payload. Pure: no windows.
+func checkOverlayGeometry() {
+    let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
+    let element = NSRect(x: 100, y: 300, width: 600, height: 300)
+    let line1 = NSRect(x: 120, y: 500, width: 520, height: 18)
+    let line2 = NSRect(x: 120, y: 482, width: 300, height: 18)
+    func decide(_ lines: [NSRect], count: Int? = nil, element: NSRect? = element,
+                web: Bool = false) -> SweepGeometry {
+        SelectionGeometry.decide(lines: lines, lineCount: count ?? lines.count, element: element,
+                                 screens: [screen], isWebArea: web)
+    }
+    expect(decide([line2, line1]) == .lines([line1, line2]), "plausible lines are kept, top line first")
+    expect(decide([line1, NSRect(x: 640, y: 500, width: 0, height: 18), line2]) == .lines([line1, line2]),
+           "zero-width line-break fragments are skipped")
+    expect(decide([]) == .fallback(.noBounds), "no bounds falls back to the orb")
+    expect(decide([line1], web: true) == .fallback(.webArea), "web areas misreport bounds")
+    expect(decide([line1], count: 13) == .fallback(.tooManyLines), "more than 12 lines falls back")
+    expect(decide(Array(repeating: line1, count: 12)) == .lines(Array(repeating: line1, count: 12)), "12 lines still sweep")
+    expect(decide([NSRect(x: 120, y: 500, width: 0, height: 0)]) == .fallback(.emptyRect), "zero size falls back")
+    expect(decide([NSRect(x: 120, y: 500, width: 0, height: 18)]) == .fallback(.emptyRect), "only line breaks falls back")
+    expect(decide([NSRect(x: 120, y: 500, width: -4, height: 18)]) == .fallback(.emptyRect), "negative size falls back")
+    expect(decide([NSRect(x: CGFloat.nan, y: 500, width: 40, height: 18)]) == .fallback(.notFinite), "NaN falls back")
+    expect(decide([NSRect(x: 120, y: 300, width: 500, height: 280)], element: nil) == .fallback(.tooTall),
+           "a whole-element rect is not a line")
+    expect(decide([NSRect(x: 50, y: 500, width: 900, height: 18)]) == .fallback(.largerThanElement),
+           "bounds wider than the focused element fall back")
+    expect(decide([NSRect(x: 900, y: 100, width: 100, height: 18)]) == .fallback(.largerThanElement),
+           "bounds outside the focused element fall back")
+    expect(decide([NSRect(x: 2000, y: 500, width: 100, height: 18)], element: nil) == .fallback(.offScreen),
+           "bounds off every screen fall back")
+    expect(decide([line1], element: nil) == .lines([line1]), "element frame is optional")
+    expect(SelectionGeometry.appKitRect(CGRect(x: 10, y: 100, width: 50, height: 20), primaryMaxY: 900)
+           == NSRect(x: 10, y: 780, width: 50, height: 20), "AX top-left converts to AppKit bottom-left")
+
+    let visible = NSRect(x: 0, y: 0, width: 1440, height: 875)
+    let chip = NSSize(width: 160, height: 21)
+    expect(SelectionGeometry.chipOrigin(size: chip, lines: [line1, line2], visible: visible) == NSPoint(x: 120, y: 522),
+           "chip sits 4 pt above the first line, left-aligned")
+    let topLine = NSRect(x: 120, y: 860, width: 300, height: 15)
+    expect(SelectionGeometry.chipOrigin(size: chip, lines: [topLine], visible: visible) == NSPoint(x: 120, y: 835),
+           "chip flips below near the top of the display")
+    expect(SelectionGeometry.chipOrigin(size: chip, lines: [NSRect(x: 1400, y: 500, width: 30, height: 18)], visible: visible).x
+           == 1280, "chip stays on screen at the right edge")
+    let hint = NSSize(width: 170, height: 21)
+    expect(SelectionGeometry.hintOrigin(size: hint, lines: [line1, line2], visible: visible) == NSPoint(x: 250, y: 455),
+           "receipt ends where the replaced text ends, below it")
+    expect(SelectionGeometry.hintOrigin(size: hint, lines: [NSRect(x: 120, y: 10, width: 40, height: 18)], visible: visible)
+           == NSPoint(x: 120, y: 34), "receipt flips above near the bottom")
+
+    let card = NSSize(width: 470, height: 130)
+    let below = SelectionGeometry.cardPlacement(size: card, anchor: line1.union(line2), pointX: 150, visible: visible)
+    expect(below.below && below.origin == NSPoint(x: 104, y: 348) && below.arrowX == 46,
+           "card sits below the selection with its arrow at the first line: \(below)")
+    let low = NSRect(x: 600, y: 60, width: 300, height: 36)
+    let above = SelectionGeometry.cardPlacement(size: card, anchor: low, pointX: 630, visible: visible)
+    expect(!above.below && above.origin.y == 100, "card flips above when there is no room below: \(above)")
+    let edge = SelectionGeometry.cardPlacement(size: card, anchor: NSRect(x: 1380, y: 500, width: 50, height: 18),
+                                               pointX: 1400, visible: visible)
+    expect(edge.origin.x == 962 && edge.arrowX == 438, "card clamps to the screen and its arrow follows: \(edge)")
+
+    let json = #"{"segments":[{"op":"delete","text":"Hello"},{"op":"insert","text":"Hi"},{"op":"equal","text":" world"}],"delta":-3,"result":"Hi world"}"#
+    let payload = DiffPayload.decode(json)
+    expect(payload?.segments.count == 3 && payload?.segments[0].op == .delete && payload?.result == "Hi world",
+           "review payload decodes")
+    expect(payload?.deltaLabel == "−3 chars", "negative delta label")
+    expect(DiffPayload(segments: [], delta: 1, result: "").deltaLabel == "+1 char", "positive singular delta label")
+    expect(DiffPayload(segments: [], delta: 0, result: "").deltaLabel == "Same length", "unchanged length label")
+    expect(DiffPayload.decode("{") == nil, "invalid payload is rejected")
+    expect(Motion.micro == 0.12 && Motion.panel == 0.24 && Motion.spring == 0.42 && Motion.stagger == 0.038
+           && Motion.hold == 1.8 && Motion.instant == 0, "motion tokens match the contract")
+    print("Overlay geometry, fallback decisions, placement, and payload checks passed")
+}
+
 checkWorkingOrbGeometry()
+checkOverlayGeometry()
 if CommandLine.arguments.contains("--geometry-only") { exit(0) }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-let sourcePID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+/// Selara's panels must never make this process the frontmost app (what the
+/// service checks before replacing). Compare against our own pid rather than
+/// the app frontmost at launch: on a shared desktop the user may switch apps
+/// while the test runs. A key non-activating panel can set `NSApp.isActive`
+/// without taking the menu bar or frontmost status, so that is not checked.
+func notActivated() -> Bool {
+    NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier
+}
 /// Processes AppKit events for the requested test interval.
 func pump(_ seconds: TimeInterval) {
     let until = Date().addingTimeInterval(seconds)
@@ -104,7 +186,7 @@ expect(shown.frame.size == NSSize(width: 48, height: 48))
 expect(!shown.isOpaque && shown.backgroundColor == .clear && !shown.hasShadow)
 expect(!shown.contentView!.subviews.contains { $0 is NSTextField }, "no labels should overlap the document")
 expect(!shown.canBecomeKey && !shown.canBecomeMain)
-expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == sourcePID, "progress stole focus")
+expect(notActivated(), "progress stole focus")
 let cancel = findButton(shown.contentView)!
 expect(cancel.image == nil, "cancel affordance should be quiet until hovered")
 let originalPointer = NSEvent.mouseLocation
@@ -156,5 +238,175 @@ pump(0.23)
 progressDestroy(other)
 pump(0.4)
 expect(visiblePanel() == nil, "destroy during fade must dismiss safely")
-expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == sourcePID, "animation changed foreground app")
+expect(notActivated(), "animation changed foreground app")
+
+// MARK: Ink Sweep lifecycle
+/// Visible windows with the given title.
+func windows(_ title: String) -> [NSWindow] { app.windows.filter { $0.title == title && $0.isVisible } }
+let visibleArea = NSScreen.screens[0].visibleFrame
+let sampleLines = [
+    NSRect(x: visibleArea.midX - 260, y: visibleArea.midY + 20, width: 520, height: 18),
+    NSRect(x: visibleArea.midX - 260, y: visibleArea.midY + 2, width: 300, height: 18),
+]
+let sampleElement = NSRect(x: visibleArea.midX - 300, y: visibleArea.midY - 200, width: 600, height: 400)
+let sweepHandle = progressCreate()
+let sweepController = progressController(sweepHandle)
+sweepController.injectCapture(lines: sampleLines, element: sampleElement)
+show(sweepHandle, "Concise")
+progressSucceed(sweepHandle)
+pump(0.4)
+expect(windows("Selara Sweep").isEmpty && windows("Selara Chip").isEmpty && windows("Selara Afterglow").isEmpty,
+       "fast sweep commands must not flash")
+show(sweepHandle, "Concise")
+pump(0.1)
+expect(windows("Selara Chip").isEmpty, "sweep waits for the fast-command delay")
+pump(0.3)
+let highlight = windows("Selara Sweep")
+let chipWindow = windows("Selara Chip").first
+expect(highlight.count == 1, "one highlight panel per display")
+expect(chipWindow != nil, "chip names the command")
+expect(visiblePanel() == nil, "the orb is not shown when line bounds are plausible")
+expect(highlight.allSatisfy { $0.ignoresMouseEvents && !$0.canBecomeKey && !$0.isOpaque }, "highlight is click-through")
+expect(chipWindow.map { !$0.canBecomeKey && !$0.canBecomeMain && !$0.ignoresMouseEvents } == true,
+       "chip takes clicks but never focus")
+expect(chipWindow.map { $0.frame.minY >= sampleLines[0].maxY } == true, "chip sits above the first line")
+expect(highlight.first.map { $0.frame.contains(sampleLines[0]) && $0.frame.contains(sampleLines[1]) } == true,
+       "highlight covers every selected line")
+expect(notActivated(), "sweep stole focus")
+let shimmering = highlight.first?.contentView?.layer?.sublayers?.contains { line in
+    line.sublayers?.contains { $0.animation(forKey: "shimmer") != nil } == true
+} == true
+expect(shimmering, "the highlight shimmers while working")
+let chipButton = findButton(chipWindow?.contentView)!
+let chipCenter = NSPoint(x: chipWindow!.frame.midX, y: chipWindow!.frame.midY)
+mouse(.mouseMoved, chipCenter)
+pump(0.15)
+mouse(.leftMouseDown, chipCenter)
+mouse(.leftMouseUp, chipCenter)
+pump(0.15)
+mouse(.mouseMoved, originalPointer)
+expect(chipButton.accessibilityLabel()?.contains("Cancel") == true, "chip cancel is accessible")
+expect(progressTakeCancelled(sweepHandle), "clicking the chip cancels like the orb")
+expect(windows("Selara Chip").isEmpty && windows("Selara Sweep").isEmpty, "cancel hides the sweep")
+show(sweepHandle, "Concise")
+pump(0.4)
+progressSucceedRange(sweepHandle, -1, -1)
+pump(0.2)
+expect(windows("Selara Sweep").isEmpty && windows("Selara Chip").isEmpty, "success ends the working sweep")
+expect(windows("Selara Afterglow").count == 1, "success shows the afterglow")
+expect(windows("Selara Receipt").count == 1, "success shows the undo receipt")
+show(sweepHandle, "Next")
+pump(0.05)
+expect(windows("Selara Afterglow").isEmpty && windows("Selara Receipt").isEmpty, "a new run clears old receipts")
+pump(0.4)
+expect(windows("Selara Chip").count == 1, "old afterglow callbacks must not hide a new run")
+progressSucceedRange(sweepHandle, -1, -1)
+pump(2.4)
+expect(windows("Selara Afterglow").isEmpty && windows("Selara Receipt").isEmpty, "afterglow and receipt fade away")
+Motion.forceReduceMotion = true
+show(sweepHandle, "Concise")
+pump(0.4)
+let still = windows("Selara Sweep").first?.contentView?.layer?.sublayers?.contains { line in
+    line.sublayers?.contains { $0.animation(forKey: "shimmer") != nil } == true
+} == true
+expect(!still && windows("Selara Sweep").count == 1, "Reduce Motion keeps a static tint without shimmer")
+progressHide(sweepHandle)
+Motion.forceReduceMotion = false
+sweepController.injectCapture(lines: [NSRect(x: 100, y: 300, width: 0, height: 0)], element: nil)
+show(sweepHandle, "Concise")
+pump(0.4)
+expect(visiblePanel() != nil && windows("Selara Sweep").isEmpty, "implausible bounds fall back to the orb")
+progressHide(sweepHandle)
+
+// MARK: Ghost Diff review card
+sweepController.injectCapture(lines: sampleLines, element: sampleElement)
+let savedPasteboard = NSPasteboard.general.string(forType: .string)
+/// Sends a key press to a window the way AppKit would.
+func press(_ window: NSWindow, _ keyCode: UInt16, _ characters: String, _ flags: NSEvent.ModifierFlags = []) {
+    let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                                 windowNumber: window.windowNumber, context: nil, characters: characters,
+                                 charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode)!
+    if flags.contains(.command) { _ = window.performKeyEquivalent(with: event) } else { window.sendEvent(event) }
+}
+func showReview(_ title: String = "Concise", _ model: String = "gpt-5.4-mini") {
+    title.withCString { t in model.withCString { m in progressShowReview(sweepHandle, t, m) } }
+}
+func reviewResult(_ json: String) -> Bool { json.withCString { progressReviewResult(sweepHandle, $0) } }
+let reviewJSON = #"{"segments":[{"op":"delete","text":"I just wanted to check whether you had"},{"op":"insert","text":"Did you get"},{"op":"equal","text":" a chance to review it"},{"op":"delete","text":"."},{"op":"insert","text":"?"}],"delta":-14,"result":"Did you get a chance to review it?"}"#
+showReview()
+pump(0.1)
+expect(windows("Selara Review").isEmpty, "the card waits for the fast-command delay")
+pump(0.3)
+let card = windows("Selara Review").first
+expect(card != nil, "review commands show the card")
+expect(windows("Selara Sweep").isEmpty && visiblePanel() == nil, "review replaces the sweep and orb")
+expect(card.map { !$0.isKeyWindow } == true, "the skeleton never takes focus")
+expect(card.map { $0.frame.maxY <= sampleLines[1].minY } == true, "card sits below the selection")
+expect(card.map { abs($0.frame.width - 470) < 0.5 } == true, "card is 470 pt wide")
+expect(progressTakeReviewAction(sweepHandle) == 0, "no action yet")
+press(card!, 36, "\r")
+expect(progressTakeReviewAction(sweepHandle) == 0, "↩ before the result does nothing")
+expect(reviewResult(reviewJSON), "result renders as a diff")
+pump(0.1)
+expect(card!.isKeyWindow, "the diff card becomes key to receive ↩ ⇥ ⌘C esc")
+expect(notActivated(), "the key card must not activate Selara")
+press(card!, 48, "\t")
+expect(progressTakeReviewAction(sweepHandle) == 2, "⇥ asks for another take")
+expect(card!.isVisible && !card!.isKeyWindow, "another take keeps the card without focus")
+showReview()
+pump(0.05)
+expect(sweepController.card.state == .skeleton && card!.isVisible, "another take shows the skeleton immediately")
+expect(reviewResult(reviewJSON))
+pump(0.1)
+press(card!, 8, "c", .command)
+expect(progressTakeReviewAction(sweepHandle) == 3, "⌘C copies")
+expect(NSPasteboard.general.string(forType: .string) == "Did you get a chance to review it?", "⌘C puts the result on the pasteboard")
+progressCloseReview(sweepHandle, true)
+pump(0.3)
+expect(windows("Selara Review").isEmpty, "closing hides the card")
+expect(windows("Selara Receipt").count == 1, "copy leaves a Copied receipt")
+showReview()
+pump(0.4)
+expect(reviewResult(reviewJSON))
+pump(0.1)
+press(windows("Selara Review").first!, 53, "\u{1b}")
+expect(progressTakeReviewAction(sweepHandle) == 4, "esc discards")
+progressCloseReview(sweepHandle, false)
+pump(0.3)
+showReview()
+pump(0.4)
+expect(reviewResult(reviewJSON))
+pump(0.1)
+windows("Selara Review").first!.resignKey()
+expect(progressTakeReviewAction(sweepHandle) == 5, "losing focus dismisses the card")
+progressCloseReview(sweepHandle, false)
+pump(0.3)
+showReview()
+pump(0.4)
+expect(reviewResult(reviewJSON))
+pump(0.1)
+press(windows("Selara Review").first!, 36, "\r")
+expect(progressTakeReviewAction(sweepHandle) == 1, "↩ accepts")
+pump(0.05)
+expect(windows("Selara Review").isEmpty, "accept hands focus back by hiding the card at once")
+progressSucceedRange(sweepHandle, -1, -1)
+pump(0.2)
+expect(windows("Selara Afterglow").count == 1 && windows("Selara Receipt").count == 1,
+       "accepted review ends with the afterglow and undo receipt")
+progressHide(sweepHandle)
+sweepController.injectCapture(lines: [], element: nil)
+showReview()
+pump(0.4)
+expect(windows("Selara Review").count == 1, "the card still anchors without line bounds")
+progressHide(sweepHandle)
+pump(0.1)
+expect(windows("Selara Review").isEmpty, "hide closes the card")
+expect(!reviewResult(reviewJSON), "a closed card ignores late results")
+progressDestroy(sweepHandle)
+if let savedPasteboard {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(savedPasteboard, forType: .string)
+}
+expect(notActivated(), "overlays changed the foreground app")
 print("PASS: native progress size, focus, fast completion, cancellation, success, overlapping runs, and destruction")
+print("PASS: ink sweep, orb fallback, reduce motion, review card keys, focus, copy, and dismissal")

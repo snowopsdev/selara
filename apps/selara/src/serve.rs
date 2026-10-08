@@ -28,6 +28,8 @@ use selara_platform::macos::{
 };
 use selara_platform::SelectionService;
 
+use crate::review::{self, ReviewAction, ReviewStep};
+
 const DIALOG_SIZE: (f32, f32) = (400.0, 280.0);
 const CURSOR_OFFSET: f64 = 12.0;
 const SHORTCUT_RECORDING_LEASE: Duration = Duration::from_secs(3);
@@ -363,21 +365,73 @@ fn apply_verified_replacement(
     })
 }
 
+/// After ↩ in the review card, let key focus settle back in the source app
+/// before the verified replacement posts ⌘V there.
+const REVIEW_FOCUS_SETTLE: Duration = Duration::from_millis(80);
+
 enum UiPhase {
     Hidden,
     Instruction,
     Confirm,
-    Working { label: String, partial: String },
-    Restoring { text: String, deadline: Instant },
-    Error { message: String },
+    Working {
+        label: String,
+        partial: String,
+    },
+    /// Waiting for the source app to be frontmost (and, after a review
+    /// accept, for `not_before`) before replacing.
+    Restoring {
+        text: String,
+        deadline: Instant,
+        not_before: Instant,
+    },
+    /// A review command's result is on screen in the Ghost Diff card.
+    Review {
+        result: String,
+    },
+    Error {
+        message: String,
+    },
 }
 impl UiPhase {
     fn is_active(&self) -> bool {
         matches!(
             self,
-            Self::Instruction | Self::Confirm | Self::Working { .. } | Self::Restoring { .. }
+            Self::Instruction
+                | Self::Confirm
+                | Self::Working { .. }
+                | Self::Restoring { .. }
+                | Self::Review { .. }
         )
     }
+}
+
+/// How a run ends, for the native feedback and History.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunEnd {
+    /// Verified replacement; the new text's AX range when known.
+    Replaced(Option<(i64, i64)>),
+    /// Cancelled, failed, or superseded: hide everything now.
+    Hidden,
+    /// The review card was dismissed without replacing.
+    ReviewClosed { copied: bool },
+}
+
+/// A review result still on screen when its run ends without replacement.
+/// It was paid for and may be wanted later, so it goes to History.
+fn take_unapplied_review(phase: &mut UiPhase) -> Option<String> {
+    match std::mem::replace(phase, UiPhase::Hidden) {
+        UiPhase::Review { result } => Some(result),
+        other => {
+            *phase = other;
+            None
+        }
+    }
+}
+
+/// AX range of the text that replaced a `captured` selection, for the
+/// afterglow: same start, length in UTF-16 units like the AX API.
+fn replaced_range(captured: Option<(i64, i64)>, text: &str) -> Option<(i64, i64)> {
+    captured.map(|(location, _)| (location, text.encode_utf16().count() as i64))
 }
 #[derive(Default)]
 struct WorkGate {
@@ -1107,16 +1161,19 @@ impl ServeApp {
     }
 
     fn hide(&mut self, ctx: &egui::Context) {
-        self.finish_run(ctx, false);
+        self.finish_run(ctx, RunEnd::Hidden);
     }
 
-    fn finish_run(&mut self, ctx: &egui::Context, succeeded: bool) {
+    fn finish_run(&mut self, ctx: &egui::Context, end: RunEnd) {
         self.cancel_active_job();
         self.generation += 1;
-        if succeeded {
-            self.progress.succeed();
-        } else {
-            self.progress.hide();
+        if let Some(result) = take_unapplied_review(&mut self.phase) {
+            self.record_history(&result, ReplacementOutcome::NotApplied);
+        }
+        match end {
+            RunEnd::Replaced(range) => self.progress.succeed(range),
+            RunEnd::Hidden => self.progress.hide(),
+            RunEnd::ReviewClosed { copied } => self.progress.close_review(copied),
         }
         self.pending_direct = None;
         self.phase = UiPhase::Hidden;
@@ -1313,7 +1370,12 @@ impl ServeApp {
             tracing::warn!("Escape could not be registered; use Cancel: {e}");
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        self.progress.show(&command.label);
+        if command.review {
+            let model = self.request_config.effective_model(&command);
+            self.progress.show_review(&command.label, model);
+        } else {
+            self.progress.show(&command.label);
+        }
         let cfg = self.request_config.clone();
         let input = self.captured_text.clone();
         let app_name = self.captured_app.clone();
@@ -1373,10 +1435,85 @@ impl ServeApp {
                         ctx,
                         "The provider returned no text. Your selection was not changed.".into(),
                     );
+                } else if self.last_command.as_ref().is_some_and(|c| c.review) {
+                    self.present_review(ctx, text);
                 } else {
                     self.apply_completed_rewrite(ctx, text);
                 }
             }
+        }
+    }
+
+    /// Review commands: show the diff and wait for ↩ instead of replacing.
+    /// The card takes key focus, so check first that the source selection is
+    /// still the one we captured; otherwise keep the result in History.
+    fn present_review(&mut self, ctx: &egui::Context, text: String) {
+        if let Err(error) = self.selection.validate_captured_selection(
+            self.target_pid,
+            &self.captured_text,
+            self.captured_range,
+        ) {
+            self.finish_unapplied_rewrite(
+                ctx,
+                PendingReplacement {
+                    text,
+                    message: format!("The selection changed before review. {error:#}"),
+                    outcome: ReplacementOutcome::NotApplied,
+                },
+            );
+            return;
+        }
+        let payload = review::diff_payload(&self.captured_text, &text);
+        self.phase = UiPhase::Review { result: text };
+        if !self.progress.review_result(&payload) {
+            // The card went away between frames; keep the result.
+            self.hide(ctx);
+        }
+    }
+
+    /// One key or click from the review card, or Esc from the global hotkey.
+    fn handle_review_action(&mut self, ctx: &egui::Context, action: ReviewAction) {
+        let reviewing = self.last_command.as_ref().is_some_and(|c| c.review);
+        let result = match &self.phase {
+            UiPhase::Review { result } => Some(result.as_str()),
+            UiPhase::Working { .. } if reviewing => None,
+            _ => return,
+        };
+        match review::review_step(result, action) {
+            ReviewStep::Ignore => {}
+            ReviewStep::Replace(text) => {
+                // Swift already ordered the card out, returning key focus to
+                // the source. Replace through the same verified path as runs
+                // without review (same History outcome and success feedback).
+                let now = Instant::now();
+                self.phase = UiPhase::Restoring {
+                    text,
+                    deadline: now + Duration::from_secs(2),
+                    not_before: now + REVIEW_FOCUS_SETTLE,
+                };
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+            ReviewStep::Rerun => self.rerun_review(ctx),
+            ReviewStep::Close { copied } => self.finish_run(ctx, RunEnd::ReviewClosed { copied }),
+        }
+    }
+
+    /// ⇥ Another take: run the same command on the same selection as a new
+    /// generation. The card shows its skeleton again.
+    fn rerun_review(&mut self, ctx: &egui::Context) {
+        let Some(previous) = take_unapplied_review(&mut self.phase) else {
+            return;
+        };
+        let Some(command) = self.last_command.clone() else {
+            self.record_history(&previous, ReplacementOutcome::NotApplied);
+            self.hide(ctx);
+            return;
+        };
+        self.generation += 1;
+        if let Err(message) = self.start_command(ctx, command, CommandOrigin::Configured) {
+            // Keep the take the user already had.
+            self.record_history(&previous, ReplacementOutcome::NotApplied);
+            self.fail(ctx, message);
         }
     }
 
@@ -1386,9 +1523,11 @@ impl ServeApp {
             // Do not block AppKit while waiting for the source to activate.
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             let _ = self.hotkey.set_cancel_enabled(true);
+            let now = Instant::now();
             self.phase = UiPhase::Restoring {
                 text,
-                deadline: Instant::now() + Duration::from_secs(2),
+                deadline: now + Duration::from_secs(2),
+                not_before: now,
             };
             if let Some(pid) = self.target_pid {
                 let _ = request_activate_pid(pid);
@@ -1417,7 +1556,8 @@ impl ServeApp {
         match result {
             Ok(()) => {
                 self.record_history(&text, ReplacementOutcome::Applied);
-                self.finish_run(ctx, true);
+                let range = replaced_range(self.captured_range, &text);
+                self.finish_run(ctx, RunEnd::Replaced(range));
             }
             Err(pending) => {
                 self.finish_unapplied_rewrite(ctx, pending);
@@ -1466,12 +1606,18 @@ impl eframe::App for ServeApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if matches!(
             self.phase,
-            UiPhase::Hidden | UiPhase::Working { .. } | UiPhase::Restoring { .. }
+            UiPhase::Hidden
+                | UiPhase::Working { .. }
+                | UiPhase::Restoring { .. }
+                | UiPhase::Review { .. }
         ) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         if self.progress.take_cancelled() {
             self.hide(ctx);
+        }
+        if let Some(action) = self.progress.take_review_action() {
+            self.handle_review_action(ctx, action);
         }
         self.hotkey.poll();
         self.poll_config();
@@ -1494,7 +1640,11 @@ impl eframe::App for ServeApp {
                     HotkeyAction::CustomInstruction => self.begin_run(ctx, None, None),
                     HotkeyAction::Command(id) => self.begin_run(ctx, Some(&id), None),
                     HotkeyAction::Cancel => {
-                        self.hide(ctx);
+                        if matches!(self.phase, UiPhase::Review { .. }) {
+                            self.handle_review_action(ctx, ReviewAction::Discard);
+                        } else {
+                            self.hide(ctx);
+                        }
                         Ok(())
                     }
                 };
@@ -1504,9 +1654,15 @@ impl eframe::App for ServeApp {
             }
         }
         if !self.gate.quiescing {
-            if let UiPhase::Restoring { deadline, .. } = &self.phase {
+            if let UiPhase::Restoring {
+                deadline,
+                not_before,
+                ..
+            } = &self.phase
+            {
+                let now = Instant::now();
                 let restored = frontmost_pid() == self.target_pid && self.target_pid.is_some();
-                if restored || Instant::now() >= *deadline {
+                if now >= *not_before && (restored || now >= *deadline) {
                     if let UiPhase::Restoring { text, .. } =
                         std::mem::replace(&mut self.phase, UiPhase::Hidden)
                     {
@@ -1554,7 +1710,7 @@ impl eframe::App for ServeApp {
                 SHORTCUT_RECORDING_REPAINT
             } else if matches!(self.phase, UiPhase::Restoring { .. }) {
                 Duration::from_millis(16)
-            } else if matches!(self.phase, UiPhase::Working { .. }) {
+            } else if matches!(self.phase, UiPhase::Working { .. } | UiPhase::Review { .. }) {
                 Duration::from_millis(50)
             } else {
                 Duration::from_secs(1)
@@ -1563,7 +1719,11 @@ impl eframe::App for ServeApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.gate.quiescing || matches!(self.phase, UiPhase::Hidden | UiPhase::Restoring { .. })
+        if self.gate.quiescing
+            || matches!(
+                self.phase,
+                UiPhase::Hidden | UiPhase::Restoring { .. } | UiPhase::Review { .. }
+            )
         {
             return;
         }
@@ -1668,7 +1828,7 @@ impl eframe::App for ServeApp {
                 ui.label(message);
                 dismiss = ui.button("Close").clicked();
             }
-            UiPhase::Hidden | UiPhase::Restoring { .. } => {}
+            UiPhase::Hidden | UiPhase::Restoring { .. } | UiPhase::Review { .. } => {}
         }
         if dismiss {
             self.hide(&ctx);
@@ -1970,6 +2130,52 @@ mod tests {
         )
         .is_ok());
         assert_eq!(pasted, "Completed rewrite");
+    }
+
+    #[test]
+    fn closing_a_review_keeps_only_an_on_screen_result() {
+        use super::{take_unapplied_review, UiPhase};
+        let mut phase = UiPhase::Review {
+            result: "Did you get a chance?".into(),
+        };
+        assert_eq!(
+            take_unapplied_review(&mut phase).as_deref(),
+            Some("Did you get a chance?")
+        );
+        assert!(matches!(phase, UiPhase::Hidden));
+        assert_eq!(take_unapplied_review(&mut phase), None);
+
+        // Skeleton (still working) and accepted (restoring) runs have nothing
+        // to keep here: the job is cancelled, or the replace path records it.
+        let mut working = UiPhase::Working {
+            label: "Concise".into(),
+            partial: String::new(),
+        };
+        assert_eq!(take_unapplied_review(&mut working), None);
+        assert!(matches!(working, UiPhase::Working { .. }));
+        let now = Instant::now();
+        let mut restoring = UiPhase::Restoring {
+            text: "Accepted".into(),
+            deadline: now,
+            not_before: now,
+        };
+        assert_eq!(take_unapplied_review(&mut restoring), None);
+        assert!(matches!(restoring, UiPhase::Restoring { .. }));
+    }
+
+    #[test]
+    fn review_phases_count_as_active_work() {
+        use super::UiPhase;
+        assert!(UiPhase::Review { result: "x".into() }.is_active());
+        assert!(!UiPhase::Hidden.is_active());
+    }
+
+    #[test]
+    fn replaced_range_counts_utf16_units_from_the_captured_start() {
+        use super::replaced_range;
+        assert_eq!(replaced_range(Some((12, 129)), "Short."), Some((12, 6)));
+        assert_eq!(replaced_range(Some((0, 3)), "a😀b"), Some((0, 4)));
+        assert_eq!(replaced_range(None, "text"), None);
     }
 
     #[test]
