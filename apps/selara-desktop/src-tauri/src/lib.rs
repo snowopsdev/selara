@@ -1779,6 +1779,11 @@ async fn try_command(
     text: String,
     model: Option<String>,
 ) -> Result<try_run::TryResult, String> {
+    // A ChatGPT-backed try would start the Codex runtime while an account
+    // change or update is replacing it, like the other app-server commands.
+    if MAINTENANCE.load(Ordering::SeqCst) {
+        return Err("An account change or update is in progress".into());
+    }
     try_run::run(prompt, text, model).await
 }
 
