@@ -12,11 +12,15 @@ test("collect native-feel metrics", async ({ page }, testInfo) => {
     await showSection(page, name);
     perSection[name] = await page.evaluate(collectVisible);
   }
+  // The command sheet became an inline editor; measure it with Advanced open.
   await showSection(page, "commands");
-  await page.locator("#cmd-new").click();
-  await expect(page.locator("#sheet-root [role=dialog]")).toBeVisible();
+  await page.locator("#cmd-advanced > summary").click();
   await settle(page);
-  perSection.commandSheet = await page.evaluate(collectVisible);
+  perSection.commandEditor = await page.evaluate(collectVisible);
+  await page.locator('.segmented[data-for="cmd-view"] .seg[data-value="grid"]').click();
+  await settle(page);
+  perSection.commandShelf = await page.evaluate(collectVisible);
+  await page.locator('.segmented[data-for="cmd-view"] .seg[data-value="list"]').click();
   const global = await page.evaluate(collectStylesheet);
 
   const report = { project: testInfo.project.name, generated: new Date().toISOString(), global, sections: perSection };

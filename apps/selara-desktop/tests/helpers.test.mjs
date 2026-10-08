@@ -16,6 +16,7 @@ const NAMES = [
   "escapeHtml", "escapeAttr", "num", "slug", "kindLabel",
   "maskEmail", "prettyHotkey", "commandMatches", "statusDotClass",
   "relativeTime", "previewLine",
+  "commandIdentity", "commandTileHtml", "hotkeyKeycaps", "wordDiff", "wordDiffHtml",
 ];
 
 function loadHelpers() {
@@ -177,4 +178,53 @@ test("previewLine collapses whitespace and truncates with an ellipsis", () => {
   assert.equal(H.previewLine("abcdefghij", 10), "abcdefghij");
   assert.equal(H.previewLine("abcdefghijk", 10), "abcdefghi\u2026");
   assert.equal(H.previewLine("abcd efghijk", 10), "abcd efgh\u2026");
+});
+
+test("commandIdentity uses the saved glyph and color", () => {
+  const id = H.commandIdentity({ id: "concise", label: "Concise", glyph: "\u2702\ufe0e", color: "#FF375F" });
+  assert.equal(id.glyph, "\u2702\ufe0e");
+  assert.equal(id.color, "#ff375f");
+  assert.equal(id.monogram, false);
+  assert.equal(id.derivedColor, false);
+});
+
+test("commandIdentity derives a monogram and a stable palette color", () => {
+  const a = H.commandIdentity({ id: "key_points", label: "key points" });
+  const again = H.commandIdentity({ id: "key_points", label: "Renamed" });
+  assert.equal(a.glyph, "K");
+  assert.equal(a.monogram, true);
+  assert.equal(a.derivedColor, true);
+  assert.match(a.color, /^#[0-9a-f]{6}$/);
+  assert.equal(again.color, a.color, "the color follows the id, not the label");
+  assert.equal(H.commandIdentity({ id: "x", label: "Fix", color: "red" }).derivedColor, true, "invalid colors fall back");
+  assert.equal(H.commandIdentity({}).glyph, "?");
+  const colors = new Set(["proofread", "rewrite", "friendly", "professional", "concise", "summary", "key_points", "table", "translate"].map((id) => H.commandIdentity({ id, label: id }).color));
+  assert.ok(colors.size >= 5, "built-in commands spread across the palette");
+});
+
+test("commandTileHtml and hotkeyKeycaps escape and split their input", () => {
+  assert.match(H.commandTileHtml({ id: "a", label: "<b>" }, "lg"), /class="glyph-tile lg" style="--tile:#[0-9a-f]{6}"[^>]*>&lt;<\/span>/);
+  assert.equal(H.hotkeyKeycaps("ctrl+shift+space"), '<span class="kcs"><span class="kc">\u2303</span><span class="kc">\u21e7</span><span class="kc">Space</span></span>');
+  assert.equal(H.hotkeyKeycaps(""), "");
+});
+
+// The helpers run in another realm; compare their arrays as plain data.
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
+test("wordDiff groups deletions before insertions around shared words", () => {
+  assert.deepEqual(plain(H.wordDiff("hey can u send the numbers asap", "Could you send the numbers when you have a moment?")), [
+    { type: "del", text: "hey can u" },
+    { type: "ins", text: "Could you" },
+    { type: "same", text: "send the numbers" },
+    { type: "del", text: "asap" },
+    { type: "ins", text: "when you have a moment?" },
+  ]);
+  assert.deepEqual(plain(H.wordDiff("same words", "same words")), [{ type: "same", text: "same words" }]);
+  assert.deepEqual(plain(H.wordDiff("", "new")), [{ type: "ins", text: "new" }]);
+});
+
+test("wordDiffHtml marks changes and falls back to the result for rewrites", () => {
+  assert.equal(H.wordDiffHtml("a <b> c", "a <i> c"), "a <del>&lt;b&gt;</del> <ins>&lt;i&gt;</ins> c");
+  assert.equal(H.wordDiffHtml("Merci beaucoup pour votre patience.", "Thank you very much for your patience."), "Thank you very much for your patience.");
+  assert.equal(H.wordDiffHtml("", "x"), "x");
 });

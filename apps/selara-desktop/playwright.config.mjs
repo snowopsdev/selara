@@ -5,7 +5,8 @@ import { defineConfig, devices } from "@playwright/test";
 // Sizes mirror the settings window in src-tauri/tauri.conf.json. The suite
 // serves the mock on its own port so it never reuses a `npm run dev` or
 // `tauri dev` server on 1420, which has no mock bridge.
-const PORT = 1430;
+// SELARA_E2E_PORT lets two checkouts run the suite at the same time.
+const PORT = Number(process.env.SELARA_E2E_PORT) || 1430;
 const sizes = { default: { width: 920, height: 640 }, min: { width: 760, height: 520 } };
 const schemes = ["light", "dark"];
 
