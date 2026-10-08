@@ -1156,6 +1156,12 @@ impl ServeApp {
             RunEnd::Hidden => self.progress.hide(),
             RunEnd::ReviewClosed { copied } => self.progress.close_review(copied),
         }
+        // Close the popover now rather than at the end of the frame: a
+        // command hotkey pressed while it is open reads the selection next,
+        // and the popover must no longer hold key focus when it does.
+        if self.popover.is_visible() {
+            self.popover.hide();
+        }
         self.pending_direct = None;
         self.phase = UiPhase::Hidden;
         let _ = self.hotkey.set_cancel_enabled(false);
