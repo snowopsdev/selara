@@ -19,7 +19,7 @@
     "@tauri-apps/plugin-shell": "^2"
   },
   "devDependencies": {
-    "@playwright/test": "1.63.0",
+    "@playwright/test": "1.65.0",
     "@tauri-apps/cli": "^2",
     "esbuild": "^0.28.2",
     "jsdom": "30.0.1",
